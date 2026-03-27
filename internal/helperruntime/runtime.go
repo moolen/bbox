@@ -54,13 +54,13 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.Logger = log.New(io.Discard, "", 0)
 	}
 
-	bridge := newBridge(cfg.Bridge, cfg.Logger)
-
 	listener, err := net.Listen("tcp", cfg.ProxyAddr)
 	if err != nil {
 		return fmt.Errorf("listen on proxy address %q: %w", cfg.ProxyAddr, err)
 	}
 	defer listener.Close()
+
+	bridge := newBridge(cfg.Bridge, cfg.Logger, listener.Addr().String())
 
 	server := &http.Server{
 		Handler: bridge.proxyHandler(),
@@ -84,15 +84,6 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	if err := bridge.send(helperproto.Envelope{
-		Ready: &helperproto.Ready{
-			ProtocolVersion: helperproto.ProtocolVersion,
-			ProxyAddr:       listener.Addr().String(),
-		},
-	}); err != nil {
-		return fmt.Errorf("send helper ready message: %w", err)
-	}
-
 	go func() {
 		errCh <- bridge.readLoop(ctx)
 	}()
@@ -109,24 +100,26 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 type bridge struct {
-	conn    io.ReadWriteCloser
-	enc     *gob.Encoder
-	dec     *gob.Decoder
-	logger  *log.Logger
-	sendMu  sync.Mutex
-	pending map[uint64]chan helperproto.Envelope
-	pendMu  sync.Mutex
-	nextID  atomic.Uint64
-	execMu  sync.Mutex
+	conn      io.ReadWriteCloser
+	enc       *gob.Encoder
+	dec       *gob.Decoder
+	logger    *log.Logger
+	proxyAddr string
+	sendMu    sync.Mutex
+	pending   map[uint64]chan helperproto.Envelope
+	pendMu    sync.Mutex
+	nextID    atomic.Uint64
+	execMu    sync.Mutex
 }
 
-func newBridge(conn io.ReadWriteCloser, logger *log.Logger) *bridge {
+func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
 	return &bridge{
-		conn:    conn,
-		enc:     gob.NewEncoder(conn),
-		dec:     gob.NewDecoder(conn),
-		logger:  logger,
-		pending: make(map[uint64]chan helperproto.Envelope),
+		conn:      conn,
+		enc:       gob.NewEncoder(conn),
+		dec:       gob.NewDecoder(conn),
+		logger:    logger,
+		proxyAddr: proxyAddr,
+		pending:   make(map[uint64]chan helperproto.Envelope),
 	}
 }
 
@@ -139,12 +132,7 @@ func (b *bridge) readLoop(ctx context.Context) error {
 
 		switch {
 		case env.Hello != nil:
-			if err := b.send(helperproto.Envelope{
-				ID: env.ID,
-				Ready: &helperproto.Ready{
-					ProtocolVersion: helperproto.ProtocolVersion,
-				},
-			}); err != nil {
+			if err := b.handleHello(env); err != nil {
 				return err
 			}
 		case env.ProxyResponse != nil:
@@ -152,9 +140,23 @@ func (b *bridge) readLoop(ctx context.Context) error {
 		case env.ExecRequest != nil:
 			go b.handleExec(ctx, env.ID, *env.ExecRequest)
 		default:
-			return fmt.Errorf("unsupported helper envelope kind %q", env.Kind())
+			b.logger.Printf("ignoring unsupported helper envelope kind %q", env.Kind())
 		}
 	}
+}
+
+func (b *bridge) handleHello(env helperproto.Envelope) error {
+	if env.Hello.ProtocolVersion != helperproto.ProtocolVersion {
+		return fmt.Errorf("unsupported protocol version %d", env.Hello.ProtocolVersion)
+	}
+
+	return b.send(helperproto.Envelope{
+		ID: env.ID,
+		Ready: &helperproto.Ready{
+			ProtocolVersion: helperproto.ProtocolVersion,
+			ProxyAddr:       b.proxyAddr,
+		},
+	})
 }
 
 func (b *bridge) proxyHandler() http.Handler {
