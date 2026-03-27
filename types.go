@@ -41,6 +41,7 @@ type NetworkPolicy struct {
 	DenyHostPatterns  []string
 	AllowHTTPMethods  []string
 	AllowConnect      bool
+	AllowConnectPorts []string
 }
 
 type ProxyManager struct {
