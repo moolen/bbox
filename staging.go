@@ -75,11 +75,16 @@ func runtimeFilesForBinary(binaryPath string) ([]string, error) {
 	return parseLddOutput(string(output)), nil
 }
 
-func stageSandboxRoot(opts SandboxOptions, helperBinary string) (string, error) {
-	root, err := os.MkdirTemp("", "bwrap-go-root-")
+func stageSandboxRoot(opts SandboxOptions, helperBinary string) (root string, err error) {
+	root, err = os.MkdirTemp("", "bwrap-go-root-")
 	if err != nil {
 		return "", fmt.Errorf("create sandbox root: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(root)
+		}
+	}()
 
 	helperHostPath, err := resolveBinary(helperBinary)
 	if err != nil {

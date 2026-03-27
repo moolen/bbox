@@ -7,6 +7,17 @@ import (
 	"strings"
 )
 
+var reservedSandboxTargets = []string{
+	"/app",
+	"/usr",
+	"/etc",
+	"/lib",
+	"/lib64",
+	"/proc",
+	"/dev",
+	"/tmp",
+}
+
 func validateMounts(mounts []Mount) error {
 	seen := make(map[string]Mount)
 	for _, m := range mounts {
@@ -21,6 +32,11 @@ func validateMounts(mounts []Mount) error {
 		}
 
 		target := filepath.Clean(m.Target)
+		for _, reservedTarget := range reservedSandboxTargets {
+			if targetsOverlap(target, reservedTarget) {
+				return fmt.Errorf("mount target %q overlaps reserved sandbox path %q", m.Target, reservedTarget)
+			}
+		}
 		if prev, ok := seen[target]; ok {
 			return fmt.Errorf("mount target %q conflicts with %q", m.Target, prev.Source)
 		}
@@ -35,7 +51,12 @@ func validateMounts(mounts []Mount) error {
 }
 
 func targetsOverlap(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
 	if a == b {
+		return true
+	}
+	if a == "/" || b == "/" {
 		return true
 	}
 	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
