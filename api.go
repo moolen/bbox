@@ -8,7 +8,11 @@ type compiledPolicy struct {
 }
 
 func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
-	return &ProxyManager{}, nil
+	policy, err := compilePolicy(opts.NetworkPolicy)
+	if err != nil {
+		return nil, err
+	}
+	return &ProxyManager{policy: policy}, nil
 }
 
 func compilePolicy(policy NetworkPolicy) (*compiledPolicy, error) {

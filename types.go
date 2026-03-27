@@ -1,6 +1,8 @@
 package bbox
 
-type ProxyOptions struct{}
+type ProxyOptions struct {
+	NetworkPolicy NetworkPolicy
+}
 
 type NetworkPolicy struct {
 	AllowHostPatterns []string
@@ -9,4 +11,6 @@ type NetworkPolicy struct {
 	AllowConnect      bool
 }
 
-type ProxyManager struct{}
+type ProxyManager struct {
+	policy *compiledPolicy
+}
