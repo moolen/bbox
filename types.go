@@ -9,6 +9,20 @@ type ProxyOptions struct {
 	NetworkPolicy NetworkPolicy
 }
 
+type Mount struct {
+	Source   string
+	Target   string
+	ReadOnly bool
+}
+
+type SandboxOptions struct {
+	Binaries []string
+	Mounts   []Mount
+	Env      []string
+	Policy   NetworkPolicy
+	WorkDir  string
+}
+
 type NetworkPolicy struct {
 	AllowHostPatterns []string
 	DenyHostPatterns  []string
