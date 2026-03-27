@@ -8,6 +8,8 @@ import (
 	"github.com/moolen/bbox/internal/helperruntime"
 )
 
+// NewProxyManager validates the supplied options and returns a manager that can
+// create multiple sandboxes sharing the same host-side proxy policy engine.
 func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	policy, err := compilePolicy(opts.NetworkPolicy)
 	if err != nil {

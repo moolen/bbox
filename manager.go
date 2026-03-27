@@ -233,6 +233,8 @@ func (m *ProxyManager) dialTunnel(ctx context.Context, host string, port int) (n
 	return dialTunnelFn(ctx, host, port)
 }
 
+// Close stops all registered sandboxes, closes idle outbound proxy connections,
+// and removes temporary helper build artifacts.
 func (m *ProxyManager) Close() error {
 	var closeErr error
 

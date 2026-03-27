@@ -16,6 +16,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Sandbox is a long-lived bubblewrap helper plus its staged filesystem root and
+// per-sandbox runtime configuration.
 type Sandbox struct {
 	manager *ProxyManager
 	id      string
@@ -42,6 +44,8 @@ func proxyURL(addr string) string {
 	return "http://" + addr
 }
 
+// NewSandbox stages the requested binaries, starts a helper inside bubblewrap,
+// and registers the sandbox with the manager's host-side policy engine.
 func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *Sandbox, err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -136,6 +140,8 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	return sandbox, nil
 }
 
+// Run executes argv inside the sandbox and returns its exit code and captured
+// output.
 func (s *Sandbox) Run(ctx context.Context, argv []string, opts RunOptions) (*RunResult, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("argv must not be empty")
@@ -158,6 +164,8 @@ func (s *Sandbox) Run(ctx context.Context, argv []string, opts RunOptions) (*Run
 	return s.client.Run(ctx, argv, runOpts)
 }
 
+// ProxyAddr returns the effective sandbox-local proxy listen address reported
+// by the helper.
 func (s *Sandbox) ProxyAddr() string {
 	if s == nil {
 		return ""
@@ -165,6 +173,7 @@ func (s *Sandbox) ProxyAddr() string {
 	return s.proxyAddr
 }
 
+// ProxyURL returns the helper's sandbox-local proxy endpoint as an HTTP URL.
 func (s *Sandbox) ProxyURL() string {
 	if s == nil || s.proxyAddr == "" {
 		return ""
@@ -172,6 +181,8 @@ func (s *Sandbox) ProxyURL() string {
 	return proxyURL(s.proxyAddr)
 }
 
+// Close stops the sandbox helper, unregisters the sandbox, and removes the
+// staged root filesystem.
 func (s *Sandbox) Close() error {
 	if s == nil {
 		return nil
