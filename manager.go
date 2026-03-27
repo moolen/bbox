@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
 )
@@ -190,6 +193,42 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 		Header:     resp.Header.Clone(),
 		Body:       body,
 	}
+}
+
+func (m *ProxyManager) handleConnectRequest(ctx context.Context, sandboxID string, req helperproto.ConnectRequest) *helperproto.ConnectResponse {
+	policy, ok := m.policyForSandbox(sandboxID)
+	if !ok {
+		return &helperproto.ConnectResponse{
+			StatusCode: http.StatusBadGateway,
+			Error:      fmt.Sprintf("sandbox %q is not registered", sandboxID),
+		}
+	}
+
+	hostport := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
+	if err := policy.Check(http.MethodConnect, hostport, true); err != nil {
+		return &helperproto.ConnectResponse{
+			StatusCode: http.StatusForbidden,
+			Message:    "connect request denied",
+			Error:      err.Error(),
+		}
+	}
+
+	return &helperproto.ConnectResponse{
+		StatusCode: http.StatusOK,
+	}
+}
+
+var dialTunnelFn = func(ctx context.Context, host string, port int) (net.Conn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	return dialer.DialContext(ctx, "tcp", address)
+}
+
+func (m *ProxyManager) dialTunnel(ctx context.Context, host string, port int) (net.Conn, error) {
+	return dialTunnelFn(ctx, host, port)
 }
 
 func (m *ProxyManager) Close() error {
