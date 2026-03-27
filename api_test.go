@@ -33,29 +33,29 @@ func TestNewProxyManagerRejectsInvalidDenyRegex(t *testing.T) {
 	}
 }
 
-func TestNewProxyManagerRejectsUnsupportedPolicyOptions(t *testing.T) {
-	_, err := NewProxyManager(ProxyOptions{
+func TestNewProxyManagerAcceptsPolicyOptions(t *testing.T) {
+	manager, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
 			AllowHTTPMethods: []string{"GET"},
 		},
 	})
-	if err == nil {
-		t.Fatal("expected unsupported AllowHTTPMethods to be rejected")
+	if err != nil {
+		t.Fatalf("expected AllowHTTPMethods policy option to be accepted: %v", err)
 	}
-	if !strings.Contains(err.Error(), "AllowHTTPMethods") {
-		t.Fatalf("expected AllowHTTPMethods context, got %q", err.Error())
+	if manager == nil {
+		t.Fatal("expected non-nil manager")
 	}
 
-	_, err = NewProxyManager(ProxyOptions{
+	manager, err = NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
 			AllowConnect: true,
 		},
 	})
-	if err == nil {
-		t.Fatal("expected unsupported AllowConnect=true to be rejected")
+	if err != nil {
+		t.Fatalf("expected AllowConnect policy option to be accepted: %v", err)
 	}
-	if !strings.Contains(err.Error(), "AllowConnect") {
-		t.Fatalf("expected AllowConnect context, got %q", err.Error())
+	if manager == nil {
+		t.Fatal("expected non-nil manager")
 	}
 }
 
