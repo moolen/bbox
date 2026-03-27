@@ -99,11 +99,18 @@ func normalizePolicyHostname(hostname string) (string, error) {
 		return "", fmt.Errorf("request hostname is required")
 	}
 
+	if !strings.Contains(normalized, ":") {
+		return normalized, nil
+	}
+
 	if strings.HasPrefix(normalized, "[") {
 		if strings.HasSuffix(normalized, "]") {
-			inner := strings.TrimPrefix(strings.TrimSuffix(normalized, "]"), "[")
+			inner := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(normalized, "]"), "["))
 			if inner == "" {
 				return "", fmt.Errorf("request hostname is required")
+			}
+			if !isIPv6Literal(inner) {
+				return "", fmt.Errorf("invalid host %q", hostname)
 			}
 			return inner, nil
 		}
@@ -112,7 +119,11 @@ func normalizePolicyHostname(hostname string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("invalid host:port %q", hostname)
 		}
-		return strings.ToLower(strings.TrimSpace(host)), nil
+		host = strings.TrimSpace(strings.ToLower(host))
+		if !isIPv6Literal(host) {
+			return "", fmt.Errorf("invalid host %q", hostname)
+		}
+		return host, nil
 	}
 
 	if strings.Count(normalized, ":") == 1 {
@@ -127,7 +138,7 @@ func normalizePolicyHostname(hostname string) (string, error) {
 		return host, nil
 	}
 
-	return normalized, nil
+	return "", fmt.Errorf("invalid host %q", hostname)
 }
 
 func splitHostPortStrict(hostport string) (string, string, error) {
@@ -140,4 +151,9 @@ func splitHostPortStrict(hostport string) (string, string, error) {
 		return "", "", fmt.Errorf("invalid port %q", port)
 	}
 	return host, port, nil
+}
+
+func isIPv6Literal(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && strings.Contains(host, ":")
 }

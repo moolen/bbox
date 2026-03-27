@@ -108,3 +108,35 @@ func TestCompiledPolicyRejectsInvalidHostPort(t *testing.T) {
 		t.Fatal("expected invalid host:port to be rejected")
 	}
 }
+
+func TestCompiledPolicyRejectsMalformedColonInputs(t *testing.T) {
+	policy, err := compilePolicy(NetworkPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []string{
+		"api.github.com:443:extra",
+		"::1",
+		"[::1",
+		"::1:443",
+	}
+	for _, input := range cases {
+		if err := policy.Check("GET", input, false); err == nil {
+			t.Fatalf("expected malformed colon input %q to be rejected", input)
+		}
+	}
+}
+
+func TestCompiledPolicyTrimsBracketedIPv6Whitespace(t *testing.T) {
+	policy, err := compilePolicy(NetworkPolicy{
+		AllowHostPatterns: []string{`^::1$`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := policy.Check("GET", "[  ::1  ]", false); err != nil {
+		t.Fatalf("expected bracketed IPv6 whitespace to normalize and match: %v", err)
+	}
+}
