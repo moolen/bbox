@@ -44,3 +44,32 @@ func TestSandboxCloseDoesNotUnregisterExistingSandboxOnDuplicateStartupFailure(t
 		t.Fatal("expected original sandbox entry to remain attached")
 	}
 }
+
+func TestSandboxUsesHelperReportedProxyEnv(t *testing.T) {
+	env := runEnvForProxyAddr("127.0.0.1:40123", []string{
+		"FOO=bar",
+		"HTTP_PROXY=http://stale",
+	})
+
+	got := make(map[string]string, len(env))
+	for _, entry := range env {
+		key, value, ok := splitEnv(entry)
+		if !ok {
+			t.Fatalf("invalid env entry %q", entry)
+		}
+		got[key] = value
+	}
+
+	if got["PATH"] != "/usr/bin" {
+		t.Fatalf("unexpected PATH: got %q", got["PATH"])
+	}
+	if got["HTTP_PROXY"] != "http://127.0.0.1:40123" {
+		t.Fatalf("unexpected HTTP_PROXY: got %q", got["HTTP_PROXY"])
+	}
+	if got["http_proxy"] != "http://127.0.0.1:40123" {
+		t.Fatalf("unexpected http_proxy: got %q", got["http_proxy"])
+	}
+	if got["FOO"] != "bar" {
+		t.Fatalf("unexpected FOO: got %q", got["FOO"])
+	}
+}

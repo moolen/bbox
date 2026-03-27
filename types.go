@@ -7,6 +7,7 @@ import (
 )
 
 type ProxyOptions struct {
+	ListenAddr    string
 	NetworkPolicy NetworkPolicy
 }
 
@@ -50,6 +51,7 @@ type ProxyManager struct {
 	sandboxes       map[string]*Sandbox
 	sandboxPolicies map[string]*compiledPolicy
 	transport       *http.Transport
+	listenAddr      string
 	nextSandboxID   atomic.Uint64
 
 	helperBinaryOnce sync.Once

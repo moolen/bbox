@@ -62,7 +62,7 @@ func targetsOverlap(a, b string) bool {
 	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
-func buildBwrapArgs(root string, helperPath string, mounts []Mount) []string {
+func buildBwrapArgs(root string, helperPath string, proxyListenAddr string, mounts []Mount) []string {
 	args := []string{
 		"--unshare-user",
 		"--unshare-pid",
@@ -71,8 +71,6 @@ func buildBwrapArgs(root string, helperPath string, mounts []Mount) []string {
 		"--new-session",
 		"--clearenv",
 		"--setenv", "PATH", "/usr/bin",
-		"--setenv", "HTTP_PROXY", proxyURL(),
-		"--setenv", "http_proxy", proxyURL(),
 	}
 
 	for _, dir := range []string{"app", "usr", "etc", "lib", "lib64"} {
@@ -97,6 +95,7 @@ func buildBwrapArgs(root string, helperPath string, mounts []Mount) []string {
 		"--chdir", "/tmp",
 		"--",
 		helperPath,
+		"--proxy-addr", proxyListenAddr,
 		"child-proxy",
 	)
 

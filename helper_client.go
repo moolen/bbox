@@ -76,7 +76,7 @@ func newHelperClient(manager *ProxyManager, sandboxID string, conn io.ReadWriteC
 	}
 }
 
-func (c *helperClient) Start(ctx context.Context) error {
+func (c *helperClient) Start(ctx context.Context) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -92,25 +92,25 @@ func (c *helperClient) Start(ctx context.Context) error {
 			SandboxID:       c.sandboxID,
 		},
 	}); err != nil {
-		return fmt.Errorf("send helper hello: %w", err)
+		return "", fmt.Errorf("send helper hello: %w", err)
 	}
 
 	select {
 	case ready := <-c.readyCh:
 		if ready.err != nil {
-			return ready.err
+			return "", ready.err
 		}
 		if ready.proxyAddr == "" {
-			return errors.New("helper did not report a proxy address")
+			return "", errors.New("helper did not report a proxy address")
 		}
-		return nil
+		return ready.proxyAddr, nil
 	case err := <-c.loopDone:
 		if err == nil {
-			return errors.New("helper exited before signaling readiness")
+			return "", errors.New("helper exited before signaling readiness")
 		}
-		return fmt.Errorf("wait for helper readiness: %w", err)
+		return "", fmt.Errorf("wait for helper readiness: %w", err)
 	case <-ctx.Done():
-		return ctx.Err()
+		return "", ctx.Err()
 	}
 }
 

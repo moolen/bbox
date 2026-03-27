@@ -16,10 +16,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	proxyBind = "127.0.0.1:31111"
-)
-
 type Sandbox struct {
 	manager *ProxyManager
 	id      string
@@ -41,8 +37,8 @@ type Sandbox struct {
 	closeErr  error
 }
 
-func proxyURL() string {
-	return "http://" + proxyBind
+func proxyURL(addr string) string {
+	return "http://" + addr
 }
 
 func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *Sandbox, err error) {
@@ -82,7 +78,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, fmt.Errorf("create helper log file: %w", err)
 	}
 
-	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, opts.Mounts)...)
+	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, m.listenAddr, opts.Mounts)...)
 	cmd.Stderr = helperLog
 	cmd.Stdout = helperLog
 	cmd.ExtraFiles = []*os.File{childBridge}
@@ -106,7 +102,6 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		client:        client,
 		cmd:           cmd,
 		done:          make(chan error, 1),
-		baseEnv:       mergeEnv(defaultRunEnv(), opts.Env),
 		workDir:       opts.WorkDir,
 		helperLogFile: helperLog,
 		helperLogPath: helperLog.Name(),
@@ -116,11 +111,13 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		sandbox.done <- cmd.Wait()
 	}()
 
-	if err := client.Start(ctx); err != nil {
+	proxyAddr, err := client.Start(ctx)
+	if err != nil {
 		sandbox.closeErr = nil
 		_ = sandbox.Close()
 		return nil, fmt.Errorf("start sandbox helper: %w%s", err, sandbox.helperErrorSuffix())
 	}
+	sandbox.baseEnv = runEnvForProxyAddr(proxyAddr, opts.Env)
 
 	if err := m.registerSandbox(sandboxID, policy); err != nil {
 		sandbox.closeErr = nil
@@ -242,12 +239,40 @@ func openBridgePair() (*os.File, *os.File, error) {
 	return parent, child, nil
 }
 
-func defaultRunEnv() []string {
-	return []string{
-		"PATH=/usr/bin",
-		"HTTP_PROXY=" + proxyURL(),
-		"http_proxy=" + proxyURL(),
+func runEnvForProxyAddr(proxyAddr string, extraEnv []string) []string {
+	return mergeEnv(
+		filterReservedEnv(extraEnv),
+		[]string{
+			"PATH=/usr/bin",
+			"HTTP_PROXY=" + proxyURL(proxyAddr),
+			"http_proxy=" + proxyURL(proxyAddr),
+		},
+	)
+}
+
+func filterReservedEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := splitEnv(entry)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "PATH", "HTTP_PROXY", "http_proxy":
+			continue
+		default:
+			filtered = append(filtered, entry)
+		}
 	}
+	return filtered
+}
+
+func splitEnv(entry string) (key string, value string, ok bool) {
+	split := strings.IndexByte(entry, '=')
+	if split < 0 {
+		return "", "", false
+	}
+	return entry[:split], entry[split+1:], true
 }
 
 func mergeEnv(groups ...[]string) []string {

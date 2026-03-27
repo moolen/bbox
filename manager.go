@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	"github.com/moolen/bbox/internal/helperruntime"
 )
 
 func newProxyManager(policy *compiledPolicy) *ProxyManager {
@@ -26,6 +27,7 @@ func newProxyManager(policy *compiledPolicy) *ProxyManager {
 		sandboxes:       make(map[string]*Sandbox),
 		sandboxPolicies: make(map[string]*compiledPolicy),
 		transport:       cloneDefaultTransport(),
+		listenAddr:      helperruntime.DefaultProxyAddr,
 	}
 }
 

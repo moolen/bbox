@@ -73,3 +73,18 @@ func TestNewProxyManagerAcceptsValidPolicy(t *testing.T) {
 		t.Fatal("expected non-nil manager")
 	}
 }
+
+func TestNewProxyManagerAcceptsListenAddr(t *testing.T) {
+	manager, err := NewProxyManager(ProxyOptions{
+		ListenAddr: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("expected listen address to be accepted: %v", err)
+	}
+	if manager == nil {
+		t.Fatal("expected non-nil manager")
+	}
+	if manager.listenAddr != "127.0.0.1:0" {
+		t.Fatalf("unexpected listen address: got %q", manager.listenAddr)
+	}
+}
