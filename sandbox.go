@@ -32,6 +32,7 @@ type Sandbox struct {
 	workDir string
 
 	helperStderr *lockedBuffer
+	registered   bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -130,6 +131,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		_ = sandbox.Close()
 		return nil, err
 	}
+	sandbox.registered = true
 	if err := m.attachSandbox(sandboxID, sandbox); err != nil {
 		sandbox.closeErr = nil
 		_ = sandbox.Close()
@@ -192,8 +194,9 @@ func (s *Sandbox) Close() error {
 			}
 		}
 
-		if s.manager != nil {
+		if s.manager != nil && s.registered {
 			s.manager.unregisterSandbox(s.id)
+			s.registered = false
 		}
 		if s.root != "" {
 			if err := os.RemoveAll(s.root); err != nil {

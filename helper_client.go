@@ -130,8 +130,9 @@ func (c *helperClient) Run(ctx context.Context, argv []string, opts RunOptions) 
 		},
 	}
 	if err := c.send(env); err != nil {
-		c.finishRun(state, nil, fmt.Errorf("send exec request: %w", err))
-		return nil, fmt.Errorf("send exec request: %w", err)
+		runErr := fmt.Errorf("send exec request: %w", err)
+		c.failCurrentRun(runErr)
+		return nil, runErr
 	}
 
 	select {
@@ -247,6 +248,7 @@ func (c *helperClient) handleExecResult(result helperproto.ExecResult) {
 			Stdout:   append([]byte(nil), state.stdout.Bytes()...),
 			Stderr:   stderr,
 		},
+		err: execResultError(result),
 	}
 }
 
@@ -279,6 +281,13 @@ func normalizeLoopCloseError(err error) error {
 		return nil
 	}
 	return err
+}
+
+func execResultError(result helperproto.ExecResult) error {
+	if result.Error == "" {
+		return nil
+	}
+	return errors.New(result.Error)
 }
 
 func (c *helperClient) send(env helperproto.Envelope) error {
