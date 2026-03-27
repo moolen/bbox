@@ -2,17 +2,21 @@ package helperproto
 
 import "net/http"
 
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 type Envelope struct {
-	ID            uint64
-	Hello         *Hello
-	Ready         *Ready
-	ProxyRequest  *ProxyRequest
-	ProxyResponse *ProxyResponse
-	ExecRequest   *ExecRequest
-	StreamFrame   *StreamFrame
-	ExecResult    *ExecResult
+	ID              uint64
+	Hello           *Hello
+	Ready           *Ready
+	ProxyRequest    *ProxyRequest
+	ProxyResponse   *ProxyResponse
+	ConnectRequest  *ConnectRequest
+	ConnectResponse *ConnectResponse
+	TunnelFrame     *TunnelFrame
+	TunnelClose     *TunnelClose
+	ExecRequest     *ExecRequest
+	StreamFrame     *StreamFrame
+	ExecResult      *ExecResult
 }
 
 func (e Envelope) Kind() string {
@@ -25,6 +29,14 @@ func (e Envelope) Kind() string {
 		return "proxy_request"
 	case e.ProxyResponse != nil:
 		return "proxy_response"
+	case e.ConnectRequest != nil:
+		return "connect_request"
+	case e.ConnectResponse != nil:
+		return "connect_response"
+	case e.TunnelFrame != nil:
+		return "tunnel_frame"
+	case e.TunnelClose != nil:
+		return "tunnel_close"
 	case e.ExecRequest != nil:
 		return "exec_request"
 	case e.StreamFrame != nil:
@@ -58,6 +70,26 @@ type ProxyResponse struct {
 	Header     http.Header
 	Body       []byte
 	Error      string
+}
+
+type ConnectRequest struct {
+	Host string
+	Port int
+}
+
+type ConnectResponse struct {
+	StatusCode int
+	Message    string
+	Error      string
+}
+
+type TunnelFrame struct {
+	Data []byte
+}
+
+type TunnelClose struct {
+	Write bool
+	Error string
 }
 
 type ExecRequest struct {
