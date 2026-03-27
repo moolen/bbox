@@ -158,7 +158,13 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("parse request URL %q: %v", req.URL, err)}
 	}
 	if err := policy.Check(req.Method, targetURL.Host, req.Method == http.MethodConnect); err != nil {
-		return &helperproto.ProxyResponse{Error: err.Error()}
+		return &helperproto.ProxyResponse{
+			StatusCode: http.StatusForbidden,
+			Header: http.Header{
+				"Content-Type": []string{"text/plain; charset=utf-8"},
+			},
+			Body: []byte("proxy request denied: " + err.Error() + "\n"),
+		}
 	}
 
 	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL.String(), bytes.NewReader(req.Body))

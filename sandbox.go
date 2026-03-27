@@ -31,28 +31,14 @@ type Sandbox struct {
 	baseEnv []string
 	workDir string
 
-	helperStderr *lockedBuffer
-	registered   bool
+	helperLogMu     sync.Mutex
+	helperLogFile   *os.File
+	helperLogPath   string
+	helperLogCached string
+	registered      bool
 
 	closeOnce sync.Once
 	closeErr  error
-}
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 func proxyURL() string {
@@ -88,13 +74,22 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, err
 	}
 
-	helperStderr := &lockedBuffer{}
+	helperLog, err := os.CreateTemp("", "bbox-helper-log-")
+	if err != nil {
+		_ = childBridge.Close()
+		_ = parentBridge.Close()
+		_ = os.RemoveAll(root)
+		return nil, fmt.Errorf("create helper log file: %w", err)
+	}
+
 	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, opts.Mounts)...)
-	cmd.Stderr = helperStderr
-	cmd.Stdout = helperStderr
+	cmd.Stderr = helperLog
+	cmd.Stdout = helperLog
 	cmd.ExtraFiles = []*os.File{childBridge}
 
 	if err := cmd.Start(); err != nil {
+		_ = helperLog.Close()
+		_ = os.Remove(helperLog.Name())
 		_ = childBridge.Close()
 		_ = parentBridge.Close()
 		_ = os.RemoveAll(root)
@@ -105,15 +100,16 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	sandboxID := m.nextSandboxName(opts.Name)
 	client := newHelperClient(m, sandboxID, parentBridge)
 	sandbox := &Sandbox{
-		manager:      m,
-		id:           sandboxID,
-		root:         root,
-		client:       client,
-		cmd:          cmd,
-		done:         make(chan error, 1),
-		baseEnv:      mergeEnv(defaultRunEnv(), opts.Env),
-		workDir:      opts.WorkDir,
-		helperStderr: helperStderr,
+		manager:       m,
+		id:            sandboxID,
+		root:          root,
+		client:        client,
+		cmd:           cmd,
+		done:          make(chan error, 1),
+		baseEnv:       mergeEnv(defaultRunEnv(), opts.Env),
+		workDir:       opts.WorkDir,
+		helperLogFile: helperLog,
+		helperLogPath: helperLog.Name(),
 	}
 
 	go func() {
@@ -171,28 +167,34 @@ func (s *Sandbox) Close() error {
 	s.closeOnce.Do(func() {
 		var closeErr error
 
-		if s.cmd != nil && s.cmd.Process != nil {
-			if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				closeErr = errors.Join(closeErr, fmt.Errorf("signal sandbox helper: %w", err))
-			}
-		}
 		if s.client != nil {
 			if err := s.client.Close(); err != nil {
 				closeErr = errors.Join(closeErr, fmt.Errorf("close sandbox bridge: %w", err))
 			}
 		}
 		if s.done != nil {
-			waitErr := waitWithTimeout(s.done, 5*time.Second)
+			waitErr := waitWithTimeout(s.done, sandboxPID(s.cmd), 5*time.Second)
 			if waitErr != nil {
 				if s.cmd != nil && s.cmd.Process != nil {
-					_ = s.cmd.Process.Kill()
+					if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+						closeErr = errors.Join(closeErr, fmt.Errorf("signal sandbox helper: %w", err))
+					}
 				}
-				waitErr = waitWithTimeout(s.done, 5*time.Second)
+				waitErr = waitWithTimeout(s.done, sandboxPID(s.cmd), 2*time.Second)
+			}
+			if waitErr != nil {
+				if s.cmd != nil && s.cmd.Process != nil {
+					if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+						closeErr = errors.Join(closeErr, fmt.Errorf("kill sandbox helper: %w", err))
+					}
+				}
+				waitErr = waitWithTimeout(s.done, sandboxPID(s.cmd), 2*time.Second)
 			}
 			if normalized := normalizeHelperExit(waitErr); normalized != nil {
 				closeErr = errors.Join(closeErr, fmt.Errorf("wait for sandbox helper: %w%s", normalized, s.helperErrorSuffix()))
 			}
 		}
+		s.cacheAndRemoveHelperLog()
 
 		if s.manager != nil && s.registered {
 			s.manager.unregisterSandbox(s.id)
@@ -276,13 +278,55 @@ func mergeEnv(groups ...[]string) []string {
 	return merged
 }
 
-func waitWithTimeout(done <-chan error, timeout time.Duration) error {
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(timeout):
-		return errors.New("timeout waiting for sandbox helper exit")
+func waitWithTimeout(done <-chan error, pid int, timeout time.Duration) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-timer.C:
+			return errors.New("timeout waiting for sandbox helper exit")
+		case <-ticker.C:
+			if processExited(pid) {
+				return nil
+			}
+		}
 	}
+}
+
+func sandboxPID(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil {
+		return 0
+	}
+	return cmd.Process.Pid
+}
+
+func processExited(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+
+	statPath := fmt.Sprintf("/proc/%d/stat", pid)
+	stat, err := os.ReadFile(statPath)
+	if err == nil {
+		// /proc/<pid>/stat encodes the process state as the first token after the
+		// executable name, which itself is wrapped in parentheses and may contain spaces.
+		if end := bytes.LastIndexByte(stat, ')'); end >= 0 && end+2 < len(stat) {
+			return stat[end+2] == 'Z'
+		}
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+
+	err = syscall.Kill(pid, 0)
+	return err == syscall.ESRCH
 }
 
 func normalizeHelperExit(err error) error {
@@ -301,13 +345,59 @@ func normalizeHelperExit(err error) error {
 }
 
 func (s *Sandbox) helperErrorSuffix() string {
-	if s == nil || s.helperStderr == nil {
+	if s == nil {
 		return ""
 	}
 
-	stderr := strings.TrimSpace(s.helperStderr.String())
+	stderr := strings.TrimSpace(s.helperLogContents())
 	if stderr == "" {
 		return ""
 	}
 	return ": " + stderr
+}
+
+func (s *Sandbox) helperLogContents() string {
+	if s == nil {
+		return ""
+	}
+
+	s.helperLogMu.Lock()
+	defer s.helperLogMu.Unlock()
+
+	if s.helperLogCached != "" {
+		return s.helperLogCached
+	}
+	if s.helperLogPath == "" {
+		return ""
+	}
+
+	data, err := os.ReadFile(s.helperLogPath)
+	if err != nil {
+		return ""
+	}
+	return string(bytes.TrimSpace(data))
+}
+
+func (s *Sandbox) cacheAndRemoveHelperLog() {
+	if s == nil {
+		return
+	}
+
+	s.helperLogMu.Lock()
+	defer s.helperLogMu.Unlock()
+
+	if s.helperLogFile != nil {
+		_ = s.helperLogFile.Close()
+		s.helperLogFile = nil
+	}
+	if s.helperLogPath == "" {
+		return
+	}
+
+	data, err := os.ReadFile(s.helperLogPath)
+	if err == nil {
+		s.helperLogCached = string(bytes.TrimSpace(data))
+	}
+	_ = os.Remove(s.helperLogPath)
+	s.helperLogPath = ""
 }
