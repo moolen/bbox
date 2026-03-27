@@ -82,6 +82,8 @@ func main() {
 	}
 	defer sandbox.Close()
 
+	log.Printf("sandbox proxy: %s", sandbox.ProxyURL())
+
 	result, err := sandbox.Run(ctx, []string{
 		"curl",
 		"-sS",

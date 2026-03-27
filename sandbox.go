@@ -24,8 +24,9 @@ type Sandbox struct {
 	cmd     *exec.Cmd
 	done    chan error
 
-	baseEnv []string
-	workDir string
+	proxyAddr string
+	baseEnv   []string
+	workDir   string
 
 	helperLogMu     sync.Mutex
 	helperLogFile   *os.File
@@ -117,6 +118,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		_ = sandbox.Close()
 		return nil, fmt.Errorf("start sandbox helper: %w%s", err, sandbox.helperErrorSuffix())
 	}
+	sandbox.proxyAddr = proxyAddr
 	sandbox.baseEnv = runEnvForProxyAddr(proxyAddr, opts.Env)
 
 	if err := m.registerSandbox(sandboxID, policy); err != nil {
@@ -154,6 +156,20 @@ func (s *Sandbox) Run(ctx context.Context, argv []string, opts RunOptions) (*Run
 	}
 
 	return s.client.Run(ctx, argv, runOpts)
+}
+
+func (s *Sandbox) ProxyAddr() string {
+	if s == nil {
+		return ""
+	}
+	return s.proxyAddr
+}
+
+func (s *Sandbox) ProxyURL() string {
+	if s == nil || s.proxyAddr == "" {
+		return ""
+	}
+	return proxyURL(s.proxyAddr)
 }
 
 func (s *Sandbox) Close() error {

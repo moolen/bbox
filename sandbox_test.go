@@ -73,3 +73,25 @@ func TestSandboxUsesHelperReportedProxyEnv(t *testing.T) {
 		t.Fatalf("unexpected FOO: got %q", got["FOO"])
 	}
 }
+
+func TestSandboxProxyAccessors(t *testing.T) {
+	sandbox := &Sandbox{proxyAddr: "127.0.0.1:40123"}
+
+	if got := sandbox.ProxyAddr(); got != "127.0.0.1:40123" {
+		t.Fatalf("unexpected proxy addr: got %q", got)
+	}
+	if got := sandbox.ProxyURL(); got != "http://127.0.0.1:40123" {
+		t.Fatalf("unexpected proxy url: got %q", got)
+	}
+}
+
+func TestNilSandboxProxyAccessorsReturnEmptyString(t *testing.T) {
+	var sandbox *Sandbox
+
+	if got := sandbox.ProxyAddr(); got != "" {
+		t.Fatalf("expected empty proxy addr, got %q", got)
+	}
+	if got := sandbox.ProxyURL(); got != "" {
+		t.Fatalf("expected empty proxy url, got %q", got)
+	}
+}
