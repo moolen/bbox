@@ -1,199 +1,403 @@
-package main
+package bbox
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
-	curlBinary       = "/usr/bin/curl"
-	curlTarget       = "http://example.com"
-	proxyBind        = "127.0.0.1:31111"
-	sandboxAppBinary = "/app/bwrap-go"
+	proxyBind = "127.0.0.1:31111"
 )
 
-func parseLddOutput(output string) []string {
-	var paths []string
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+type Sandbox struct {
+	manager *ProxyManager
+	id      string
+	root    string
+	client  *helperClient
+	cmd     *exec.Cmd
+	done    chan error
 
-		if parts := strings.SplitN(line, "=>", 2); len(parts) == 2 {
-			path := strings.Fields(strings.TrimSpace(parts[1]))
-			if len(path) > 0 && strings.HasPrefix(path[0], "/") {
-				paths = append(paths, path[0])
+	baseEnv []string
+	workDir string
+
+	helperLogMu     sync.Mutex
+	helperLogFile   *os.File
+	helperLogPath   string
+	helperLogCached string
+	registered      bool
+
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func proxyURL() string {
+	return "http://" + proxyBind
+}
+
+func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *Sandbox, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateSandboxOptions(opts); err != nil {
+		return nil, err
+	}
+
+	policy, err := compilePolicy(opts.Policy)
+	if err != nil {
+		return nil, err
+	}
+
+	helperBinary, err := m.helperBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	root, err := stageSandboxRoot(opts, helperBinary)
+	if err != nil {
+		return nil, err
+	}
+
+	parentBridge, childBridge, err := openBridgePair()
+	if err != nil {
+		_ = os.RemoveAll(root)
+		return nil, err
+	}
+
+	helperLog, err := os.CreateTemp("", "bbox-helper-log-")
+	if err != nil {
+		_ = childBridge.Close()
+		_ = parentBridge.Close()
+		_ = os.RemoveAll(root)
+		return nil, fmt.Errorf("create helper log file: %w", err)
+	}
+
+	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, opts.Mounts)...)
+	cmd.Stderr = helperLog
+	cmd.Stdout = helperLog
+	cmd.ExtraFiles = []*os.File{childBridge}
+
+	if err := cmd.Start(); err != nil {
+		_ = helperLog.Close()
+		_ = os.Remove(helperLog.Name())
+		_ = childBridge.Close()
+		_ = parentBridge.Close()
+		_ = os.RemoveAll(root)
+		return nil, fmt.Errorf("start bwrap helper: %w", err)
+	}
+	_ = childBridge.Close()
+
+	sandboxID := m.nextSandboxName(opts.Name)
+	client := newHelperClient(m, sandboxID, parentBridge)
+	sandbox := &Sandbox{
+		manager:       m,
+		id:            sandboxID,
+		root:          root,
+		client:        client,
+		cmd:           cmd,
+		done:          make(chan error, 1),
+		baseEnv:       mergeEnv(defaultRunEnv(), opts.Env),
+		workDir:       opts.WorkDir,
+		helperLogFile: helperLog,
+		helperLogPath: helperLog.Name(),
+	}
+
+	go func() {
+		sandbox.done <- cmd.Wait()
+	}()
+
+	if err := client.Start(ctx); err != nil {
+		sandbox.closeErr = nil
+		_ = sandbox.Close()
+		return nil, fmt.Errorf("start sandbox helper: %w%s", err, sandbox.helperErrorSuffix())
+	}
+
+	if err := m.registerSandbox(sandboxID, policy); err != nil {
+		sandbox.closeErr = nil
+		_ = sandbox.Close()
+		return nil, err
+	}
+	sandbox.registered = true
+	if err := m.attachSandbox(sandboxID, sandbox); err != nil {
+		sandbox.closeErr = nil
+		_ = sandbox.Close()
+		return nil, err
+	}
+
+	return sandbox, nil
+}
+
+func (s *Sandbox) Run(ctx context.Context, argv []string, opts RunOptions) (*RunResult, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("argv must not be empty")
+	}
+	if s == nil || s.client == nil {
+		return nil, errors.New("sandbox is not running")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	runOpts := RunOptions{
+		Env:     mergeEnv(s.baseEnv, opts.Env),
+		WorkDir: opts.WorkDir,
+	}
+	if runOpts.WorkDir == "" {
+		runOpts.WorkDir = s.workDir
+	}
+
+	return s.client.Run(ctx, argv, runOpts)
+}
+
+func (s *Sandbox) Close() error {
+	if s == nil {
+		return nil
+	}
+
+	s.closeOnce.Do(func() {
+		var closeErr error
+
+		if s.client != nil {
+			if err := s.client.Close(); err != nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("close sandbox bridge: %w", err))
 			}
-			continue
+		}
+		if s.done != nil {
+			waitErr := waitWithTimeout(s.done, sandboxPID(s.cmd), 5*time.Second)
+			if waitErr != nil {
+				if s.cmd != nil && s.cmd.Process != nil {
+					if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+						closeErr = errors.Join(closeErr, fmt.Errorf("signal sandbox helper: %w", err))
+					}
+				}
+				waitErr = waitWithTimeout(s.done, sandboxPID(s.cmd), 2*time.Second)
+			}
+			if waitErr != nil {
+				if s.cmd != nil && s.cmd.Process != nil {
+					if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+						closeErr = errors.Join(closeErr, fmt.Errorf("kill sandbox helper: %w", err))
+					}
+				}
+				waitErr = waitWithTimeout(s.done, sandboxPID(s.cmd), 2*time.Second)
+			}
+			if normalized := normalizeHelperExit(waitErr); normalized != nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("wait for sandbox helper: %w%s", normalized, s.helperErrorSuffix()))
+			}
+		}
+		s.cacheAndRemoveHelperLog()
+
+		if s.manager != nil && s.registered {
+			s.manager.unregisterSandbox(s.id)
+			s.registered = false
+		}
+		if s.root != "" {
+			if err := os.RemoveAll(s.root); err != nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("remove staged root %q: %w", s.root, err))
+			}
 		}
 
-		fields := strings.Fields(line)
-		if len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
-			paths = append(paths, fields[0])
-		}
-	}
-	return paths
+		s.closeErr = closeErr
+	})
+
+	return s.closeErr
 }
 
-func stageSandboxRoot() (string, error) {
-	root, err := os.MkdirTemp("", "bwrap-go-root-")
-	if err != nil {
-		return "", fmt.Errorf("create sandbox root: %w", err)
+func validateSandboxOptions(opts SandboxOptions) error {
+	if err := validateMounts(opts.Mounts); err != nil {
+		return err
 	}
-
-	requiredFiles, err := runtimeFilesForSandbox()
-	if err != nil {
-		return "", err
-	}
-	for _, hostPath := range requiredFiles {
-		if err := copyFileIntoRoot(root, hostPath); err != nil {
-			return "", err
-		}
-	}
-	executablePath, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve current executable: %w", err)
-	}
-	if err := copyFileToPath(root, executablePath, sandboxAppBinary); err != nil {
-		return "", err
-	}
-
-	if err := writeSandboxConfig(root); err != nil {
-		return "", err
-	}
-
-	return root, nil
-}
-
-func runtimeFilesForSandbox() ([]string, error) {
-	executablePath, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("resolve current executable: %w", err)
-	}
-
-	binaries := []string{curlBinary, executablePath}
-	var files []string
-	for _, binary := range binaries {
-		files = append(files, binary)
-
-		runtimeFiles, err := runtimeFilesForBinary(binary)
-		if err != nil {
-			return nil, err
-		}
-		files = append(files, runtimeFiles...)
-	}
-
-	for _, extra := range []string{
-		"/lib64/ld-linux-x86-64.so.2",
-		"/usr/lib/libnss_files.so.2",
-	} {
-		if _, err := os.Stat(extra); err == nil {
-			files = append(files, extra)
-		}
-	}
-
-	slices.Sort(files)
-	return slices.Compact(files), nil
-}
-
-func runtimeFilesForBinary(binaryPath string) ([]string, error) {
-	output, err := exec.Command("ldd", binaryPath).CombinedOutput()
-	if err != nil {
-		if strings.Contains(string(output), "not a dynamic executable") {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("ldd %s: %w: %s", binaryPath, err, strings.TrimSpace(string(output)))
-	}
-	return parseLddOutput(string(output)), nil
-}
-
-func writeSandboxConfig(root string) error {
-	files := map[string]string{
-		"/etc/hosts":         "127.0.0.1 localhost\n::1 localhost\n",
-		"/etc/nsswitch.conf": "hosts: files\n",
-	}
-	for path, content := range files {
-		dest := filepath.Join(root, filepath.Clean(path))
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dest, err)
-		}
-		if err := os.WriteFile(dest, []byte(content), 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", dest, err)
-		}
+	if opts.WorkDir != "" && !filepath.IsAbs(opts.WorkDir) {
+		return fmt.Errorf("sandbox workdir %q must be absolute", opts.WorkDir)
 	}
 	return nil
 }
 
-func copyFileIntoRoot(root, hostPath string) error {
-	return copyFileToPath(root, hostPath, hostPath)
+func openBridgePair() (*os.File, *os.File, error) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create sandbox bridge socketpair: %w", err)
+	}
+
+	parent := os.NewFile(uintptr(fds[0]), "bbox-bridge-parent")
+	child := os.NewFile(uintptr(fds[1]), "bbox-bridge-child")
+	if parent == nil || child == nil {
+		if parent != nil {
+			_ = parent.Close()
+		}
+		if child != nil {
+			_ = child.Close()
+		}
+		return nil, nil, errors.New("wrap sandbox bridge socketpair")
+	}
+	return parent, child, nil
 }
 
-func copyFileToPath(root, hostPath, sandboxPath string) error {
-	info, err := os.Stat(hostPath)
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", hostPath, err)
+func defaultRunEnv() []string {
+	return []string{
+		"PATH=/usr/bin",
+		"HTTP_PROXY=" + proxyURL(),
+		"http_proxy=" + proxyURL(),
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", hostPath)
-	}
-
-	src, err := os.Open(hostPath)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", hostPath, err)
-	}
-	defer src.Close()
-
-	dest := filepath.Join(root, filepath.Clean(sandboxPath))
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dest), err)
-	}
-
-	dst, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dest, err)
-	}
-	defer dst.Close()
-
-	if _, err := dst.ReadFrom(src); err != nil {
-		return fmt.Errorf("copy %s to %s: %w", hostPath, dest, err)
-	}
-	return nil
 }
 
-func buildBwrapArgs(root string) []string {
-	args := []string{
-		"--unshare-user",
-		"--unshare-pid",
-		"--unshare-net",
-		"--die-with-parent",
-		"--new-session",
-		"--clearenv",
-		"--setenv", "PATH", "/usr/bin",
-		"--setenv", "HTTP_PROXY", proxyURL(),
-		"--setenv", "http_proxy", proxyURL(),
-	}
+func mergeEnv(groups ...[]string) []string {
+	var merged []string
+	indexByKey := make(map[string]int)
 
-	for _, dir := range []string{"app", "usr", "etc", "lib", "lib64"} {
-		hostDir := filepath.Join(root, dir)
-		if info, err := os.Stat(hostDir); err == nil && info.IsDir() {
-			args = append(args, "--ro-bind", hostDir, "/"+dir)
+	for _, group := range groups {
+		for _, entry := range group {
+			if entry == "" {
+				continue
+			}
+
+			key := entry
+			if split := strings.IndexByte(entry, '='); split >= 0 {
+				key = entry[:split]
+			}
+
+			if idx, ok := indexByKey[key]; ok {
+				merged[idx] = entry
+				continue
+			}
+
+			indexByKey[key] = len(merged)
+			merged = append(merged, entry)
 		}
 	}
 
-	args = append(args,
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--tmpfs", "/tmp",
-		"--chdir", "/tmp",
-		"--",
-		sandboxAppBinary,
-		"child-proxy",
-	)
+	return merged
+}
 
-	return args
+func waitWithTimeout(done <-chan error, pid int, timeout time.Duration) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-timer.C:
+			return errors.New("timeout waiting for sandbox helper exit")
+		case <-ticker.C:
+			if processExited(pid) {
+				return nil
+			}
+		}
+	}
+}
+
+func sandboxPID(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil {
+		return 0
+	}
+	return cmd.Process.Pid
+}
+
+func processExited(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+
+	statPath := fmt.Sprintf("/proc/%d/stat", pid)
+	stat, err := os.ReadFile(statPath)
+	if err == nil {
+		// /proc/<pid>/stat encodes the process state as the first token after the
+		// executable name, which itself is wrapped in parentheses and may contain spaces.
+		if end := bytes.LastIndexByte(stat, ')'); end >= 0 && end+2 < len(stat) {
+			return stat[end+2] == 'Z'
+		}
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+
+	err = syscall.Kill(pid, 0)
+	return err == syscall.ESRCH
+}
+
+func normalizeHelperExit(err error) error {
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+			if status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL) {
+				return nil
+			}
+		}
+	}
+	return err
+}
+
+func (s *Sandbox) helperErrorSuffix() string {
+	if s == nil {
+		return ""
+	}
+
+	stderr := strings.TrimSpace(s.helperLogContents())
+	if stderr == "" {
+		return ""
+	}
+	return ": " + stderr
+}
+
+func (s *Sandbox) helperLogContents() string {
+	if s == nil {
+		return ""
+	}
+
+	s.helperLogMu.Lock()
+	defer s.helperLogMu.Unlock()
+
+	if s.helperLogCached != "" {
+		return s.helperLogCached
+	}
+	if s.helperLogPath == "" {
+		return ""
+	}
+
+	data, err := os.ReadFile(s.helperLogPath)
+	if err != nil {
+		return ""
+	}
+	return string(bytes.TrimSpace(data))
+}
+
+func (s *Sandbox) cacheAndRemoveHelperLog() {
+	if s == nil {
+		return
+	}
+
+	s.helperLogMu.Lock()
+	defer s.helperLogMu.Unlock()
+
+	if s.helperLogFile != nil {
+		_ = s.helperLogFile.Close()
+		s.helperLogFile = nil
+	}
+	if s.helperLogPath == "" {
+		return
+	}
+
+	data, err := os.ReadFile(s.helperLogPath)
+	if err == nil {
+		s.helperLogCached = string(bytes.TrimSpace(data))
+	}
+	_ = os.Remove(s.helperLogPath)
+	s.helperLogPath = ""
 }
