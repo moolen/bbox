@@ -75,3 +75,36 @@ func TestCompiledPolicyDefaultsDenyWhenAllowlistConfigured(t *testing.T) {
 		t.Fatal("expected example.com to be denied when allowlist is configured")
 	}
 }
+
+func TestCompiledPolicyHandlesHostPortInputs(t *testing.T) {
+	allowPolicy, err := compilePolicy(NetworkPolicy{
+		AllowHostPatterns: []string{`(^|[.])github[.]com$`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := allowPolicy.Check("GET", "api.github.com:443", false); err != nil {
+		t.Fatalf("expected allowlist to match host:port by hostname, got: %v", err)
+	}
+
+	denyPolicy, err := compilePolicy(NetworkPolicy{
+		DenyHostPatterns: []string{`^gist[.]github[.]com$`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := denyPolicy.Check("GET", "gist.github.com:443", false); err == nil {
+		t.Fatal("expected denylist to match host:port by hostname")
+	}
+}
+
+func TestCompiledPolicyRejectsInvalidHostPort(t *testing.T) {
+	policy, err := compilePolicy(NetworkPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := policy.Check("GET", "example.com:notaport", false); err == nil {
+		t.Fatal("expected invalid host:port to be rejected")
+	}
+}

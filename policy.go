@@ -2,8 +2,10 @@ package bbox
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -49,13 +51,13 @@ func compilePolicy(policy NetworkPolicy) (*compiledPolicy, error) {
 
 func (p compiledPolicy) Check(method, hostname string, connect bool) error {
 	method = strings.ToUpper(strings.TrimSpace(method))
-	hostname = strings.ToLower(strings.TrimSpace(hostname))
 
 	if method == "" {
 		return fmt.Errorf("request method is required")
 	}
-	if hostname == "" {
-		return fmt.Errorf("request hostname is required")
+	normalizedHost, err := normalizePolicyHostname(hostname)
+	if err != nil {
+		return err
 	}
 	if connect && method != http.MethodConnect {
 		return fmt.Errorf("connect requests must use CONNECT method")
@@ -74,19 +76,68 @@ func (p compiledPolicy) Check(method, hostname string, connect bool) error {
 	}
 
 	for _, re := range p.denyHosts {
-		if re.MatchString(hostname) {
-			return fmt.Errorf("hostname %s is denied by policy", hostname)
+		if re.MatchString(normalizedHost) {
+			return fmt.Errorf("hostname %s is denied by policy", normalizedHost)
 		}
 	}
 
 	allowListConfigured := len(p.allowHosts) > 0
 	for _, re := range p.allowHosts {
-		if re.MatchString(hostname) {
+		if re.MatchString(normalizedHost) {
 			return nil
 		}
 	}
 	if allowListConfigured {
-		return fmt.Errorf("hostname %s is not allowed by policy", hostname)
+		return fmt.Errorf("hostname %s is not allowed by policy", normalizedHost)
 	}
 	return nil
+}
+
+func normalizePolicyHostname(hostname string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(hostname))
+	if normalized == "" {
+		return "", fmt.Errorf("request hostname is required")
+	}
+
+	if strings.HasPrefix(normalized, "[") {
+		if strings.HasSuffix(normalized, "]") {
+			inner := strings.TrimPrefix(strings.TrimSuffix(normalized, "]"), "[")
+			if inner == "" {
+				return "", fmt.Errorf("request hostname is required")
+			}
+			return inner, nil
+		}
+
+		host, _, err := splitHostPortStrict(normalized)
+		if err != nil {
+			return "", fmt.Errorf("invalid host:port %q", hostname)
+		}
+		return strings.ToLower(strings.TrimSpace(host)), nil
+	}
+
+	if strings.Count(normalized, ":") == 1 {
+		host, _, err := splitHostPortStrict(normalized)
+		if err != nil {
+			return "", fmt.Errorf("invalid host:port %q", hostname)
+		}
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
+			return "", fmt.Errorf("request hostname is required")
+		}
+		return host, nil
+	}
+
+	return normalized, nil
+}
+
+func splitHostPortStrict(hostport string) (string, string, error) {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return "", "", err
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 0 || portNum > 65535 {
+		return "", "", fmt.Errorf("invalid port %q", port)
+	}
+	return host, port, nil
 }
