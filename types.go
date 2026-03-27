@@ -3,6 +3,7 @@ package bbox
 import (
 	"net/http"
 	"sync"
+	"sync/atomic"
 )
 
 type ProxyOptions struct {
@@ -16,11 +17,23 @@ type Mount struct {
 }
 
 type SandboxOptions struct {
+	Name     string
 	Binaries []string
 	Mounts   []Mount
 	Env      []string
 	Policy   NetworkPolicy
 	WorkDir  string
+}
+
+type RunOptions struct {
+	Env     []string
+	WorkDir string
+}
+
+type RunResult struct {
+	ExitCode int
+	Stdout   []byte
+	Stderr   []byte
 }
 
 type NetworkPolicy struct {
@@ -33,7 +46,15 @@ type NetworkPolicy struct {
 type ProxyManager struct {
 	mu              sync.RWMutex
 	policy          *compiledPolicy
-	sandboxes       map[string]struct{}
+	sandboxes       map[string]*Sandbox
 	sandboxPolicies map[string]*compiledPolicy
 	transport       *http.Transport
+	nextSandboxID   atomic.Uint64
+
+	helperBinaryOnce sync.Once
+	helperBinaryPath string
+	helperBinaryDir  string
+	helperBinaryErr  error
+
+	closeOnce sync.Once
 }
