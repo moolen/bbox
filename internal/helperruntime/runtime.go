@@ -1,6 +1,7 @@
 package helperruntime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/gob"
@@ -12,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -21,6 +24,8 @@ import (
 )
 
 const DefaultProxyAddr = "127.0.0.1:31111"
+
+const connectHandshakeTimeout = 5 * time.Second
 
 type Config struct {
 	Bridge    io.ReadWriteCloser
@@ -108,8 +113,15 @@ type bridge struct {
 	sendMu    sync.Mutex
 	pending   map[uint64]chan helperproto.Envelope
 	pendMu    sync.Mutex
+	tunnels   map[uint64]*tunnelDelivery
+	tunnelMu  sync.Mutex
 	nextID    atomic.Uint64
 	execMu    sync.Mutex
+}
+
+type tunnelDelivery struct {
+	ch     chan helperproto.Envelope
+	closed chan struct{}
 }
 
 func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
@@ -120,6 +132,7 @@ func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *b
 		logger:    logger,
 		proxyAddr: proxyAddr,
 		pending:   make(map[uint64]chan helperproto.Envelope),
+		tunnels:   make(map[uint64]*tunnelDelivery),
 	}
 }
 
@@ -137,6 +150,10 @@ func (b *bridge) readLoop(ctx context.Context) error {
 			}
 		case env.ProxyResponse != nil:
 			b.deliver(env)
+		case env.ConnectResponse != nil:
+			b.deliver(env)
+		case env.TunnelFrame != nil, env.TunnelClose != nil:
+			b.deliverTunnel(env)
 		case env.ExecRequest != nil:
 			go b.handleExec(ctx, env.ID, *env.ExecRequest)
 		default:
@@ -161,6 +178,11 @@ func (b *bridge) handleHello(env helperproto.Envelope) error {
 
 func (b *bridge) proxyHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodConnect {
+			b.handleConnect(w, req)
+			return
+		}
+
 		outReq, err := rewriteProxyRequest(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -193,6 +215,113 @@ func (b *bridge) proxyHandler() http.Handler {
 			b.logger.Printf("copy proxied response body: %v", err)
 		}
 	})
+}
+
+type tunnelRelayResult struct {
+	sendClose bool
+	write     bool
+	err       error
+	terminal  bool
+}
+
+func (b *bridge) handleConnect(w http.ResponseWriter, req *http.Request) {
+	host, port, err := parseConnectTarget(req.Host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "proxy does not support connection hijacking", http.StatusInternalServerError)
+		return
+	}
+
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("hijack proxy connection: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	bufferedPayload, err := drainHijackBufferedBytes(rw)
+	if err != nil {
+		b.writeConnectError(conn, http.StatusBadGateway, fmt.Sprintf("read buffered connect payload: %v", err))
+		return
+	}
+
+	_ = conn.SetDeadline(time.Now().Add(connectHandshakeTimeout))
+	connectCtx, cancelConnect := context.WithTimeout(req.Context(), connectHandshakeTimeout)
+	defer cancelConnect()
+
+	id, tunnelCh, response, err := b.connect(connectCtx, host, port)
+	if err != nil {
+		_ = conn.SetDeadline(time.Time{})
+		b.unregisterTunnel(id)
+		b.writeConnectError(conn, connectErrorStatus(err), err.Error())
+		return
+	}
+
+	statusCode := response.StatusCode
+	if statusCode == 0 {
+		statusCode = http.StatusBadGateway
+	}
+	if response.Error != "" || statusCode < 200 || statusCode >= 300 {
+		message := response.Message
+		if message == "" {
+			message = response.Error
+		}
+		b.unregisterTunnel(id)
+		b.writeConnectError(conn, statusCode, message)
+		return
+	}
+
+	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		if sendErr := b.sendTunnelClose(id, false, err); sendErr != nil {
+			b.logger.Printf("send tunnel close: %v", sendErr)
+		}
+		b.unregisterTunnel(id)
+		_ = conn.Close()
+		return
+	}
+	_ = conn.SetDeadline(time.Time{})
+
+	tunnelCtx, cancelTunnel := context.WithCancel(req.Context())
+
+	var once sync.Once
+	shutdown := func() {
+		once.Do(func() {
+			cancelTunnel()
+			_ = conn.Close()
+		})
+	}
+	cleanup := func(result tunnelRelayResult) {
+		if result.sendClose {
+			if err := b.sendTunnelClose(id, result.write, result.err); err != nil {
+				b.logger.Printf("send tunnel close: %v", err)
+			}
+		}
+		if !result.terminal {
+			return
+		}
+		shutdown()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		cleanup(b.relayPayloadToTunnel(conn, id, bufferedPayload))
+	}()
+
+	go func() {
+		defer wg.Done()
+		cleanup(b.relayTunnelToPayload(tunnelCtx, conn, tunnelCh))
+	}()
+
+	wg.Wait()
+	shutdown()
+	b.unregisterTunnel(id)
 }
 
 func (b *bridge) proxyRoundTrip(ctx context.Context, req helperproto.ProxyRequest) (*helperproto.ProxyResponse, error) {
@@ -230,6 +359,45 @@ func (b *bridge) proxyRoundTrip(ctx context.Context, req helperproto.ProxyReques
 	}
 }
 
+func (b *bridge) connect(ctx context.Context, host string, port int) (uint64, chan helperproto.Envelope, *helperproto.ConnectResponse, error) {
+	id := b.nextID.Add(1)
+	ch := make(chan helperproto.Envelope, 1)
+	tunnelCh := b.registerTunnel(id)
+
+	b.pendMu.Lock()
+	b.pending[id] = ch
+	b.pendMu.Unlock()
+
+	defer func() {
+		b.pendMu.Lock()
+		delete(b.pending, id)
+		b.pendMu.Unlock()
+	}()
+
+	if err := b.send(helperproto.Envelope{
+		ID: id,
+		ConnectRequest: &helperproto.ConnectRequest{
+			Host: host,
+			Port: port,
+		},
+	}); err != nil {
+		b.unregisterTunnel(id)
+		return id, nil, nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		b.unregisterTunnel(id)
+		return id, nil, nil, ctx.Err()
+	case env := <-ch:
+		if env.ConnectResponse == nil {
+			b.unregisterTunnel(id)
+			return id, nil, nil, fmt.Errorf("bridge response %d did not contain a connect response", id)
+		}
+		return id, tunnelCh, env.ConnectResponse, nil
+	}
+}
+
 func (b *bridge) deliver(env helperproto.Envelope) {
 	b.pendMu.Lock()
 	ch := b.pending[env.ID]
@@ -244,6 +412,193 @@ func (b *bridge) deliver(env helperproto.Envelope) {
 	default:
 		b.logger.Printf("dropping duplicate bridge response for request %d", env.ID)
 	}
+}
+
+func (b *bridge) registerTunnel(id uint64) chan helperproto.Envelope {
+	delivery := &tunnelDelivery{
+		ch:     make(chan helperproto.Envelope, 32),
+		closed: make(chan struct{}),
+	}
+	b.tunnelMu.Lock()
+	b.tunnels[id] = delivery
+	b.tunnelMu.Unlock()
+	return delivery.ch
+}
+
+func (b *bridge) unregisterTunnel(id uint64) {
+	b.tunnelMu.Lock()
+	delivery := b.tunnels[id]
+	delete(b.tunnels, id)
+	b.tunnelMu.Unlock()
+	if delivery != nil {
+		close(delivery.closed)
+	}
+}
+
+func (b *bridge) deliverTunnel(env helperproto.Envelope) {
+	b.tunnelMu.Lock()
+	delivery := b.tunnels[env.ID]
+	b.tunnelMu.Unlock()
+	if delivery == nil {
+		b.logger.Printf("dropping tunnel message for unknown request %d", env.ID)
+		return
+	}
+
+	select {
+	case delivery.ch <- env:
+	case <-delivery.closed:
+		b.logger.Printf("dropping tunnel message for closed request %d", env.ID)
+	}
+}
+
+func (b *bridge) sendTunnelClose(id uint64, write bool, tunnelErr error) error {
+	closeErr := ""
+	if tunnelErr != nil && !errors.Is(tunnelErr, io.EOF) && !errors.Is(tunnelErr, net.ErrClosed) {
+		closeErr = tunnelErr.Error()
+	}
+	return b.send(helperproto.Envelope{
+		ID: id,
+		TunnelClose: &helperproto.TunnelClose{
+			Write: write,
+			Error: closeErr,
+		},
+	})
+}
+
+func (b *bridge) relayPayloadToTunnel(conn net.Conn, id uint64, bufferedPayload []byte) tunnelRelayResult {
+	if len(bufferedPayload) > 0 {
+		if sendErr := b.send(helperproto.Envelope{
+			ID: id,
+			TunnelFrame: &helperproto.TunnelFrame{
+				Data: append([]byte(nil), bufferedPayload...),
+			},
+		}); sendErr != nil {
+			return tunnelRelayResult{sendClose: true, err: sendErr, terminal: true}
+		}
+	}
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			if sendErr := b.send(helperproto.Envelope{
+				ID: id,
+				TunnelFrame: &helperproto.TunnelFrame{
+					Data: append([]byte(nil), buf[:n]...),
+				},
+			}); sendErr != nil {
+				return tunnelRelayResult{sendClose: true, err: sendErr, terminal: true}
+			}
+		}
+
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return tunnelRelayResult{sendClose: true, write: true}
+		}
+		if errors.Is(err, net.ErrClosed) {
+			return tunnelRelayResult{}
+		}
+		return tunnelRelayResult{sendClose: true, err: err, terminal: true}
+	}
+}
+
+func drainHijackBufferedBytes(rw *bufio.ReadWriter) ([]byte, error) {
+	if rw == nil || rw.Reader == nil {
+		return nil, nil
+	}
+	n := rw.Reader.Buffered()
+	if n == 0 {
+		return nil, nil
+	}
+
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(rw.Reader, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func (b *bridge) relayTunnelToPayload(ctx context.Context, conn net.Conn, tunnelCh <-chan helperproto.Envelope) tunnelRelayResult {
+	for {
+		select {
+		case <-ctx.Done():
+			return tunnelRelayResult{}
+		case env := <-tunnelCh:
+			switch {
+			case env.TunnelFrame != nil:
+				if len(env.TunnelFrame.Data) == 0 {
+					continue
+				}
+				if err := writeAll(conn, env.TunnelFrame.Data); err != nil {
+					return tunnelRelayResult{sendClose: true, err: err, terminal: true}
+				}
+			case env.TunnelClose != nil:
+				if env.TunnelClose.Write {
+					if err := closePayloadWrite(conn); err != nil {
+						return tunnelRelayResult{sendClose: true, err: err, terminal: true}
+					}
+					return tunnelRelayResult{}
+				}
+				return tunnelRelayResult{terminal: true}
+			default:
+				b.logger.Printf("ignoring unexpected tunnel envelope kind %q", env.Kind())
+			}
+		}
+	}
+}
+
+func writeAll(dst net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := dst.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func (b *bridge) writeConnectError(conn net.Conn, statusCode int, message string) {
+	if statusCode < 400 || statusCode > 599 {
+		statusCode = http.StatusBadGateway
+	}
+	message = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(message, "\r", " "), "\n", " "))
+	if message == "" {
+		message = http.StatusText(statusCode)
+	}
+	statusText := http.StatusText(statusCode)
+	if statusText == "" {
+		statusText = "Error"
+	}
+	body := message + "\n"
+	if _, err := io.WriteString(conn, fmt.Sprintf("HTTP/1.1 %d %s\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s", statusCode, statusText, len(body), body)); err != nil {
+		b.logger.Printf("write connect error response: %v", err)
+	}
+	_ = conn.Close()
+}
+
+func connectErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+func closePayloadWrite(conn net.Conn) error {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if cw, ok := conn.(closeWriter); ok {
+		return cw.CloseWrite()
+	}
+	return conn.Close()
 }
 
 func (b *bridge) handleExec(ctx context.Context, id uint64, req helperproto.ExecRequest) {
@@ -367,9 +722,6 @@ func (b *bridge) send(env helperproto.Envelope) error {
 }
 
 func rewriteProxyRequest(req *http.Request) (*http.Request, error) {
-	if req.Method == http.MethodConnect {
-		return nil, errors.New("CONNECT is not implemented in the helper runtime")
-	}
 	if req.URL == nil || req.URL.Scheme == "" || req.URL.Host == "" {
 		return nil, errors.New("proxy request must use an absolute URL")
 	}
@@ -383,6 +735,28 @@ func rewriteProxyRequest(req *http.Request) (*http.Request, error) {
 	out.Header.Del("Proxy-Connection")
 
 	return out, nil
+}
+
+func parseConnectTarget(target string) (string, int, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", 0, errors.New("malformed CONNECT target: host is required")
+	}
+
+	host, portText, err := net.SplitHostPort(target)
+	if err != nil {
+		return "", 0, fmt.Errorf("malformed CONNECT target %q", target)
+	}
+	if host == "" {
+		return "", 0, errors.New("malformed CONNECT target: host is required")
+	}
+
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, fmt.Errorf("malformed CONNECT target %q", target)
+	}
+
+	return host, port, nil
 }
 
 func copyHeader(dst, src http.Header) {
