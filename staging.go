@@ -140,7 +140,10 @@ func writeSandboxConfig(root string) error {
 		"/etc/nsswitch.conf": "hosts: files\n",
 	}
 	for path, content := range files {
-		dest := filepath.Join(root, filepath.Clean(path))
+		dest, err := sandboxPathInRoot(root, path)
+		if err != nil {
+			return err
+		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dest, err)
 		}
@@ -170,7 +173,10 @@ func copyFileToPath(root, hostPath, sandboxPath string) error {
 	}
 	defer src.Close()
 
-	dest := filepath.Join(root, filepath.Clean(sandboxPath))
+	dest, err := sandboxPathInRoot(root, sandboxPath)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dest), err)
 	}
@@ -185,4 +191,25 @@ func copyFileToPath(root, hostPath, sandboxPath string) error {
 		return fmt.Errorf("copy %s to %s: %w", hostPath, dest, err)
 	}
 	return nil
+}
+
+func sandboxPathInRoot(root, sandboxPath string) (string, error) {
+	cleanRoot := filepath.Clean(root)
+	if cleanRoot == "." || cleanRoot == "" {
+		return "", fmt.Errorf("staging root is required")
+	}
+
+	cleanSandboxPath := filepath.Clean(sandboxPath)
+	cleanSandboxPath = strings.TrimPrefix(cleanSandboxPath, string(filepath.Separator))
+	dest := filepath.Join(cleanRoot, cleanSandboxPath)
+
+	rel, err := filepath.Rel(cleanRoot, dest)
+	if err != nil {
+		return "", fmt.Errorf("map sandbox path %q into %q: %w", sandboxPath, root, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("sandbox path %q escapes staging root", sandboxPath)
+	}
+
+	return dest, nil
 }
