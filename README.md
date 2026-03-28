@@ -6,10 +6,13 @@
 - one shared host-side proxy manager
 - one sandbox-local HTTP proxy listener per sandbox helper
 - per-sandbox regex-based egress policy
+- optional manager-wide TLS MITM with ephemeral CA trust injection
+- decrypted HTTPS request policy for paths, headers, and bounded request bodies
+- HTTP/2 interception support for concurrent client streams
 - automatic staging of requested binaries and their shared-library dependencies
 - explicit read-only and read-write bind mounts
 
-Phase 1 is intentionally narrow. It supports plain HTTP proxying, CONNECT tunneling, and persistent sandboxes. CONNECT is tunnel-only, not TLS MITM, so the host can enforce destination and method policy but does not decrypt HTTPS payloads. It does not yet implement TLS MITM, WebSocket-aware proxying, or full HTTP/2 interception.
+`bbox` supports plain HTTP proxying, raw CONNECT tunneling, and opt-in TLS MITM for HTTPS policy enforcement. Response-body inspection, WebSocket-specific interception behavior, and persistent CA lifecycle management are still out of scope.
 
 ## Requirements
 
@@ -42,6 +45,28 @@ go run ./cmd/demo \
   --target-url http://example.com
 ```
 
+## TLS MITM
+
+Enable MITM once on the shared manager:
+
+```go
+manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
+	MITM: bbox.MITMOptions{
+		Enabled:             true,
+		MaxRequestBodyBytes: 64 << 10,
+	},
+	NetworkPolicy: bbox.NetworkPolicy{
+		AllowHostPatterns: []string{`^api[.]github[.]com$`},
+		AllowHTTPMethods:  []string{"GET", "POST"},
+		AllowConnect:      true,
+		AllowConnectPorts: []string{"443"},
+		AllowPathPatterns: []string{`^/repos/`},
+	},
+})
+```
+
+When MITM is enabled, `bbox` generates one ephemeral CA per `ProxyManager`, injects that CA into each staged sandbox root, and evaluates decrypted HTTPS requests on the host before dialing upstream.
+
 ## Library Example
 
 ```go
@@ -57,7 +82,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{})
+manager, err := bbox.NewProxyManager(bbox.ProxyOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -72,6 +97,7 @@ func main() {
 		Policy: bbox.NetworkPolicy{
 			AllowHostPatterns: []string{`^example[.]com$`},
 			AllowHTTPMethods:  []string{"GET"},
+			AllowPathPatterns: []string{`^/$`},
 			AllowConnect:      true,
 			AllowConnectPorts: []string{"443"},
 		},
@@ -101,6 +127,8 @@ func main() {
 
 - Each sandbox runs a long-lived helper process inside `bwrap`.
 - `ProxyOptions.ListenAddr` sets the sandbox-local proxy listen address used by each helper. Leave it empty to use `127.0.0.1:31111`, or set it to `127.0.0.1:0` to let the kernel choose a free port. The sandbox runtime env is updated from the helper's reported bound address.
+- Sandbox runs export both `HTTP_PROXY` and `HTTPS_PROXY` pointing at the helper's sandbox-local listener.
 - Payload processes do not inherit the host bridge file descriptor.
 - Per-sandbox policy is enforced on the host before outbound requests are made.
 - Use `NetworkPolicy.AllowConnect` and `NetworkPolicy.AllowConnectPorts` to allow CONNECT tunnels to specific destination ports.
+- When `ProxyOptions.MITM.Enabled` is true, HTTPS requests are intercepted locally in the helper and checked against per-sandbox path, header, and body policy before the host performs the upstream request.

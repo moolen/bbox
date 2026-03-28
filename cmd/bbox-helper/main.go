@@ -14,9 +14,13 @@ import (
 func main() {
 	var bridgeFD int
 	var proxyAddr string
+	var mitmEnabled bool
+	var maxRequestBodyBytes int64
 
 	flag.IntVar(&bridgeFD, "bridge-fd", 3, "file descriptor carrying the helper control bridge")
 	flag.StringVar(&proxyAddr, "proxy-addr", helperruntime.DefaultProxyAddr, "sandbox-local proxy listen address")
+	flag.BoolVar(&mitmEnabled, "mitm-enabled", false, "enable TLS MITM interception for CONNECT requests")
+	flag.Int64Var(&maxRequestBodyBytes, "max-request-body-bytes", 0, "maximum intercepted request body bytes to buffer for policy evaluation")
 	flag.Parse()
 
 	if flag.NArg() > 0 && flag.Arg(0) != "child-proxy" {
@@ -34,9 +38,11 @@ func main() {
 
 	logger := log.New(os.Stderr, "bbox-helper: ", log.LstdFlags)
 	if err := helperruntime.Run(ctx, helperruntime.Config{
-		Bridge:    bridge,
-		ProxyAddr: proxyAddr,
-		Logger:    logger,
+		Bridge:              bridge,
+		ProxyAddr:           proxyAddr,
+		Logger:              logger,
+		MITMEnabled:         mitmEnabled,
+		MaxRequestBodyBytes: maxRequestBodyBytes,
 	}); err != nil {
 		logger.Fatal(err)
 	}

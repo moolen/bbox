@@ -14,6 +14,16 @@ type ProxyOptions struct {
 	// NetworkPolicy is the default policy inherited by sandboxes that do not
 	// supply their own SandboxOptions.Policy.
 	NetworkPolicy NetworkPolicy
+	// MITM configures proxy-wide man-in-the-middle handling.
+	MITM MITMOptions
+}
+
+// MITMOptions configures manager-wide MITM behavior.
+type MITMOptions struct {
+	// Enabled enables MITM handling for HTTP CONNECT traffic.
+	Enabled bool
+	// MaxRequestBodyBytes caps buffered request bodies when inspecting traffic.
+	MaxRequestBodyBytes int64
 }
 
 // Mount binds a host path into the sandbox.
@@ -75,6 +85,24 @@ type NetworkPolicy struct {
 	// AllowConnectPorts restricts CONNECT to the listed destination ports or
 	// port ranges.
 	AllowConnectPorts []string
+	// AllowPathPatterns is a regex allowlist matched against decrypted request
+	// paths.
+	AllowPathPatterns []string
+	// DenyPathPatterns is a regex denylist matched against decrypted request
+	// paths.
+	DenyPathPatterns []string
+	// AllowHeaderPatterns is a map of header names to regex allowlists for their
+	// values.
+	AllowHeaderPatterns map[string][]string
+	// DenyHeaderPatterns is a map of header names to regex denylists for their
+	// values.
+	DenyHeaderPatterns map[string][]string
+	// AllowBodyPatterns is a regex allowlist matched against the bounded request
+	// body.
+	AllowBodyPatterns []string
+	// DenyBodyPatterns is a regex denylist matched against the bounded request
+	// body.
+	DenyBodyPatterns []string
 }
 
 // ProxyManager owns the shared proxy policy state and creates sandboxes that
@@ -86,6 +114,9 @@ type ProxyManager struct {
 	sandboxPolicies map[string]*compiledPolicy
 	transport       *http.Transport
 	listenAddr      string
+	mitm            MITMOptions
+	mitmCA          *mitmCA
+	caCertPEM       []byte
 	nextSandboxID   atomic.Uint64
 
 	helperBinaryOnce sync.Once

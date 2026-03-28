@@ -64,7 +64,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, err
 	}
 
-	root, err := stageSandboxRoot(opts, helperBinary)
+	root, err := stageSandboxRoot(opts, helperBinary, m.CACertPEM())
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, fmt.Errorf("create helper log file: %w", err)
 	}
 
-	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, m.listenAddr, opts.Mounts)...)
+	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, m.listenAddr, m.mitm, opts.Mounts)...)
 	cmd.Stderr = helperLog
 	cmd.Stdout = helperLog
 	cmd.ExtraFiles = []*os.File{childBridge}
@@ -273,6 +273,8 @@ func runEnvForProxyAddr(proxyAddr string, extraEnv []string) []string {
 			"PATH=/usr/bin",
 			"HTTP_PROXY=" + proxyURL(proxyAddr),
 			"http_proxy=" + proxyURL(proxyAddr),
+			"HTTPS_PROXY=" + proxyURL(proxyAddr),
+			"https_proxy=" + proxyURL(proxyAddr),
 		},
 	)
 }
@@ -285,7 +287,7 @@ func filterReservedEnv(env []string) []string {
 			continue
 		}
 		switch key {
-		case "PATH", "HTTP_PROXY", "http_proxy":
+		case "PATH", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy":
 			continue
 		default:
 			filtered = append(filtered, entry)

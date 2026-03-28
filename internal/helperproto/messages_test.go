@@ -3,6 +3,7 @@ package helperproto
 import (
 	"bytes"
 	"encoding/gob"
+	"net/http"
 	"testing"
 )
 
@@ -154,6 +155,141 @@ func TestTunnelCloseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMITMRequestRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		ID: 13,
+		MITMRequest: &MITMRequest{
+			Scheme:       "https",
+			Authority:    "example.com:443",
+			Host:         "example.com",
+			Method:       "POST",
+			Path:         "/v1/chat/completions",
+			RawQuery:     "stream=true",
+			Header:       http.Header{"Content-Type": []string{"application/json"}},
+			Body:         []byte(`{"hello":"world"}`),
+			Proto:        "HTTP/2.0",
+			BodyTooLarge: true,
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("unexpected envelope id: got=%d want=%d", got.ID, want.ID)
+	}
+	if got.MITMRequest == nil {
+		t.Fatalf("unexpected MITM request: %#v", got.MITMRequest)
+	}
+	if got.MITMRequest.Host != want.MITMRequest.Host || got.MITMRequest.Proto != want.MITMRequest.Proto {
+		t.Fatalf("unexpected MITM request payload: got=%#v want=%#v", got.MITMRequest, want.MITMRequest)
+	}
+}
+
+func TestMITMResponseRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		ID: 14,
+		MITMResponse: &MITMResponse{
+			StatusCode: 201,
+			Header:     http.Header{"X-Test": []string{"ok"}},
+			Body:       []byte("created"),
+			Error:      "upstream warning",
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("unexpected envelope id: got=%d want=%d", got.ID, want.ID)
+	}
+	if got.MITMResponse == nil {
+		t.Fatalf("unexpected MITM response: %#v", got.MITMResponse)
+	}
+	if got.MITMResponse.StatusCode != want.MITMResponse.StatusCode ||
+		got.MITMResponse.Error != want.MITMResponse.Error {
+		t.Fatalf("unexpected MITM response payload: got=%#v want=%#v", got.MITMResponse, want.MITMResponse)
+	}
+}
+
+func TestLeafCertRequestRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		ID: 15,
+		LeafCertRequest: &LeafCertRequest{
+			Host: "example.com",
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("unexpected envelope id: got=%d want=%d", got.ID, want.ID)
+	}
+	if got.LeafCertRequest == nil || got.LeafCertRequest.Host != "example.com" {
+		t.Fatalf("unexpected leaf cert request: %#v", got.LeafCertRequest)
+	}
+}
+
+func TestLeafCertResponseRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		ID: 16,
+		LeafCertResponse: &LeafCertResponse{
+			CertPEM: []byte("cert"),
+			KeyPEM:  []byte("key"),
+			Error:   "boom",
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("unexpected envelope id: got=%d want=%d", got.ID, want.ID)
+	}
+	if got.LeafCertResponse == nil || got.LeafCertResponse.Error != "boom" {
+		t.Fatalf("unexpected leaf cert response: %#v", got.LeafCertResponse)
+	}
+}
+
+func TestProtocolVersion(t *testing.T) {
+	if ProtocolVersion != 4 {
+		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 4)
+	}
+}
+
 func TestEnvelopeKind(t *testing.T) {
 	tests := []struct {
 		name string
@@ -214,6 +350,26 @@ func TestEnvelopeKind(t *testing.T) {
 			name: "tunnel_close",
 			env:  Envelope{TunnelClose: &TunnelClose{}},
 			want: "tunnel_close",
+		},
+		{
+			name: "mitm_request",
+			env:  Envelope{MITMRequest: &MITMRequest{}},
+			want: "mitm_request",
+		},
+		{
+			name: "leaf_cert_request",
+			env:  Envelope{LeafCertRequest: &LeafCertRequest{}},
+			want: "leaf_cert_request",
+		},
+		{
+			name: "leaf_cert_response",
+			env:  Envelope{LeafCertResponse: &LeafCertResponse{}},
+			want: "leaf_cert_response",
+		},
+		{
+			name: "mitm_response",
+			env:  Envelope{MITMResponse: &MITMResponse{}},
+			want: "mitm_response",
 		},
 		{
 			name: "unknown",

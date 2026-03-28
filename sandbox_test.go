@@ -49,6 +49,7 @@ func TestSandboxUsesHelperReportedProxyEnv(t *testing.T) {
 	env := runEnvForProxyAddr("127.0.0.1:40123", []string{
 		"FOO=bar",
 		"HTTP_PROXY=http://stale",
+		"HTTPS_PROXY=http://stale-secure",
 	})
 
 	got := make(map[string]string, len(env))
@@ -68,6 +69,12 @@ func TestSandboxUsesHelperReportedProxyEnv(t *testing.T) {
 	}
 	if got["http_proxy"] != "http://127.0.0.1:40123" {
 		t.Fatalf("unexpected http_proxy: got %q", got["http_proxy"])
+	}
+	if got["HTTPS_PROXY"] != "http://127.0.0.1:40123" {
+		t.Fatalf("unexpected HTTPS_PROXY: got %q", got["HTTPS_PROXY"])
+	}
+	if got["https_proxy"] != "http://127.0.0.1:40123" {
+		t.Fatalf("unexpected https_proxy: got %q", got["https_proxy"])
 	}
 	if got["FOO"] != "bar" {
 		t.Fatalf("unexpected FOO: got %q", got["FOO"])

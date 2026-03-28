@@ -88,3 +88,43 @@ func TestNewProxyManagerAcceptsListenAddr(t *testing.T) {
 		t.Fatalf("unexpected listen address: got %q", manager.listenAddr)
 	}
 }
+
+func TestNewProxyManagerAcceptsMITMOptions(t *testing.T) {
+	manager, err := NewProxyManager(ProxyOptions{
+		MITM: MITMOptions{
+			Enabled:             true,
+			MaxRequestBodyBytes: 65536,
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected MITM options to be accepted: %v", err)
+	}
+	if manager == nil {
+		t.Fatal("expected non-nil manager")
+	}
+}
+
+func TestNewProxyManagerRejectsNegativeMITMBodyLimit(t *testing.T) {
+	_, err := NewProxyManager(ProxyOptions{
+		MITM: MITMOptions{
+			Enabled:             true,
+			MaxRequestBodyBytes: -1,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid MITM body limit to fail")
+	}
+}
+
+func TestProxyManagerCACertPEM(t *testing.T) {
+	manager, err := NewProxyManager(ProxyOptions{})
+	if err != nil {
+		t.Fatalf("expected manager to be created: %v", err)
+	}
+	if manager == nil {
+		t.Fatal("expected non-nil manager")
+	}
+	if got := manager.CACertPEM(); len(got) != 0 {
+		t.Fatalf("expected empty CA PEM when MITM disabled, got %q", string(got))
+	}
+}

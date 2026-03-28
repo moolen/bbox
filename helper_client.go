@@ -208,6 +208,12 @@ func (c *helperClient) readLoop() error {
 		case env.ConnectRequest != nil:
 			req := *env.ConnectRequest
 			go c.handleConnectRequest(env.ID, req)
+		case env.LeafCertRequest != nil:
+			req := *env.LeafCertRequest
+			go c.handleLeafCertRequest(env.ID, req)
+		case env.MITMRequest != nil:
+			req := *env.MITMRequest
+			go c.handleMITMRequest(env.ID, req)
 		case env.TunnelFrame != nil:
 			c.handleTunnelFrame(env.ID, *env.TunnelFrame)
 		case env.TunnelClose != nil:
@@ -284,6 +290,41 @@ func (c *helperClient) handleConnectRequest(id uint64, req helperproto.ConnectRe
 		return
 	}
 	tunnel.start()
+}
+
+func (c *helperClient) handleLeafCertRequest(id uint64, req helperproto.LeafCertRequest) {
+	response := c.manager.handleLeafCertRequest(req.Host)
+	if response == nil {
+		response = &helperproto.LeafCertResponse{
+			Error: "leaf cert request rejected: empty response",
+		}
+	}
+
+	if err := c.send(helperproto.Envelope{
+		ID:               id,
+		LeafCertResponse: response,
+	}); err != nil {
+		c.failCurrentRun(err)
+	}
+}
+
+func (c *helperClient) handleMITMRequest(id uint64, req helperproto.MITMRequest) {
+	response := c.manager.handleMITMRequest(c.ctx, c.sandboxID, req)
+	if response == nil {
+		response = &helperproto.MITMResponse{
+			StatusCode: http.StatusBadGateway,
+			Error:      "MITM request rejected: empty response",
+		}
+	}
+	if response.StatusCode == 0 {
+		response.StatusCode = http.StatusBadGateway
+	}
+	if err := c.send(helperproto.Envelope{
+		ID:           id,
+		MITMResponse: response,
+	}); err != nil {
+		c.failCurrentRun(err)
+	}
 }
 
 func (c *helperClient) registerPendingTunnel(id uint64, tunnel *hostTunnel) {

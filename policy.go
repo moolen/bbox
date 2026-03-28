@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/textproto"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,11 +16,26 @@ type compiledPolicy struct {
 	denyHosts    []*regexp.Regexp
 	allowConnect bool
 	connectPorts []portRange
+	allowPaths   []*regexp.Regexp
+	denyPaths    []*regexp.Regexp
+	allowHeaders map[string][]*regexp.Regexp
+	denyHeaders  map[string][]*regexp.Regexp
+	allowBodies  []*regexp.Regexp
+	denyBodies   []*regexp.Regexp
 }
 
 type portRange struct {
 	start int
 	end   int
+}
+
+type PolicyRequest struct {
+	Method       string
+	Host         string
+	Path         string
+	Header       http.Header
+	Body         []byte
+	BodyTooLarge bool
 }
 
 func compilePolicy(policy NetworkPolicy) (*compiledPolicy, error) {
@@ -50,6 +66,44 @@ func compilePolicy(policy NetworkPolicy) (*compiledPolicy, error) {
 			return nil, fmt.Errorf("compile deny host pattern %q: %w", pattern, err)
 		}
 		compiled.denyHosts = append(compiled.denyHosts, re)
+	}
+	for _, pattern := range policy.AllowPathPatterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compile allow path pattern %q: %w", pattern, err)
+		}
+		compiled.allowPaths = append(compiled.allowPaths, re)
+	}
+	for _, pattern := range policy.DenyPathPatterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compile deny path pattern %q: %w", pattern, err)
+		}
+		compiled.denyPaths = append(compiled.denyPaths, re)
+	}
+	allowHeaders, err := compileHeaderPatterns("allow", policy.AllowHeaderPatterns)
+	if err != nil {
+		return nil, err
+	}
+	compiled.allowHeaders = allowHeaders
+	denyHeaders, err := compileHeaderPatterns("deny", policy.DenyHeaderPatterns)
+	if err != nil {
+		return nil, err
+	}
+	compiled.denyHeaders = denyHeaders
+	for _, pattern := range policy.AllowBodyPatterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compile allow body pattern %q: %w", pattern, err)
+		}
+		compiled.allowBodies = append(compiled.allowBodies, re)
+	}
+	for _, pattern := range policy.DenyBodyPatterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compile deny body pattern %q: %w", pattern, err)
+		}
+		compiled.denyBodies = append(compiled.denyBodies, re)
 	}
 	for _, spec := range policy.AllowConnectPorts {
 		parsed, err := parseConnectPortSpec(spec)
@@ -120,6 +174,30 @@ func (p compiledPolicy) Check(method, hostname string, connect bool) error {
 	}
 	if allowListConfigured {
 		return fmt.Errorf("hostname %s is not allowed by policy", normalizedHost)
+	}
+	return nil
+}
+
+func (p compiledPolicy) CheckRequest(req PolicyRequest) error {
+	if err := p.Check(req.Method, req.Host, false); err != nil {
+		return err
+	}
+	if req.BodyTooLarge {
+		return fmt.Errorf("request body exceeds inspection limit")
+	}
+
+	path := strings.TrimSpace(req.Path)
+	if path == "" {
+		path = "/"
+	}
+	if err := matchPolicyPatterns("path", path, p.denyPaths, p.allowPaths); err != nil {
+		return err
+	}
+	if err := p.checkHeaders(req.Header); err != nil {
+		return err
+	}
+	if err := matchPolicyPatterns("request body", string(req.Body), p.denyBodies, p.allowBodies); err != nil {
+		return err
 	}
 	return nil
 }
@@ -258,4 +336,80 @@ func parsePortNumber(value string) (int, error) {
 func isIPv6Literal(host string) bool {
 	ip := net.ParseIP(host)
 	return ip != nil && strings.Contains(host, ":")
+}
+
+func compileHeaderPatterns(label string, patterns map[string][]string) (map[string][]*regexp.Regexp, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+
+	compiled := make(map[string][]*regexp.Regexp, len(patterns))
+	for headerName, values := range patterns {
+		normalizedName := strings.ToLower(strings.TrimSpace(headerName))
+		if normalizedName == "" {
+			return nil, fmt.Errorf("%s header pattern name cannot be empty", label)
+		}
+		for _, pattern := range values {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return nil, fmt.Errorf("compile %s header pattern %q for %q: %w", label, pattern, headerName, err)
+			}
+			compiled[normalizedName] = append(compiled[normalizedName], re)
+		}
+	}
+	return compiled, nil
+}
+
+func matchPolicyPatterns(label, value string, deny, allow []*regexp.Regexp) error {
+	for _, re := range deny {
+		if re.MatchString(value) {
+			return fmt.Errorf("%s %q is denied by policy", label, value)
+		}
+	}
+	if len(allow) == 0 {
+		return nil
+	}
+	for _, re := range allow {
+		if re.MatchString(value) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s %q is not allowed by policy", label, value)
+}
+
+func (p compiledPolicy) checkHeaders(headers http.Header) error {
+	normalized := make(map[string][]string, len(headers))
+	for headerName, values := range headers {
+		normalized[strings.ToLower(textproto.CanonicalMIMEHeaderKey(headerName))] = values
+	}
+
+	for headerName, rules := range p.denyHeaders {
+		for _, value := range normalized[headerName] {
+			for _, re := range rules {
+				if re.MatchString(value) {
+					return fmt.Errorf("header %s is denied by policy", headerName)
+				}
+			}
+		}
+	}
+
+	for headerName, rules := range p.allowHeaders {
+		matched := false
+		for _, value := range normalized[headerName] {
+			for _, re := range rules {
+				if re.MatchString(value) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("header %s is not allowed by policy", headerName)
+		}
+	}
+
+	return nil
 }

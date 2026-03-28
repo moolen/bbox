@@ -1,6 +1,9 @@
 package bbox
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
 
 func TestCompiledPolicyHonorsDenyBeforeAllow(t *testing.T) {
 	policy, err := compilePolicy(NetworkPolicy{
@@ -253,5 +256,151 @@ func TestCompiledPolicyTrimsBracketedIPv6Whitespace(t *testing.T) {
 
 	if err := policy.Check("GET", "[  ::1  ]", false); err != nil {
 		t.Fatalf("expected bracketed IPv6 whitespace to normalize and match: %v", err)
+	}
+}
+
+func TestCompiledPolicyRejectsDeniedPath(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+		DenyPathPatterns:  []string{`^/admin`},
+	})
+
+	err := policy.CheckRequest(PolicyRequest{
+		Method: "GET",
+		Host:   "example.com",
+		Path:   "/admin",
+	})
+	if err == nil {
+		t.Fatal("expected denied path to fail")
+	}
+}
+
+func TestCompiledPolicyRequiresAllowedPath(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+		AllowPathPatterns: []string{`^/api/`},
+	})
+
+	if err := policy.CheckRequest(PolicyRequest{
+		Method: "GET",
+		Host:   "example.com",
+		Path:   "/api/status",
+	}); err != nil {
+		t.Fatalf("expected allowed path to pass: %v", err)
+	}
+	if err := policy.CheckRequest(PolicyRequest{
+		Method: "GET",
+		Host:   "example.com",
+		Path:   "/healthz",
+	}); err == nil {
+		t.Fatal("expected non-matching path allowlist to deny")
+	}
+}
+
+func TestCompiledPolicyRejectsDeniedHeader(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+		DenyHeaderPatterns: map[string][]string{
+			"X-Blocked": {`^yes$`},
+		},
+	})
+
+	err := policy.CheckRequest(PolicyRequest{
+		Method: "GET",
+		Host:   "example.com",
+		Path:   "/",
+		Header: http.Header{
+			"X-Blocked": []string{"yes"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected denied header to fail")
+	}
+}
+
+func TestCompiledPolicyRequiresAllowedHeader(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+		AllowHeaderPatterns: map[string][]string{
+			"X-Trace": {`^trace-[0-9]+$`},
+		},
+	})
+
+	if err := policy.CheckRequest(PolicyRequest{
+		Method: "GET",
+		Host:   "example.com",
+		Path:   "/",
+		Header: http.Header{
+			"X-Trace": []string{"trace-42"},
+		},
+	}); err != nil {
+		t.Fatalf("expected allowed header to pass: %v", err)
+	}
+	if err := policy.CheckRequest(PolicyRequest{
+		Method: "GET",
+		Host:   "example.com",
+		Path:   "/",
+		Header: http.Header{
+			"X-Trace": []string{"missing"},
+		},
+	}); err == nil {
+		t.Fatal("expected unmatched header allowlist to deny")
+	}
+}
+
+func TestCompiledPolicyRejectsDeniedBody(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+		DenyBodyPatterns:  []string{`secret`},
+	})
+
+	err := policy.CheckRequest(PolicyRequest{
+		Method: "POST",
+		Host:   "example.com",
+		Path:   "/submit",
+		Body:   []byte("contains secret material"),
+	})
+	if err == nil {
+		t.Fatal("expected denied body to fail")
+	}
+}
+
+func TestCompiledPolicyRequiresAllowedBody(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+		AllowBodyPatterns: []string{`^safe=`},
+	})
+
+	if err := policy.CheckRequest(PolicyRequest{
+		Method: "POST",
+		Host:   "example.com",
+		Path:   "/submit",
+		Body:   []byte("safe=true"),
+	}); err != nil {
+		t.Fatalf("expected allowed body to pass: %v", err)
+	}
+	if err := policy.CheckRequest(PolicyRequest{
+		Method: "POST",
+		Host:   "example.com",
+		Path:   "/submit",
+		Body:   []byte("other=true"),
+	}); err == nil {
+		t.Fatal("expected unmatched body allowlist to deny")
+	}
+}
+
+func TestCompiledPolicyRejectsOversizedBody(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+	})
+
+	err := policy.CheckRequest(PolicyRequest{
+		Method:       "POST",
+		Host:         "example.com",
+		Path:         "/submit",
+		BodyTooLarge: true,
+	})
+	if err == nil {
+		t.Fatal("expected oversized body to fail")
 	}
 }
