@@ -103,6 +103,20 @@ func TestNilSandboxProxyAccessorsReturnEmptyString(t *testing.T) {
 	}
 }
 
+func TestSandboxProxyAccessorsRemainEmptyInTransparentMode(t *testing.T) {
+	sandbox := &Sandbox{
+		trafficMode: TrafficModeTransparent,
+		proxyAddr:   "127.0.0.1:40123",
+	}
+
+	if got := sandbox.ProxyAddr(); got != "" {
+		t.Fatalf("expected transparent sandbox proxy addr to be empty, got %q", got)
+	}
+	if got := sandbox.ProxyURL(); got != "" {
+		t.Fatalf("expected transparent sandbox proxy url to be empty, got %q", got)
+	}
+}
+
 func TestTrafficModeDefaultsToProxy(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		if got := normalizeTrafficMode(""); got != TrafficModeProxy {

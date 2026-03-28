@@ -4,7 +4,7 @@
 
 - isolated filesystem, PID, and network namespaces
 - one shared host-side proxy manager
-- one sandbox-local HTTP proxy listener per sandbox helper
+- one sandbox-local traffic ingress per sandbox helper
 - per-sandbox regex-based egress policy
 - optional manager-wide TLS MITM with ephemeral CA trust injection
 - decrypted HTTPS request policy for paths, headers, and bounded request bodies
@@ -12,7 +12,7 @@
 - automatic staging of requested binaries and their shared-library dependencies
 - explicit read-only and read-write bind mounts
 
-`bbox` supports plain HTTP proxying, raw CONNECT tunneling, and opt-in TLS MITM for HTTPS policy enforcement. Response-body inspection, WebSocket-specific interception behavior, and persistent CA lifecycle management are still out of scope.
+`bbox` supports both explicit proxy mode and transparent mode. Proxy mode injects `HTTP_PROXY` / `HTTPS_PROXY` into sandboxed runs. Transparent mode uses sandbox-local DNS plus loopback listeners on `:80` and `:443`, while still reusing the same host-side policy engine. Response-body inspection, WebSocket-specific interception behavior, and persistent CA lifecycle management are still out of scope.
 
 ## Requirements
 
@@ -67,6 +67,61 @@ manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
 
 When MITM is enabled, `bbox` generates one ephemeral CA per `ProxyManager`, injects that CA into each staged sandbox root, and evaluates decrypted HTTPS requests on the host before dialing upstream.
 
+## Traffic Modes
+
+Choose the traffic mode per sandbox with `SandboxOptions.TrafficMode`.
+
+Proxy mode is the default:
+
+```go
+sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
+	Name:        "proxy-demo",
+	TrafficMode: bbox.TrafficModeProxy,
+	Binaries:    []string{"curl"},
+	Policy: bbox.NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+		AllowHTTPMethods:  []string{"GET"},
+		AllowConnect:      true,
+		AllowConnectPorts: []string{"443"},
+	},
+})
+```
+
+In proxy mode, bbox injects `HTTP_PROXY`, `http_proxy`, `HTTPS_PROXY`, and `https_proxy` for sandboxed runs. `Sandbox.ProxyAddr()` and `Sandbox.ProxyURL()` report the helper's effective proxy endpoint.
+
+Transparent mode is opt-in and requires manager-wide MITM support:
+
+```go
+manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
+	MITM: bbox.MITMOptions{
+		Enabled:             true,
+		MaxRequestBodyBytes: 64 << 10,
+	},
+})
+
+sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
+	Name:        "transparent-demo",
+	TrafficMode: bbox.TrafficModeTransparent,
+	Binaries:    []string{"curl"},
+	Policy: bbox.NetworkPolicy{
+		AllowHostPatterns: []string{`^api[.]github[.]com$`},
+		AllowHTTPMethods:  []string{"GET"},
+		AllowPathPatterns: []string{`^/repos/`},
+	},
+})
+```
+
+In transparent mode, bbox does not inject proxy environment variables. Instead, the helper owns sandbox-local listeners for DNS on `127.0.0.1:53`, HTTP on `127.0.0.1:80`, and HTTPS MITM on `127.0.0.1:443`. `Sandbox.ProxyAddr()` and `Sandbox.ProxyURL()` intentionally return empty strings in this mode.
+
+Transparent mode limitations:
+
+- only hostname-based HTTP on `:80`
+- only hostname-based HTTPS on `:443`
+- no IP-literal destinations such as `https://1.1.1.1/`
+- no non-default ports such as `:8080` or `:8443`
+- no QUIC / HTTP/3
+- no arbitrary non-HTTP TCP protocols
+
 ## Access Audit And Logging
 
 Each sandbox tracks attempted outbound hosts. Call `Sandbox.AccessedDomains()` to fetch a snapshot of the aggregated audit state, including attempt counts, the most recent result/error, last seen time, last port, and whether HTTP, CONNECT, or MITM requests were observed.
@@ -88,7 +143,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-manager, err := bbox.NewProxyManager(bbox.ProxyOptions{})
+	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -132,9 +187,10 @@ manager, err := bbox.NewProxyManager(bbox.ProxyOptions{})
 ## Notes
 
 - Each sandbox runs a long-lived helper process inside `bwrap`.
-- `ProxyOptions.ListenAddr` sets the sandbox-local proxy listen address used by each helper. Leave it empty to use `127.0.0.1:31111`, or set it to `127.0.0.1:0` to let the kernel choose a free port. The sandbox runtime env is updated from the helper's reported bound address.
-- Sandbox runs export both `HTTP_PROXY` and `HTTPS_PROXY` pointing at the helper's sandbox-local listener.
+- `ProxyOptions.ListenAddr` sets the sandbox-local proxy listen address used by proxy-mode helpers. Leave it empty to use `127.0.0.1:31111`, or set it to `127.0.0.1:0` to let the kernel choose a free port. The sandbox runtime env is updated from the helper's reported bound address.
+- Proxy-mode sandbox runs export `HTTP_PROXY` and `HTTPS_PROXY` pointing at the helper's sandbox-local listener. Transparent-mode runs do not inject proxy env vars.
 - Payload processes do not inherit the host bridge file descriptor.
 - Per-sandbox policy is enforced on the host before outbound requests are made.
 - Use `NetworkPolicy.AllowConnect` and `NetworkPolicy.AllowConnectPorts` to allow CONNECT tunnels to specific destination ports.
 - When `ProxyOptions.MITM.Enabled` is true, HTTPS requests are intercepted locally in the helper and checked against per-sandbox path, header, and body policy before the host performs the upstream request.
+- Transparent mode requires the helper to bind `127.0.0.1:53`, `127.0.0.1:80`, and `127.0.0.1:443` inside the sandbox network namespace.

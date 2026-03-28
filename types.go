@@ -14,22 +14,24 @@ type AccessLogger interface {
 
 // AccessLogEntry describes a single access attempt.
 type AccessLogEntry struct {
-	Time       time.Time
-	SandboxID  string
-	Kind       string
-	Host       string
-	Port       int
-	Method     string
-	Path       string
-	Allowed    bool
-	StatusCode int
-	Result     string
-	Error      string
+	Time        time.Time
+	SandboxID   string
+	TrafficMode TrafficMode
+	Kind        string
+	Host        string
+	Port        int
+	Method      string
+	Path        string
+	Allowed     bool
+	StatusCode  int
+	Result      string
+	Error       string
 }
 
 // AccessedDomain aggregates access attempts for a host.
 type AccessedDomain struct {
 	Host        string
+	TrafficMode TrafficMode
 	Attempts    int
 	LastResult  string
 	LastError   string

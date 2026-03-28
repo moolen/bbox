@@ -45,6 +45,9 @@ type helperClient struct {
 
 type helperReady struct {
 	proxyAddr string
+	dnsAddr   string
+	httpAddr  string
+	httpsAddr string
 	err       error
 }
 
@@ -100,10 +103,13 @@ func (c *helperClient) Start(ctx context.Context) (string, error) {
 		if ready.err != nil {
 			return "", ready.err
 		}
-		if ready.proxyAddr == "" {
-			return "", errors.New("helper did not report a proxy address")
+		if ready.proxyAddr != "" {
+			return ready.proxyAddr, nil
 		}
-		return ready.proxyAddr, nil
+		if ready.hasTransparentListeners() {
+			return "", nil
+		}
+		return "", errors.New("helper did not report proxy or transparent listener readiness")
 	case err := <-c.loopDone:
 		if err == nil {
 			return "", errors.New("helper exited before signaling readiness")
@@ -187,7 +193,7 @@ func (c *helperClient) readLoop() error {
 	for {
 		var env helperproto.Envelope
 		if err := c.dec.Decode(&env); err != nil {
-			c.notifyReady("", err)
+			c.notifyReady(helperReady{err: err})
 			c.failCurrentRun(err)
 			c.shutdownTunnels()
 			return err
@@ -197,11 +203,16 @@ func (c *helperClient) readLoop() error {
 		case env.Ready != nil:
 			if env.Ready.ProtocolVersion != helperproto.ProtocolVersion {
 				err := fmt.Errorf("unexpected helper protocol version %d", env.Ready.ProtocolVersion)
-				c.notifyReady("", err)
+				c.notifyReady(helperReady{err: err})
 				c.failCurrentRun(err)
 				return err
 			}
-			c.notifyReady(env.Ready.ProxyAddr, nil)
+			c.notifyReady(helperReady{
+				proxyAddr: env.Ready.ProxyAddr,
+				dnsAddr:   env.Ready.DNSAddr,
+				httpAddr:  env.Ready.HTTPAddr,
+				httpsAddr: env.Ready.HTTPSAddr,
+			})
 		case env.ProxyRequest != nil:
 			req := *env.ProxyRequest
 			go c.handleProxyRequest(env.ID, req)
@@ -226,9 +237,13 @@ func (c *helperClient) readLoop() error {
 	}
 }
 
-func (c *helperClient) notifyReady(proxyAddr string, err error) {
+func (r helperReady) hasTransparentListeners() bool {
+	return r.dnsAddr != "" && r.httpAddr != "" && r.httpsAddr != ""
+}
+
+func (c *helperClient) notifyReady(ready helperReady) {
 	c.readyOnce.Do(func() {
-		c.readyCh <- helperReady{proxyAddr: proxyAddr, err: err}
+		c.readyCh <- ready
 	})
 }
 
