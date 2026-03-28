@@ -23,6 +23,72 @@
 - a Go toolchain on the host `PATH`
 - any payload binaries you want to stage, for example `curl`, `wget`, or `go`
 
+## Docker
+
+This repository includes an agent-oriented container image with:
+
+- Go and the standard build toolchain
+- `bbox` and `bbox-helper` on `PATH`
+- `bubblewrap`, `libseccomp`, `golangci-lint`, `govulncheck`
+- common shell/debugging tools such as `git`, `rg`, `jq`, `curl`, `wget`, `strace`, and `python3`
+
+Local helper targets:
+
+```bash
+make build
+make docker-build IMAGE=bbox-agent TAG=dev
+make lint
+```
+
+The image is meant to be used with a bind-mounted checkout at `/workspace`, because `bbox` rebuilds `cmd/bbox-helper` from the module root when it starts a sandbox.
+
+Start an interactive agent shell:
+
+```bash
+docker run --rm -it \
+  -v "$PWD":/workspace \
+  -w /workspace \
+  bbox-agent:dev
+```
+
+Inside the container you can run:
+
+```bash
+make build
+make lint
+go test ./...
+```
+
+To actually launch nested `bwrap` sandboxes from inside Docker, a plain container is not enough on this host. A verified, known-good invocation is `--privileged`:
+
+```bash
+docker run --rm -it \
+  --privileged \
+  -v "$PWD":/workspace \
+  -w /workspace \
+  bbox-agent:dev
+```
+
+Proxy-mode example inside that container:
+
+```bash
+bbox \
+  --allowed-domain example.com \
+  -- /usr/bin/curl -fsS http://example.com
+```
+
+Transparent mode binds `127.0.0.1:53`, `127.0.0.1:80`, and `127.0.0.1:443` inside the nested sandbox namespace, and it requires `--mitm`. The verified Docker setup above uses `--privileged`, which already covers the low-port bind requirement; adding `--cap-add=NET_BIND_SERVICE` on top is redundant.
+
+Transparent-mode example inside that container:
+
+```bash
+bbox \
+  --traffic-mode transparent \
+  --mitm \
+  --allowed-domain example.com \
+  -- /usr/bin/curl -fsS http://example.com
+```
+
 ## Seccomp Hardening
 
 Every sandbox enables seccomp by default with the `baseline` profile. The baseline profile is designed for an unprivileged `bwrap` sandbox: it keeps `--new-session`, blocks `TIOCSTI` ioctl injection as defense in depth, denies namespace and mount reconfiguration syscalls, blocks process-inspection syscalls that could target the long-lived helper, and blocks uncommon privileged kernel attack surfaces such as `bpf`, module loading, and keyring syscalls.

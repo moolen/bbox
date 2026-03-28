@@ -1,1 +1,4 @@
 .worktrees/
+bin/
+/bbox
+/bbox-helper

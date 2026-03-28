@@ -21,6 +21,9 @@ import (
 	"github.com/moolen/bbox/internal/helperruntime"
 )
 
+var packageRootRuntimeCaller = runtime.Caller
+var packageRootGetwd = os.Getwd
+
 func newProxyManager(policy *compiledPolicy) *ProxyManager {
 	return &ProxyManager{
 		policy:          policy,
@@ -163,16 +166,53 @@ func (m *ProxyManager) helperBinary() (string, error) {
 }
 
 func packageRoot() (string, error) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return "", fmt.Errorf("determine package root: runtime caller unavailable")
+	if _, file, _, ok := packageRootRuntimeCaller(0); ok {
+		if root, found := findPackageRoot(filepath.Dir(file)); found {
+			return root, nil
+		}
 	}
 
-	root := filepath.Dir(file)
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		return "", fmt.Errorf("locate package root from %q: %w", root, err)
+	cwd, err := packageRootGetwd()
+	if err != nil {
+		return "", fmt.Errorf("determine package root: %w", err)
 	}
-	return root, nil
+	if root, found := findPackageRoot(cwd); found {
+		return root, nil
+	}
+
+	return "", fmt.Errorf("locate package root from working directory %q", cwd)
+}
+
+func findPackageRoot(start string) (string, bool) {
+	if start == "" {
+		return "", false
+	}
+
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return "", false
+	}
+
+	for {
+		if isPackageRoot(dir) {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+func isPackageRoot(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cmd", "bbox-helper", "main.go")); err != nil {
+		return false
+	}
+	return true
 }
 
 func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string, req helperproto.ProxyRequest) *helperproto.ProxyResponse {

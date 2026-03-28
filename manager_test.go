@@ -11,12 +11,50 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/moolen/bbox/internal/helperproto"
 )
+
+func TestPackageRootFallsBackToWorkingDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	repoRoot := filepath.Join(tempDir, "repo")
+	if err := os.MkdirAll(filepath.Join(repoRoot, "cmd", "bbox-helper"), 0o755); err != nil {
+		t.Fatalf("create helper dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module github.com/moolen/bbox\n\ngo 1.25.0\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "cmd", "bbox-helper", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write helper main: %v", err)
+	}
+
+	prevCaller := packageRootRuntimeCaller
+	prevGetwd := packageRootGetwd
+	t.Cleanup(func() {
+		packageRootRuntimeCaller = prevCaller
+		packageRootGetwd = prevGetwd
+	})
+
+	packageRootRuntimeCaller = func(skip int) (uintptr, string, int, bool) {
+		return 0, filepath.Join(tempDir, "trimpath", "github.com", "moolen", "bbox", "manager.go"), 0, true
+	}
+	packageRootGetwd = func() (string, error) {
+		return filepath.Join(repoRoot, "cmd"), nil
+	}
+
+	root, err := packageRoot()
+	if err != nil {
+		t.Fatalf("packageRoot returned error: %v", err)
+	}
+	if root != repoRoot {
+		t.Fatalf("unexpected root: got %q want %q", root, repoRoot)
+	}
+}
 
 func TestProxyManagerRegistryLifecycle(t *testing.T) {
 	policy, err := compilePolicy(NetworkPolicy{})

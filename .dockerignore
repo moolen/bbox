@@ -1,0 +1,5 @@
+.git
+.worktrees
+bin
+bbox
+bbox-helper
