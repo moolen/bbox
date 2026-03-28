@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -318,6 +319,182 @@ func TestProxyHandlerMITMHTTP1ReturnsDeterministicFailure(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for MITM bridge peer")
+	}
+
+	cancel()
+	_ = peerSide.Close()
+	select {
+	case err := <-readLoopErrCh:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected readLoop shutdown error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for readLoop to exit")
+	}
+}
+
+func TestMITMHTTP2HandlesConcurrentStreams(t *testing.T) {
+	bridgeSide, peerSide := net.Pipe()
+	defer bridgeSide.Close()
+	defer peerSide.Close()
+
+	bridge := newBridge(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111")
+	bridge.mitmEnabled = true
+	bridge.maxRequestBodyBytes = 1024
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	readLoopErrCh := make(chan error, 1)
+	go func() {
+		readLoopErrCh <- bridge.readLoop(ctx)
+	}()
+
+	const streamCount = 8
+	caRoots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(peerSide)
+		enc := gob.NewEncoder(peerSide)
+		var sendMu sync.Mutex
+
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if connectReq.ConnectRequest == nil {
+			peerErrCh <- fmt.Errorf("expected connect request, got %#v", connectReq)
+			return
+		}
+		sendMu.Lock()
+		err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		})
+		sendMu.Unlock()
+		if err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil {
+			peerErrCh <- fmt.Errorf("expected leaf cert request, got %#v", certReq)
+			return
+		}
+		sendMu.Lock()
+		err = enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		})
+		sendMu.Unlock()
+		if err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(streamCount)
+		for i := 0; i < streamCount; i++ {
+			var mitmReq helperproto.Envelope
+			if err := dec.Decode(&mitmReq); err != nil {
+				peerErrCh <- err
+				return
+			}
+			if mitmReq.MITMRequest == nil {
+				peerErrCh <- fmt.Errorf("expected MITM request, got %#v", mitmReq)
+				return
+			}
+			if mitmReq.MITMRequest.Proto != "HTTP/2.0" {
+				peerErrCh <- fmt.Errorf("expected HTTP/2.0 request, got %#v", mitmReq.MITMRequest)
+				return
+			}
+
+			id := mitmReq.ID
+			path := mitmReq.MITMRequest.Path
+			delay := time.Duration(streamCount-i) * 5 * time.Millisecond
+			go func() {
+				defer wg.Done()
+				time.Sleep(delay)
+				sendMu.Lock()
+				defer sendMu.Unlock()
+				_ = enc.Encode(&helperproto.Envelope{
+					ID: id,
+					MITMResponse: &helperproto.MITMResponse{
+						StatusCode: http.StatusOK,
+						Body:       []byte(path),
+					},
+				})
+			}()
+		}
+		wg.Wait()
+		peerErrCh <- nil
+	}()
+
+	server := httptest.NewServer(bridge.proxyHandler())
+	defer server.Close()
+
+	proxyURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{
+		Proxy:             http.ProxyURL(proxyURL),
+		TLSClientConfig:   &tls.Config{RootCAs: caRoots},
+		ForceAttemptHTTP2: true,
+		MaxConnsPerHost:   1,
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+
+	errCh := make(chan error, streamCount)
+	for i := 0; i < streamCount; i++ {
+		i := i
+		go func() {
+			targetURL := fmt.Sprintf("https://example.com/stream-%d", i)
+			resp, err := client.Get(targetURL)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if string(body) != fmt.Sprintf("/stream-%d", i) {
+				errCh <- fmt.Errorf("unexpected body for stream %d: %q", i, string(body))
+				return
+			}
+			errCh <- nil
+		}()
+	}
+
+	for i := 0; i < streamCount; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for HTTP/2 bridge peer")
 	}
 
 	cancel()

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	"golang.org/x/net/http2"
 )
 
 const DefaultProxyAddr = "127.0.0.1:31111"
@@ -303,7 +304,7 @@ func (b *bridge) handleMITMConnect(w http.ResponseWriter, req *http.Request) {
 	tlsConn := tls.Server(serverConn, &tls.Config{
 		Certificates: []tls.Certificate{leafCert},
 		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"http/1.1"},
+		NextProtos:   []string{"h2", "http/1.1"},
 	})
 	if err := tlsConn.HandshakeContext(connectCtx); err != nil {
 		_ = conn.SetDeadline(time.Time{})
@@ -312,9 +313,13 @@ func (b *bridge) handleMITMConnect(w http.ResponseWriter, req *http.Request) {
 	}
 	_ = conn.SetDeadline(time.Time{})
 
-	serveErr := (&http.Server{
+	server := &http.Server{
 		Handler: b.mitmHandler(host, port),
-	}).Serve(&singleConnListener{conn: tlsConn})
+	}
+	if err := http2.ConfigureServer(server, &http2.Server{}); err != nil {
+		b.logger.Printf("configure MITM HTTP/2 server: %v", err)
+	}
+	serveErr := server.Serve(&singleConnListener{conn: tlsConn})
 	if serveErr != nil && !errors.Is(serveErr, io.EOF) && !errors.Is(serveErr, net.ErrClosed) {
 		b.logger.Printf("serve MITM connection: %v", serveErr)
 	}
