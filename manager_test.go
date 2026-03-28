@@ -1,6 +1,10 @@
 package bbox
 
-import "testing"
+import (
+	"crypto/x509"
+	"encoding/pem"
+	"testing"
+)
 
 func TestProxyManagerRegistryLifecycle(t *testing.T) {
 	policy, err := compilePolicy(NetworkPolicy{})
@@ -27,5 +31,29 @@ func TestProxyManagerRegistryLifecycle(t *testing.T) {
 	manager.unregisterSandbox("sandbox-1")
 	if _, ok := manager.policyForSandbox("sandbox-1"); ok {
 		t.Fatal("expected sandbox policy lookup to fail after unregister")
+	}
+}
+
+func TestProxyManagerCACertPEMReturnsParseableCertificateWhenMITMEnabled(t *testing.T) {
+	manager, err := NewProxyManager(ProxyOptions{
+		MITM: MITMOptions{
+			Enabled:             true,
+			MaxRequestBodyBytes: 65536,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	block, _ := pem.Decode(manager.CACertPEM())
+	if block == nil {
+		t.Fatal("expected CA PEM block")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse manager CA cert: %v", err)
+	}
+	if !cert.IsCA {
+		t.Fatal("expected manager MITM cert to be a CA")
 	}
 }

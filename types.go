@@ -97,6 +97,7 @@ type ProxyManager struct {
 	transport       *http.Transport
 	listenAddr      string
 	mitm            MITMOptions
+	mitmCA          *mitmCA
 	caCertPEM       []byte
 	nextSandboxID   atomic.Uint64
 

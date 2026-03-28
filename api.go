@@ -30,5 +30,12 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	manager := newProxyManager(policy)
 	manager.listenAddr = listenAddr
 	manager.mitm = opts.MITM
+	if opts.MITM.Enabled {
+		manager.mitmCA, err = newMITMCA()
+		if err != nil {
+			return nil, err
+		}
+		manager.caCertPEM = manager.mitmCA.CertPEM()
+	}
 	return manager, nil
 }
