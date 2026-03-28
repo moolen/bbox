@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
 
@@ -150,11 +152,11 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 		cfg.HTTPSAddr = DefaultTransparentHTTPSAddr
 	}
 
-	dnsListener, err := net.Listen("tcp", cfg.DNSAddr)
+	dnsServer, err := newTransparentDNSServer(cfg.DNSAddr)
 	if err != nil {
 		return fmt.Errorf("listen on DNS address %q: %w", cfg.DNSAddr, err)
 	}
-	defer dnsListener.Close()
+	defer dnsServer.Close()
 
 	httpListener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
@@ -171,7 +173,7 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	bridge := newBridge(cfg.Bridge, cfg.Logger, "")
 	bridge.mitmEnabled = cfg.MITMEnabled
 	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
-	bridge.dnsAddr = dnsListener.Addr().String()
+	bridge.dnsAddr = dnsServer.Addr()
 	bridge.httpAddr = httpListener.Addr().String()
 	bridge.httpsAddr = httpsListener.Addr().String()
 
@@ -180,14 +182,14 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	go func() {
 		<-ctx.Done()
 
-		_ = dnsListener.Close()
+		_ = dnsServer.Close()
 		_ = httpListener.Close()
 		_ = httpsListener.Close()
 		_ = cfg.Bridge.Close()
 	}()
 
 	go func() {
-		errCh <- serveTransparentListener(dnsListener)
+		errCh <- dnsServer.Serve()
 	}()
 	go func() {
 		errCh <- serveTransparentListener(httpListener)
@@ -218,6 +220,192 @@ func serveTransparentListener(listener net.Listener) error {
 		}
 		_ = conn.Close()
 	}
+}
+
+type transparentDNSServer struct {
+	tcpListener net.Listener
+	udpConn     net.PacketConn
+}
+
+func newTransparentDNSServer(addr string) (*transparentDNSServer, error) {
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	udpAddr, err := transparentDNSUDPAddr(tcpListener.Addr())
+	if err != nil {
+		_ = tcpListener.Close()
+		return nil, err
+	}
+
+	udpConn, err := net.ListenPacket("udp", udpAddr)
+	if err != nil {
+		_ = tcpListener.Close()
+		return nil, err
+	}
+
+	return &transparentDNSServer{
+		tcpListener: tcpListener,
+		udpConn:     udpConn,
+	}, nil
+}
+
+func transparentDNSUDPAddr(addr net.Addr) (string, error) {
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", fmt.Errorf("split DNS listener address %q: %w", addr.String(), err)
+	}
+
+	return net.JoinHostPort(host, port), nil
+}
+
+func (s *transparentDNSServer) Addr() string {
+	return s.tcpListener.Addr().String()
+}
+
+func (s *transparentDNSServer) Close() error {
+	var errs []error
+	if s.udpConn != nil {
+		if err := s.udpConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, err)
+		}
+	}
+	if s.tcpListener != nil {
+		if err := s.tcpListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func (s *transparentDNSServer) Serve() error {
+	errCh := make(chan error, 2)
+
+	go func() {
+		errCh <- serveTransparentDNSUDP(s.udpConn)
+	}()
+	go func() {
+		errCh <- serveTransparentDNSTCP(s.tcpListener)
+	}()
+
+	err := <-errCh
+	if err != nil {
+		_ = s.Close()
+	}
+
+	return err
+}
+
+func serveTransparentDNSUDP(conn net.PacketConn) error {
+	buf := make([]byte, 1500)
+	for {
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			return err
+		}
+
+		response, ok := handleTransparentDNSQuery(buf[:n])
+		if !ok {
+			continue
+		}
+		if _, err := conn.WriteTo(response, addr); err != nil {
+			return err
+		}
+	}
+}
+
+func serveTransparentDNSTCP(listener net.Listener) error {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+
+		go func() {
+			_ = serveTransparentDNSTCPConn(conn)
+		}()
+	}
+}
+
+func serveTransparentDNSTCPConn(conn net.Conn) error {
+	defer conn.Close()
+
+	var lengthBuf [2]byte
+	if _, err := io.ReadFull(conn, lengthBuf[:]); err != nil {
+		return err
+	}
+
+	queryLen := int(binary.BigEndian.Uint16(lengthBuf[:]))
+	query := make([]byte, queryLen)
+	if _, err := io.ReadFull(conn, query); err != nil {
+		return err
+	}
+
+	response, ok := handleTransparentDNSQuery(query)
+	if !ok {
+		return nil
+	}
+
+	frame := make([]byte, 2+len(response))
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(response)))
+	copy(frame[2:], response)
+	_, err := conn.Write(frame)
+	return err
+}
+
+func handleTransparentDNSQuery(payload []byte) ([]byte, bool) {
+	var parser dnsmessage.Parser
+	header, err := parser.Start(payload)
+	if err != nil {
+		return nil, false
+	}
+
+	questions, err := parser.AllQuestions()
+	if err != nil || len(questions) != 1 {
+		return nil, false
+	}
+
+	response := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 header.ID,
+			Response:           true,
+			OpCode:             header.OpCode,
+			Authoritative:      true,
+			RecursionDesired:   header.RecursionDesired,
+			RecursionAvailable: false,
+		},
+		Questions: questions,
+	}
+
+	question := questions[0]
+	if question.Class != dnsmessage.ClassINET {
+		response.Header.RCode = dnsmessage.RCodeRefused
+	} else {
+		switch question.Type {
+		case dnsmessage.TypeA:
+			response.Answers = []dnsmessage.Resource{{
+				Header: dnsmessage.ResourceHeader{
+					Name:  question.Name,
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+					TTL:   60,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}},
+			}}
+		case dnsmessage.TypeAAAA:
+		default:
+			response.Header.RCode = dnsmessage.RCodeRefused
+		}
+	}
+
+	packed, err := response.Pack()
+	if err != nil {
+		return nil, false
+	}
+
+	return packed, true
 }
 
 type bridge struct {
