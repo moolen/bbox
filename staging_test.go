@@ -70,7 +70,7 @@ func TestWriteSandboxConfigWritesFilesUnderRoot(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	if err := writeSandboxConfig(root, nil); err != nil {
+	if err := writeSandboxConfig(root, nil, TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestWriteSandboxConfigWritesMITMTrustFilesUnderRoot(t *testing.T) {
 	root := t.TempDir()
 	caPEM := []byte("test mitm ca\n")
 
-	if err := writeSandboxConfig(root, caPEM); err != nil {
+	if err := writeSandboxConfig(root, caPEM, TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -112,7 +112,7 @@ func TestWriteSandboxConfigWritesMITMTrustFilesUnderRoot(t *testing.T) {
 func TestWriteSandboxConfigSkipsMITMTrustFilesWhenDisabled(t *testing.T) {
 	root := t.TempDir()
 
-	if err := writeSandboxConfig(root, nil); err != nil {
+	if err := writeSandboxConfig(root, nil, TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestWriteSandboxConfigSkipsMITMTrustFilesWhenDisabled(t *testing.T) {
 }
 
 func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
-	root, err := stageSandboxRoot(SandboxOptions{}, "/bin/sh", []byte("test mitm ca\n"))
+	root, err := stageSandboxRoot(SandboxOptions{}, "/bin/sh", []byte("test mitm ca\n"), TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -143,4 +143,51 @@ func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
 	if string(content) != "test mitm ca\n" {
 		t.Fatalf("unexpected staged trust content: got %q", string(content))
 	}
+}
+
+func TestWriteSandboxConfigWritesTransparentResolvConf(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("skip as root to avoid touching host /etc in regression case")
+	}
+
+	root := t.TempDir()
+	if err := writeSandboxConfig(root, nil, TrafficModeTransparent); err != nil {
+		t.Fatalf("writeSandboxConfig failed: %v", err)
+	}
+
+	path := filepath.Join(root, "etc", "resolv.conf")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected resolv.conf at %q: %v", path, err)
+	}
+	want := "nameserver 127.0.0.1\noptions ndots:1\n"
+	if string(content) != want {
+		t.Fatalf("unexpected resolv.conf content: got %q want %q", string(content), want)
+	}
+}
+
+func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
+	args := buildBwrapArgs("/tmp/root", "/app/bbox-helper", "127.0.0.1:31111", MITMOptions{}, nil, TrafficModeTransparent)
+	if !containsArgSequence(args, []string{"--traffic-mode", "transparent"}) {
+		t.Fatalf("expected args to include --traffic-mode transparent, got %v", args)
+	}
+}
+
+func containsArgSequence(haystack []string, needle []string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		match := true
+		for j, value := range needle {
+			if haystack[i+j] != value {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }

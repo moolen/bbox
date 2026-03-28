@@ -53,6 +53,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	if err := validateSandboxOptions(opts, m.mitm.Enabled); err != nil {
 		return nil, err
 	}
+	mode := normalizeTrafficMode(opts.TrafficMode)
 
 	policy, err := compilePolicy(opts.Policy)
 	if err != nil {
@@ -64,7 +65,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, err
 	}
 
-	root, err := stageSandboxRoot(opts, helperBinary, m.CACertPEM())
+	root, err := stageSandboxRoot(opts, helperBinary, m.CACertPEM(), mode)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +84,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, fmt.Errorf("create helper log file: %w", err)
 	}
 
-	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, m.listenAddr, m.mitm, opts.Mounts)...)
+	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, m.listenAddr, m.mitm, opts.Mounts, mode)...)
 	cmd.Stderr = helperLog
 	cmd.Stdout = helperLog
 	cmd.ExtraFiles = []*os.File{childBridge}
@@ -123,7 +124,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, fmt.Errorf("start sandbox helper: %w%s", err, sandbox.helperErrorSuffix())
 	}
 	sandbox.proxyAddr = proxyAddr
-	sandbox.baseEnv = runEnvForTrafficMode(normalizeTrafficMode(opts.TrafficMode), proxyAddr, opts.Env)
+	sandbox.baseEnv = runEnvForTrafficMode(mode, proxyAddr, opts.Env)
 
 	if err := m.registerSandbox(sandboxID, policy); err != nil {
 		sandbox.closeErr = nil

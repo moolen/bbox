@@ -81,7 +81,7 @@ func runtimeFilesForBinary(binaryPath string) ([]string, error) {
 	return parseLddOutput(string(output)), nil
 }
 
-func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte) (root string, err error) {
+func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte, mode TrafficMode) (root string, err error) {
 	root, err = os.MkdirTemp("", "bwrap-go-root-")
 	if err != nil {
 		return "", fmt.Errorf("create sandbox root: %w", err)
@@ -138,17 +138,20 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 		return "", err
 	}
 
-	if err := writeSandboxConfig(root, mitmCAPEM); err != nil {
+	if err := writeSandboxConfig(root, mitmCAPEM, mode); err != nil {
 		return "", err
 	}
 
 	return root, nil
 }
 
-func writeSandboxConfig(root string, mitmCAPEM []byte) error {
+func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
 	files := map[string]string{
 		"/etc/hosts":         "127.0.0.1 localhost\n::1 localhost\n",
 		"/etc/nsswitch.conf": "hosts: files\n",
+	}
+	if normalizeTrafficMode(mode) == TrafficModeTransparent {
+		files["/etc/resolv.conf"] = "nameserver 127.0.0.1\noptions ndots:1\n"
 	}
 	if len(mitmCAPEM) > 0 {
 		for _, path := range mitmTrustBundlePaths {
