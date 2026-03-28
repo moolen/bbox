@@ -50,7 +50,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := validateSandboxOptions(opts); err != nil {
+	if err := validateSandboxOptions(opts, m.mitm.Enabled); err != nil {
 		return nil, err
 	}
 
@@ -123,7 +123,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, fmt.Errorf("start sandbox helper: %w%s", err, sandbox.helperErrorSuffix())
 	}
 	sandbox.proxyAddr = proxyAddr
-	sandbox.baseEnv = runEnvForProxyAddr(proxyAddr, opts.Env)
+	sandbox.baseEnv = runEnvForTrafficMode(normalizeTrafficMode(opts.TrafficMode), proxyAddr, opts.Env)
 
 	if err := m.registerSandbox(sandboxID, policy); err != nil {
 		sandbox.closeErr = nil
@@ -244,12 +244,21 @@ func (s *Sandbox) Close() error {
 	return s.closeErr
 }
 
-func validateSandboxOptions(opts SandboxOptions) error {
+func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {
 	if err := validateMounts(opts.Mounts); err != nil {
 		return err
 	}
 	if opts.WorkDir != "" && !filepath.IsAbs(opts.WorkDir) {
 		return fmt.Errorf("sandbox workdir %q must be absolute", opts.WorkDir)
+	}
+	mode := normalizeTrafficMode(opts.TrafficMode)
+	switch mode {
+	case TrafficModeProxy, TrafficModeTransparent:
+	default:
+		return fmt.Errorf("sandbox traffic mode %q is not supported", opts.TrafficMode)
+	}
+	if mode == TrafficModeTransparent && !mitmEnabled {
+		return errors.New("transparent traffic mode requires MITM to be enabled")
 	}
 	return nil
 }
@@ -285,6 +294,28 @@ func runEnvForProxyAddr(proxyAddr string, extraEnv []string) []string {
 			"https_proxy=" + proxyURL(proxyAddr),
 		},
 	)
+}
+
+func normalizeTrafficMode(mode TrafficMode) TrafficMode {
+	normalized := TrafficMode(strings.ToLower(strings.TrimSpace(string(mode))))
+	if normalized == "" {
+		return TrafficModeProxy
+	}
+	return normalized
+}
+
+func runEnvForTrafficMode(mode TrafficMode, proxyAddr string, extraEnv []string) []string {
+	switch normalizeTrafficMode(mode) {
+	case TrafficModeTransparent:
+		return mergeEnv(
+			filterReservedEnv(extraEnv),
+			[]string{
+				"PATH=/usr/bin",
+			},
+		)
+	default:
+		return runEnvForProxyAddr(proxyAddr, extraEnv)
+	}
 }
 
 func filterReservedEnv(env []string) []string {

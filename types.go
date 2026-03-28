@@ -72,6 +72,16 @@ type Mount struct {
 	ReadOnly bool
 }
 
+// TrafficMode controls how sandbox traffic is handled.
+type TrafficMode string
+
+const (
+	// TrafficModeProxy injects proxy environment variables into sandboxed runs.
+	TrafficModeProxy TrafficMode = "proxy"
+	// TrafficModeTransparent relies on transparent proxying without env injection.
+	TrafficModeTransparent TrafficMode = "transparent"
+)
+
 // SandboxOptions configures a new sandbox instance.
 type SandboxOptions struct {
 	// Name selects the sandbox identifier. If empty, bbox generates one.
@@ -82,6 +92,8 @@ type SandboxOptions struct {
 	Mounts []Mount
 	// Env adds process environment entries for runs in this sandbox.
 	Env []string
+	// TrafficMode selects proxy env injection vs transparent mode.
+	TrafficMode TrafficMode
 	// Policy overrides the manager default for this sandbox when non-zero.
 	Policy NetworkPolicy
 	// WorkDir is the default working directory for sandbox.Run.

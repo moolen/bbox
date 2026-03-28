@@ -102,3 +102,61 @@ func TestNilSandboxProxyAccessorsReturnEmptyString(t *testing.T) {
 		t.Fatalf("expected empty proxy url, got %q", got)
 	}
 }
+
+func TestTrafficModeDefaultsToProxy(t *testing.T) {
+	if got := normalizeTrafficMode(""); got != TrafficModeProxy {
+		t.Fatalf("expected traffic mode to default to proxy, got %q", got)
+	}
+}
+
+func TestValidateSandboxOptionsRejectsUnknownTrafficMode(t *testing.T) {
+	opts := SandboxOptions{TrafficMode: TrafficMode("unknown")}
+
+	if err := validateSandboxOptions(opts, true); err == nil {
+		t.Fatal("expected unknown traffic mode to fail validation")
+	}
+}
+
+func TestValidateSandboxOptionsRejectsTransparentModeWithoutMITM(t *testing.T) {
+	opts := SandboxOptions{TrafficMode: TrafficModeTransparent}
+
+	if err := validateSandboxOptions(opts, false); err == nil {
+		t.Fatal("expected transparent mode without MITM to fail validation")
+	}
+}
+
+func TestRunEnvForTrafficModeSkipsProxyEnvInTransparentMode(t *testing.T) {
+	env := runEnvForTrafficMode(TrafficModeTransparent, "127.0.0.1:40123", []string{
+		"FOO=bar",
+		"HTTP_PROXY=http://stale",
+		"HTTPS_PROXY=http://stale-secure",
+	})
+
+	got := make(map[string]string, len(env))
+	for _, entry := range env {
+		key, value, ok := splitEnv(entry)
+		if !ok {
+			t.Fatalf("invalid env entry %q", entry)
+		}
+		got[key] = value
+	}
+
+	if got["PATH"] != "/usr/bin" {
+		t.Fatalf("unexpected PATH: got %q", got["PATH"])
+	}
+	if _, ok := got["HTTP_PROXY"]; ok {
+		t.Fatalf("expected HTTP_PROXY to be omitted, got %q", got["HTTP_PROXY"])
+	}
+	if _, ok := got["http_proxy"]; ok {
+		t.Fatalf("expected http_proxy to be omitted, got %q", got["http_proxy"])
+	}
+	if _, ok := got["HTTPS_PROXY"]; ok {
+		t.Fatalf("expected HTTPS_PROXY to be omitted, got %q", got["HTTPS_PROXY"])
+	}
+	if _, ok := got["https_proxy"]; ok {
+		t.Fatalf("expected https_proxy to be omitted, got %q", got["https_proxy"])
+	}
+	if got["FOO"] != "bar" {
+		t.Fatalf("unexpected FOO: got %q", got["FOO"])
+	}
+}
