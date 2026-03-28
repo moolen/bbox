@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+const maxTCPPayloadSize = 4 << 10
+
+const tcpConnDeadline = 5 * time.Second
 
 type Server struct {
 	tcpListener net.Listener
@@ -120,12 +125,20 @@ func serveTCP(listener net.Listener) error {
 func serveTCPConn(conn net.Conn) error {
 	defer conn.Close()
 
+	if err := conn.SetDeadline(time.Now().Add(tcpConnDeadline)); err != nil {
+		return err
+	}
+
 	var lengthBuf [2]byte
 	if _, err := io.ReadFull(conn, lengthBuf[:]); err != nil {
 		return err
 	}
 
 	queryLen := int(binary.BigEndian.Uint16(lengthBuf[:]))
+	if queryLen > maxTCPPayloadSize {
+		return fmt.Errorf("dns tcp payload length %d exceeds maximum %d", queryLen, maxTCPPayloadSize)
+	}
+
 	query := make([]byte, queryLen)
 	if _, err := io.ReadFull(conn, query); err != nil {
 		return err
