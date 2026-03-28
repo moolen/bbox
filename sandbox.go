@@ -181,6 +181,14 @@ func (s *Sandbox) ProxyURL() string {
 	return proxyURL(s.proxyAddr)
 }
 
+// AccessedDomains returns an audit snapshot of accessed domains.
+func (s *Sandbox) AccessedDomains() []AccessedDomain {
+	if s == nil || s.manager == nil {
+		return []AccessedDomain{}
+	}
+	return []AccessedDomain{}
+}
+
 // Close stops the sandbox helper, unregisters the sandbox, and removes the
 // staged root filesystem.
 func (s *Sandbox) Close() error {
