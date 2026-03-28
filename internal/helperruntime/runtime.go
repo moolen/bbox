@@ -179,7 +179,7 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	bridge.httpsAddr = httpsListener.Addr().String()
 
 	httpServer := &http.Server{
-		Handler: bridge.proxyHandler(),
+		Handler: bridge.transparentHTTPHandler(),
 	}
 
 	errCh := make(chan error, 4)
@@ -507,38 +507,53 @@ func (b *bridge) proxyHandler() http.Handler {
 			return
 		}
 
-		outReq, err := rewriteProxyRequest(req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		b.serveHTTPForward(w, req, rewriteProxyRequest)
+	})
+}
+
+func (b *bridge) transparentHTTPHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodConnect {
+			http.Error(w, "transparent HTTP listener does not accept CONNECT", http.StatusMethodNotAllowed)
 			return
 		}
 
-		var body []byte
-		if outReq.Body != nil {
-			body, err = io.ReadAll(outReq.Body)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-		}
+		b.serveHTTPForward(w, req, rewriteTransparentHTTPRequest)
+	})
+}
 
-		response, err := b.proxyRoundTrip(req.Context(), helperproto.ProxyRequest{
-			Method: outReq.Method,
-			URL:    outReq.URL.String(),
-			Header: outReq.Header.Clone(),
-			Body:   body,
-		})
+func (b *bridge) serveHTTPForward(w http.ResponseWriter, req *http.Request, rewrite func(*http.Request) (*http.Request, error)) {
+	outReq, err := rewrite(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var body []byte
+	if outReq.Body != nil {
+		body, err = io.ReadAll(outReq.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+	}
 
-		copyHeader(w.Header(), response.Header)
-		w.WriteHeader(response.StatusCode)
-		if _, err := io.Copy(w, bytes.NewReader(response.Body)); err != nil {
-			b.logger.Printf("copy proxied response body: %v", err)
-		}
+	response, err := b.proxyRoundTrip(req.Context(), helperproto.ProxyRequest{
+		Method: outReq.Method,
+		URL:    outReq.URL.String(),
+		Header: outReq.Header.Clone(),
+		Body:   body,
 	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	copyHeader(w.Header(), response.Header)
+	w.WriteHeader(response.StatusCode)
+	if _, err := io.Copy(w, bytes.NewReader(response.Body)); err != nil {
+		b.logger.Printf("copy proxied response body: %v", err)
+	}
 }
 
 func (b *bridge) handleMITMConnect(w http.ResponseWriter, req *http.Request) {
@@ -1370,28 +1385,44 @@ func (b *bridge) send(env helperproto.Envelope) error {
 }
 
 func rewriteProxyRequest(req *http.Request) (*http.Request, error) {
-	if req.URL == nil {
-		return nil, errors.New("proxy request URL is required")
-	}
-
-	targetURL := req.URL
-	if targetURL.Scheme == "" || targetURL.Host == "" {
-		host := strings.TrimSpace(req.Host)
-		if host == "" {
-			return nil, errors.New("proxy request host is required")
-		}
-
-		targetURL = &url.URL{
-			Scheme:   "http",
-			Host:     host,
-			Path:     req.URL.Path,
-			RawPath:  req.URL.RawPath,
-			RawQuery: req.URL.RawQuery,
-		}
+	if req.URL == nil || req.URL.Scheme == "" || req.URL.Host == "" {
+		return nil, errors.New("proxy request must use an absolute URL")
 	}
 
 	out := req.Clone(req.Context())
-	urlCopy := *targetURL
+	urlCopy := *req.URL
+	out.URL = &urlCopy
+	out.RequestURI = ""
+	out.Host = out.URL.Host
+	out.Header = req.Header.Clone()
+	out.Header.Del("Proxy-Connection")
+
+	return out, nil
+}
+
+func rewriteTransparentHTTPRequest(req *http.Request) (*http.Request, error) {
+	if req.URL == nil {
+		return nil, errors.New("transparent HTTP request URL is required")
+	}
+
+	host := strings.TrimSpace(req.Host)
+	if host == "" {
+		return nil, errors.New("transparent HTTP request host is required")
+	}
+
+	path := req.URL.Path
+	if path == "" {
+		path = "/"
+	}
+
+	out := req.Clone(req.Context())
+	urlCopy := url.URL{
+		Scheme:   "http",
+		Host:     host,
+		Path:     path,
+		RawPath:  req.URL.RawPath,
+		RawQuery: req.URL.RawQuery,
+	}
 	out.URL = &urlCopy
 	out.RequestURI = ""
 	out.Host = out.URL.Host

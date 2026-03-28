@@ -334,6 +334,25 @@ func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerRejectsOriginFormRequest(t *testing.T) {
+	bridgeSide, peerSide := net.Pipe()
+	defer bridgeSide.Close()
+	defer peerSide.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/origin", nil)
+	req.Host = "example.com"
+	w := httptest.NewRecorder()
+
+	newBridge(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111").proxyHandler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "absolute URL") {
+		t.Fatalf("unexpected response body: %q", w.Body.String())
+	}
+}
+
 func TestProxyHandlerMITMHTTP1ForwardsInterceptedRequest(t *testing.T) {
 	bridgeSide, peerSide := net.Pipe()
 	defer bridgeSide.Close()
