@@ -32,6 +32,12 @@ import (
 	"golang.org/x/net/http2"
 )
 
+var (
+	_ func(*bridgepkg.RuntimeBridge, context.Context, string, int) (uint64, <-chan helperproto.Envelope, *helperproto.ConnectResponse, error) = (*bridgepkg.RuntimeBridge).Connect
+	_ func(*bridgepkg.RuntimeBridge, uint64) <-chan helperproto.Envelope                                                                      = (*bridgepkg.RuntimeBridge).RegisterTunnel
+	_ func(*bridgepkg.RuntimeBridge, context.Context, string) (*helperproto.LeafCertResponse, error)                                          = (*bridgepkg.RuntimeBridge).RequestLeafCert
+)
+
 // Keep assertions package-local for now; these tests become the safety net
 // while runtime internals move into smaller packages in later tasks.
 func TestReadLoopRespondsToHelloWithReady(t *testing.T) {

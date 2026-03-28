@@ -2,7 +2,6 @@ package bridge
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -149,7 +148,7 @@ func (b *RuntimeBridge) ProxyRoundTrip(ctx context.Context, req helperproto.Prox
 	}
 }
 
-func (b *RuntimeBridge) Connect(ctx context.Context, host string, port int) (uint64, chan helperproto.Envelope, *helperproto.ConnectResponse, error) {
+func (b *RuntimeBridge) Connect(ctx context.Context, host string, port int) (uint64, <-chan helperproto.Envelope, *helperproto.ConnectResponse, error) {
 	id := b.nextID.Add(1)
 	ch := make(chan helperproto.Envelope, 1)
 	tunnelCh := b.RegisterTunnel(id)
@@ -223,7 +222,7 @@ func (b *RuntimeBridge) AuthorizeConnect(ctx context.Context, host string, port 
 	}
 }
 
-func (b *RuntimeBridge) RequestLeafCert(ctx context.Context, host string) (tls.Certificate, error) {
+func (b *RuntimeBridge) RequestLeafCert(ctx context.Context, host string) (*helperproto.LeafCertResponse, error) {
 	id := b.nextID.Add(1)
 	ch := make(chan helperproto.Envelope, 1)
 
@@ -243,24 +242,20 @@ func (b *RuntimeBridge) RequestLeafCert(ctx context.Context, host string) (tls.C
 			Host: host,
 		},
 	}); err != nil {
-		return tls.Certificate{}, err
+		return nil, err
 	}
 
 	select {
 	case <-ctx.Done():
-		return tls.Certificate{}, ctx.Err()
+		return nil, ctx.Err()
 	case env := <-ch:
 		if env.LeafCertResponse == nil {
-			return tls.Certificate{}, fmt.Errorf("bridge response %d did not contain a leaf cert response", id)
+			return nil, fmt.Errorf("bridge response %d did not contain a leaf cert response", id)
 		}
 		if env.LeafCertResponse.Error != "" {
-			return tls.Certificate{}, errors.New(env.LeafCertResponse.Error)
+			return nil, errors.New(env.LeafCertResponse.Error)
 		}
-		cert, err := tls.X509KeyPair(env.LeafCertResponse.CertPEM, env.LeafCertResponse.KeyPEM)
-		if err != nil {
-			return tls.Certificate{}, fmt.Errorf("parse leaf certificate key pair: %w", err)
-		}
-		return cert, nil
+		return env.LeafCertResponse, nil
 	}
 }
 
@@ -299,7 +294,7 @@ func (b *RuntimeBridge) MITMRoundTrip(ctx context.Context, req helperproto.MITMR
 	}
 }
 
-func (b *RuntimeBridge) RegisterTunnel(id uint64) chan helperproto.Envelope {
+func (b *RuntimeBridge) RegisterTunnel(id uint64) <-chan helperproto.Envelope {
 	delivery := &tunnelDelivery{
 		ch:     make(chan helperproto.Envelope, 32),
 		closed: make(chan struct{}),
@@ -400,7 +395,10 @@ func (b *RuntimeBridge) RelayTunnelToPayload(ctx context.Context, conn net.Conn,
 		select {
 		case <-ctx.Done():
 			return TunnelRelayResult{}
-		case env := <-tunnelCh:
+		case env, ok := <-tunnelCh:
+			if !ok {
+				return TunnelRelayResult{Terminal: true}
+			}
 			switch {
 			case env.TunnelFrame != nil:
 				if len(env.TunnelFrame.Data) == 0 {

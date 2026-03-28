@@ -400,7 +400,7 @@ func (b *bridge) proxyRoundTrip(ctx context.Context, req helperproto.ProxyReques
 	return b.runtimeBridge.ProxyRoundTrip(ctx, req)
 }
 
-func (b *bridge) connect(ctx context.Context, host string, port int) (uint64, chan helperproto.Envelope, *helperproto.ConnectResponse, error) {
+func (b *bridge) connect(ctx context.Context, host string, port int) (uint64, <-chan helperproto.Envelope, *helperproto.ConnectResponse, error) {
 	return b.runtimeBridge.Connect(ctx, host, port)
 }
 
@@ -409,14 +409,22 @@ func (b *bridge) authorizeConnect(ctx context.Context, host string, port int) (*
 }
 
 func (b *bridge) requestLeafCert(ctx context.Context, host string) (tls.Certificate, error) {
-	return b.runtimeBridge.RequestLeafCert(ctx, host)
+	response, err := b.runtimeBridge.RequestLeafCert(ctx, host)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	cert, err := tls.X509KeyPair(response.CertPEM, response.KeyPEM)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("parse leaf certificate key pair: %w", err)
+	}
+	return cert, nil
 }
 
 func (b *bridge) mitmRoundTrip(ctx context.Context, req helperproto.MITMRequest) (*helperproto.MITMResponse, error) {
 	return b.runtimeBridge.MITMRoundTrip(ctx, req)
 }
 
-func (b *bridge) registerTunnel(id uint64) chan helperproto.Envelope {
+func (b *bridge) registerTunnel(id uint64) <-chan helperproto.Envelope {
 	return b.runtimeBridge.RegisterTunnel(id)
 }
 
