@@ -203,7 +203,7 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 		}
 	}()
 	go func() {
-		errCh <- serveTransparentListener(httpsListener)
+		errCh <- serveTransparentListener(httpsListener, bridge)
 	}()
 	go func() {
 		errCh <- bridge.readLoop(ctx)
@@ -220,13 +220,13 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	}
 }
 
-func serveTransparentListener(listener net.Listener) error {
+func serveTransparentListener(listener net.Listener, bridge *bridge) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return err
 		}
-		_ = conn.Close()
+		go bridge.handleTransparentHTTPSConn(conn)
 	}
 }
 
@@ -522,6 +522,54 @@ func (b *bridge) transparentHTTPHandler() http.Handler {
 	})
 }
 
+func (b *bridge) handleTransparentHTTPSConn(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	if !b.mitmEnabled {
+		_ = conn.Close()
+		return
+	}
+
+	_ = conn.SetDeadline(time.Now().Add(connectHandshakeTimeout))
+	handshakeCtx, cancel := context.WithTimeout(context.Background(), connectHandshakeTimeout)
+	defer cancel()
+
+	var (
+		serverName string
+		leafCert   *tls.Certificate
+	)
+	tlsConn := tls.Server(conn, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2", "http/1.1"},
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if leafCert != nil {
+				return leafCert, nil
+			}
+
+			serverName = strings.ToLower(strings.TrimSpace(hello.ServerName))
+			if serverName == "" {
+				return nil, fmt.Errorf("transparent HTTPS requires SNI")
+			}
+
+			cert, err := b.requestLeafCert(handshakeCtx, serverName)
+			if err != nil {
+				return nil, err
+			}
+			leafCert = &cert
+			return leafCert, nil
+		},
+	})
+	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+		_ = conn.SetDeadline(time.Time{})
+		_ = tlsConn.Close()
+		return
+	}
+	_ = conn.SetDeadline(time.Time{})
+
+	b.serveMITMConn(tlsConn, serverName, 443)
+}
+
 func (b *bridge) serveHTTPForward(w http.ResponseWriter, req *http.Request, rewrite func(*http.Request) (*http.Request, error)) {
 	outReq, err := rewrite(req)
 	if err != nil {
@@ -640,16 +688,7 @@ func (b *bridge) handleMITMConnect(w http.ResponseWriter, req *http.Request) {
 	}
 	_ = conn.SetDeadline(time.Time{})
 
-	server := &http.Server{
-		Handler: b.mitmHandler(host, port),
-	}
-	if err := http2.ConfigureServer(server, &http2.Server{}); err != nil {
-		b.logger.Printf("configure MITM HTTP/2 server: %v", err)
-	}
-	serveErr := server.Serve(&singleConnListener{conn: tlsConn})
-	if serveErr != nil && !errors.Is(serveErr, io.EOF) && !errors.Is(serveErr, net.ErrClosed) {
-		b.logger.Printf("serve MITM connection: %v", serveErr)
-	}
+	b.serveMITMConn(tlsConn, host, port)
 }
 
 type tunnelRelayResult struct {
@@ -1175,6 +1214,19 @@ func (b *bridge) mitmHandler(connectHost string, connectPort int) http.Handler {
 			b.logger.Printf("copy MITM response body: %v", err)
 		}
 	})
+}
+
+func (b *bridge) serveMITMConn(conn net.Conn, connectHost string, connectPort int) {
+	server := &http.Server{
+		Handler: b.mitmHandler(connectHost, connectPort),
+	}
+	if err := http2.ConfigureServer(server, &http2.Server{}); err != nil {
+		b.logger.Printf("configure MITM HTTP/2 server: %v", err)
+	}
+	serveErr := server.Serve(&singleConnListener{conn: conn})
+	if serveErr != nil && !errors.Is(serveErr, io.EOF) && !errors.Is(serveErr, net.ErrClosed) {
+		b.logger.Printf("serve MITM connection: %v", serveErr)
+	}
 }
 
 func closePayloadWrite(conn net.Conn) error {

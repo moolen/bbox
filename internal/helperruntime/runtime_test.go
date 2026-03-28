@@ -28,6 +28,7 @@ import (
 
 	"github.com/moolen/bbox/internal/helperproto"
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/http2"
 )
 
 func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
@@ -331,6 +332,320 @@ func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for transparent runtime to exit")
+	}
+}
+
+func TestTransparentHTTPSRejectsMissingSNI(t *testing.T) {
+	ready, _, _, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var env helperproto.Envelope
+		if err := dec.Decode(&env); err == nil {
+			peerErrCh <- fmt.Errorf("unexpected envelope without SNI: %#v", env)
+			return
+		}
+		peerErrCh <- nil
+	}()
+
+	conn, err := net.Dial("tcp", ready.HTTPSAddr)
+	if err != nil {
+		t.Fatalf("dial transparent HTTPS listener: %v", err)
+	}
+	defer conn.Close()
+
+	tlsConn := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	err = tlsConn.Handshake()
+	if err == nil {
+		_ = tlsConn.Close()
+		t.Fatal("expected transparent HTTPS handshake without SNI to fail")
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestTransparentHTTPSRequestsLeafCertForSNIHost(t *testing.T) {
+	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	conn, err := tls.Dial("tcp", ready.HTTPSAddr, &tls.Config{
+		RootCAs:    roots,
+		ServerName: "example.com",
+		NextProtos: []string{"http/1.1"},
+	})
+	if err != nil {
+		t.Fatalf("dial transparent HTTPS listener with SNI: %v", err)
+	}
+	_ = conn.Close()
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for leaf cert request")
+	}
+}
+
+func TestTransparentHTTPSForwardsDecryptedRequestsThroughMITMPath(t *testing.T) {
+	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var mitmReq helperproto.Envelope
+		if err := dec.Decode(&mitmReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if mitmReq.MITMRequest == nil {
+			peerErrCh <- fmt.Errorf("expected MITM request, got %#v", mitmReq)
+			return
+		}
+		if mitmReq.MITMRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("unexpected MITM host: %q", mitmReq.MITMRequest.Host)
+			return
+		}
+		if mitmReq.MITMRequest.Path != "/allowed" || mitmReq.MITMRequest.RawQuery != "via=transparent" {
+			peerErrCh <- fmt.Errorf("unexpected MITM path/query: %#v", mitmReq.MITMRequest)
+			return
+		}
+		if mitmReq.MITMRequest.Authority != "example.com:443" {
+			peerErrCh <- fmt.Errorf("unexpected MITM authority: %q", mitmReq.MITMRequest.Authority)
+			return
+		}
+		if mitmReq.MITMRequest.Proto != "HTTP/1.1" {
+			peerErrCh <- fmt.Errorf("unexpected MITM proto: %q", mitmReq.MITMRequest.Proto)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: mitmReq.ID,
+			MITMResponse: &helperproto.MITMResponse{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"X-Intercepted": []string{"yes"}},
+				Body:       []byte("transparent ok"),
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	conn, err := tls.Dial("tcp", ready.HTTPSAddr, &tls.Config{
+		RootCAs:    roots,
+		ServerName: "example.com",
+		NextProtos: []string{"http/1.1"},
+	})
+	if err != nil {
+		t.Fatalf("dial transparent HTTPS listener: %v", err)
+	}
+	defer conn.Close()
+
+	request := strings.Join([]string{
+		"GET /allowed?via=transparent HTTP/1.1",
+		"Host: example.com",
+		"",
+		"",
+	}, "\r\n")
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatalf("write transparent HTTPS request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read transparent HTTPS response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Intercepted"); got != "yes" {
+		t.Fatalf("unexpected header: %q", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "transparent ok" {
+		t.Fatalf("unexpected body: %q", string(body))
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent HTTPS bridge peer")
+	}
+}
+
+func TestTransparentHTTPSSupportsHTTP2MITM(t *testing.T) {
+	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var mitmReq helperproto.Envelope
+		if err := dec.Decode(&mitmReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if mitmReq.MITMRequest == nil {
+			peerErrCh <- fmt.Errorf("expected MITM request, got %#v", mitmReq)
+			return
+		}
+		if mitmReq.MITMRequest.Proto != "HTTP/2.0" {
+			peerErrCh <- fmt.Errorf("expected HTTP/2.0 request, got %#v", mitmReq.MITMRequest)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: mitmReq.ID,
+			MITMResponse: &helperproto.MITMResponse{
+				StatusCode: http.StatusOK,
+				Body:       []byte("h2 transparent ok"),
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	transport := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			rawConn, err := d.DialContext(ctx, network, ready.HTTPSAddr)
+			if err != nil {
+				return nil, err
+			}
+
+			tlsCfg := cfg.Clone()
+			tlsCfg.RootCAs = roots
+			tlsCfg.ServerName = "example.com"
+			tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+
+			tlsConn := tls.Client(rawConn, tlsCfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+	}
+
+	client := &http.Client{Transport: transport}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/h2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("transparent HTTPS HTTP/2 GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "h2 transparent ok" {
+		t.Fatalf("unexpected body: %q", string(body))
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent HTTPS HTTP/2 bridge peer")
 	}
 }
 
@@ -1769,6 +2084,9 @@ func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
 	if ready.Ready.HTTPAddr == "" {
 		t.Fatal("expected transparent runtime to report an HTTP address")
 	}
+	if ready.Ready.HTTPSAddr == "" {
+		t.Fatal("expected transparent runtime to report an HTTPS address")
+	}
 
 	shutdown := func() {
 		cancel()
@@ -1784,6 +2102,64 @@ func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
 	}
 
 	return ready.Ready, shutdown
+}
+
+func startTransparentRuntimeBridge(t *testing.T) (*helperproto.Ready, net.Conn, *gob.Encoder, *gob.Decoder, func()) {
+	t.Helper()
+
+	bridgeSide, peerSide := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- Run(ctx, Config{
+			Bridge:      bridgeSide,
+			TrafficMode: TrafficModeTransparent,
+			MITMEnabled: true,
+			DNSAddr:     "127.0.0.1:0",
+			HTTPAddr:    "127.0.0.1:0",
+			HTTPSAddr:   "127.0.0.1:0",
+			Logger:      log.New(io.Discard, "", 0),
+		})
+	}()
+
+	enc := gob.NewEncoder(peerSide)
+	dec := gob.NewDecoder(peerSide)
+	if err := enc.Encode(&helperproto.Envelope{
+		ID: 1,
+		Hello: &helperproto.Hello{
+			ProtocolVersion: helperproto.ProtocolVersion,
+			SandboxID:       "transparent-https-test",
+		},
+	}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	var ready helperproto.Envelope
+	if err := dec.Decode(&ready); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if ready.Ready == nil {
+		t.Fatalf("expected ready response, got %#v", ready)
+	}
+	if ready.Ready.HTTPSAddr == "" {
+		t.Fatal("expected transparent runtime to report an HTTPS address")
+	}
+
+	shutdown := func() {
+		cancel()
+		_ = peerSide.Close()
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+				t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for transparent runtime to exit")
+		}
+	}
+
+	return ready.Ready, peerSide, enc, dec, shutdown
 }
 
 func exchangeTransparentDNS(t *testing.T, network, addr string, queryType dnsmessage.Type) dnsmessage.Message {
