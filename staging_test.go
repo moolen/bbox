@@ -65,10 +65,6 @@ func TestCopyFileToPathStagesAbsoluteSandboxPathUnderRoot(t *testing.T) {
 }
 
 func TestWriteSandboxConfigWritesFilesUnderRoot(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("skip as root to avoid touching host /etc in regression case")
-	}
-
 	root := t.TempDir()
 	if err := writeSandboxConfig(root, nil, TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
@@ -146,10 +142,6 @@ func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
 }
 
 func TestWriteSandboxConfigWritesTransparentResolvConf(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("skip as root to avoid touching host /etc in regression case")
-	}
-
 	root := t.TempDir()
 	if err := writeSandboxConfig(root, nil, TrafficModeTransparent); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
@@ -183,9 +175,9 @@ func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
 }
 
 func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
-	libPath := "/usr/lib/libnss_dns.so.2"
-	if _, err := os.Stat(libPath); err != nil {
-		t.Skipf("skip: %s not available", libPath)
+	libPath := firstExistingNSSModulePath("libnss_dns.so.2")
+	if libPath == "" {
+		t.Skip("skip: libnss_dns.so.2 not available")
 	}
 
 	root, err := stageSandboxRoot(SandboxOptions{}, "/bin/sh", nil, TrafficModeTransparent)
@@ -198,6 +190,37 @@ func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
 	if _, err := os.Stat(expected); err != nil {
 		t.Fatalf("expected staged libnss_dns at %q: %v", expected, err)
 	}
+}
+
+func firstExistingNSSModulePath(module string) string {
+	for _, candidate := range nssModuleCandidatePaths(module) {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func TestNSSModuleCandidatePathsIncludesCommonLinuxDirs(t *testing.T) {
+	candidates := nssModuleCandidatePaths("libnss_dns.so.2")
+	if !containsString(candidates, "/usr/lib/libnss_dns.so.2") {
+		t.Fatalf("expected /usr/lib candidate in %v", candidates)
+	}
+	if !containsString(candidates, "/usr/lib/x86_64-linux-gnu/libnss_dns.so.2") {
+		t.Fatalf("expected /usr/lib/x86_64-linux-gnu candidate in %v", candidates)
+	}
+	if !containsString(candidates, "/lib/x86_64-linux-gnu/libnss_dns.so.2") {
+		t.Fatalf("expected /lib/x86_64-linux-gnu candidate in %v", candidates)
+	}
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, entry := range haystack {
+		if entry == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func containsArgSequence(haystack []string, needle []string) bool {

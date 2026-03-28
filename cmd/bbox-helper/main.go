@@ -44,6 +44,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// trafficMode is parsed for startup compatibility; runtime use is added later.
 
 	bridge, err := helperruntime.OpenBridgeFromFD(parsed.bridgeFD)
 	if err != nil {

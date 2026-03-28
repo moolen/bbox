@@ -120,10 +120,14 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 
 	extras := []string{
 		"/lib64/ld-linux-x86-64.so.2",
-		"/usr/lib/libnss_files.so.2",
+	}
+	if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_files.so.2")); ok {
+		extras = append(extras, path)
 	}
 	if normalizeTrafficMode(mode) == TrafficModeTransparent {
-		extras = append(extras, "/usr/lib/libnss_dns.so.2")
+		if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2")); ok {
+			extras = append(extras, path)
+		}
 	}
 	for _, extra := range extras {
 		if _, err := os.Stat(extra); err == nil {
@@ -239,4 +243,23 @@ func sandboxPathInRoot(root, sandboxPath string) (string, error) {
 	}
 
 	return dest, nil
+}
+
+func nssModuleCandidatePaths(module string) []string {
+	return []string{
+		filepath.Join("/usr/lib", module),
+		filepath.Join("/usr/lib/x86_64-linux-gnu", module),
+		filepath.Join("/lib/x86_64-linux-gnu", module),
+		filepath.Join("/lib64", module),
+		filepath.Join("/usr/lib64", module),
+	}
+}
+
+func firstExistingPath(paths []string) (string, bool) {
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return path, true
+		}
+	}
+	return "", false
 }
