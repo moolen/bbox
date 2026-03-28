@@ -4,7 +4,41 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// AccessLogger receives per-request access log entries.
+type AccessLogger interface {
+	LogAccess(AccessLogEntry)
+}
+
+// AccessLogEntry describes a single access attempt.
+type AccessLogEntry struct {
+	Time       time.Time
+	SandboxID  string
+	Kind       string
+	Host       string
+	Port       int
+	Method     string
+	Path       string
+	Allowed    bool
+	StatusCode int
+	Result     string
+	Error      string
+}
+
+// AccessedDomain aggregates access attempts for a host.
+type AccessedDomain struct {
+	Host        string
+	Attempts    int
+	LastResult  string
+	LastError   string
+	LastSeenAt  time.Time
+	LastPort    int
+	ConnectSeen bool
+	HTTPSeen    bool
+	MITMSeen    bool
+}
 
 type ProxyOptions struct {
 	// ListenAddr is the sandbox-local proxy listen address passed to each helper.
@@ -16,6 +50,8 @@ type ProxyOptions struct {
 	NetworkPolicy NetworkPolicy
 	// MITM configures proxy-wide man-in-the-middle handling.
 	MITM MITMOptions
+	// AccessLogger receives per-request access log entries.
+	AccessLogger AccessLogger
 }
 
 // MITMOptions configures manager-wide MITM behavior.
@@ -113,6 +149,7 @@ type ProxyManager struct {
 	sandboxes       map[string]*Sandbox
 	sandboxPolicies map[string]*compiledPolicy
 	transport       *http.Transport
+	accessLogger    AccessLogger
 	listenAddr      string
 	mitm            MITMOptions
 	mitmCA          *mitmCA

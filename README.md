@@ -67,6 +67,12 @@ manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
 
 When MITM is enabled, `bbox` generates one ephemeral CA per `ProxyManager`, injects that CA into each staged sandbox root, and evaluates decrypted HTTPS requests on the host before dialing upstream.
 
+## Access Audit And Logging
+
+Each sandbox tracks attempted outbound hosts. Call `Sandbox.AccessedDomains()` to fetch a snapshot of the aggregated audit state, including attempt counts, the most recent result/error, last seen time, last port, and whether HTTP, CONNECT, or MITM requests were observed.
+
+Every request attempt also emits a structured access log entry. By default, `bbox` writes newline-delimited JSON to stdout. Provide `ProxyOptions.AccessLogger` to route entries to your own logger instead of stdout.
+
 ## Library Example
 
 ```go

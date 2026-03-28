@@ -5,9 +5,29 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/moolen/bbox"
 )
+
+type recordingAccessLogger struct {
+	mu      sync.Mutex
+	entries []bbox.AccessLogEntry
+}
+
+func (r *recordingAccessLogger) LogAccess(entry bbox.AccessLogEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.entries = append(r.entries, entry)
+}
+
+func (r *recordingAccessLogger) snapshot() []bbox.AccessLogEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries := make([]bbox.AccessLogEntry, len(r.entries))
+	copy(entries, r.entries)
+	return entries
+}
 
 func ExampleNewProxyManager() {
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
@@ -62,9 +82,11 @@ func ExampleProxyManager_NewSandbox() {
 	}
 
 	ctx := context.Background()
+	logger := &recordingAccessLogger{}
 
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-		ListenAddr: "127.0.0.1:0",
+		ListenAddr:   "127.0.0.1:0",
+		AccessLogger: logger,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -98,4 +120,5 @@ func ExampleProxyManager_NewSandbox() {
 	}
 
 	log.Printf("proxy=%s exit=%d stdout=%dB stderr=%dB", sandbox.ProxyURL(), result.ExitCode, len(result.Stdout), len(result.Stderr))
+	log.Printf("accessed=%d entries=%d", len(sandbox.AccessedDomains()), len(logger.snapshot()))
 }
