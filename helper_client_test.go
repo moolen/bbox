@@ -247,7 +247,7 @@ func TestHelperClientTunnelActivationIsIdempotent(t *testing.T) {
 		t.Fatal("first activation should succeed")
 	}
 	if client.activateTunnel(7) {
-		t.Fatal("second activation should fail")
+		t.Fatal("second activation should be a no-op and return false")
 	}
 }
 

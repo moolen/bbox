@@ -762,8 +762,12 @@ func TestReadBoundedResponseFlagsOversize(t *testing.T) {
 }
 
 func TestValidateMITMHostAuthorityRejectsMismatch(t *testing.T) {
-	if err := validateMITMHostAuthority("allowed.example", "127.0.0.1:443"); err == nil {
+	err := validateMITMHostAuthority("allowed.example", "127.0.0.1:443")
+	if err == nil {
 		t.Fatal("expected mismatch")
+	}
+	if !strings.Contains(err.Error(), "does not match upstream authority") {
+		t.Fatalf("expected mismatch error contract, got %q", err.Error())
 	}
 }
 
