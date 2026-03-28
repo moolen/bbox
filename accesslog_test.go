@@ -262,6 +262,27 @@ func TestRecordAccessEventMapsResultsToAggregate(t *testing.T) {
 	}
 }
 
+func TestRecordAccessEventSkipsEmptySandboxID(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	logger := &stubAccessLogger{}
+	manager.accessLogger = logger
+	t.Cleanup(func() { auditStateByManager.Delete(manager) })
+
+	manager.recordAccessEvent(accessEvent{
+		Time:   time.Date(2026, 3, 28, 16, 0, 0, 0, time.UTC),
+		Host:   "example.com",
+		Port:   443,
+		Result: "allowed",
+	})
+
+	if len(logger.entries) != 0 {
+		t.Fatalf("expected no log entries, got %d", len(logger.entries))
+	}
+	if _, ok := auditStateByManager.Load(manager); ok {
+		t.Fatal("expected no audit state for empty sandbox ID")
+	}
+}
+
 func findAccessedDomain(t *testing.T, entries []AccessedDomain, host string) AccessedDomain {
 	t.Helper()
 	for _, entry := range entries {

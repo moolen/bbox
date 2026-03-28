@@ -181,8 +181,7 @@ func (s *Sandbox) ProxyURL() string {
 	return proxyURL(s.proxyAddr)
 }
 
-// AccessedDomains returns the sandbox audit snapshot when available; Task 1
-// provides a stub empty snapshot until audit recording is implemented.
+// AccessedDomains returns a snapshot of the sandbox access audit state.
 func (s *Sandbox) AccessedDomains() []AccessedDomain {
 	if s == nil || s.manager == nil {
 		return []AccessedDomain{}

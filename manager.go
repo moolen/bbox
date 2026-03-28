@@ -390,13 +390,17 @@ func (m *ProxyManager) Close() error {
 		if m.helperBinaryDir != "" {
 			closeErr = errors.Join(closeErr, os.RemoveAll(m.helperBinaryDir))
 		}
+
+		m.mu.Lock()
+		auditStateByManager.Delete(m)
+		m.mu.Unlock()
 	})
 
 	return closeErr
 }
 
 func (m *ProxyManager) recordAccessEvent(event accessEvent) {
-	if m == nil {
+	if m == nil || event.SandboxID == "" {
 		return
 	}
 	if event.Time.IsZero() {
