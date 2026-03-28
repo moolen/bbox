@@ -12,7 +12,7 @@ import (
 
 func TestTransparentHTTPWithCurl(t *testing.T) {
 	requireSandboxPrereqs(t)
-	requireTransparentRuntimePorts(t)
+	requireTransparentRuntimePortsStrict(t)
 
 	curlPath, err := requireTool("curl")
 	if err != nil {

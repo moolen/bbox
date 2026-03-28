@@ -17,9 +17,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/moolen/bbox"
 )
 
 var (
@@ -27,6 +30,43 @@ var (
 	sharedTLSTestCert     tls.Certificate
 	sharedTLSTestCertErr  error
 )
+
+type networkToolPaths struct {
+	curl string
+	ping string
+	dns  string
+	nc   string
+}
+
+func TestResolveFirstAvailableToolReturnsFirstInstalled(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "dig")
+	second := filepath.Join(dir, "nslookup")
+	if err := os.WriteFile(first, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveFirstAvailableTool([]string{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != first {
+		t.Fatalf("got %q want %q", got, first)
+	}
+}
+
+func TestResolveFirstAvailableToolErrorsWhenMissing(t *testing.T) {
+	_, err := resolveFirstAvailableTool([]string{"/definitely/missing-a", "/definitely/missing-b"})
+	if err == nil {
+		t.Fatal("expected missing tools to fail")
+	}
+	if !strings.Contains(err.Error(), "missing required tool") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 func requireSandboxPrereqs(t *testing.T) {
 	t.Helper()
@@ -36,6 +76,47 @@ func requireSandboxPrereqs(t *testing.T) {
 	if _, err := requireTool("bwrap"); err != nil {
 		t.Skip(err.Error())
 	}
+}
+
+func resolveFirstAvailableTool(candidates []string) (string, error) {
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if strings.Contains(candidate, string(filepath.Separator)) {
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate, nil
+			}
+			continue
+		}
+		if resolved, err := exec.LookPath(candidate); err == nil {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("missing required tool: %s", strings.Join(candidates, ", "))
+}
+
+func mustRequireNetworkTools(t *testing.T) networkToolPaths {
+	t.Helper()
+
+	curl, err := resolveFirstAvailableTool([]string{"curl"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ping, err := resolveFirstAvailableTool([]string{"ping"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns, err := resolveFirstAvailableTool([]string{"dig", "nslookup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nc, err := resolveFirstAvailableTool([]string{"nc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return networkToolPaths{curl: curl, ping: ping, dns: dns, nc: nc}
 }
 
 func trustHTTPSServer(t *testing.T, server *httptest.Server) {
@@ -132,12 +213,29 @@ func mustListenLoopbackPort(t *testing.T, port int) net.Listener {
 	return listener
 }
 
-func requireTransparentRuntimePorts(t *testing.T) {
+func requireTransparentRuntimePortsStrict(t *testing.T) {
 	t.Helper()
 
 	for _, port := range []int{53, 80, 443} {
-		listener := mustListenLoopbackPort(t, port)
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatalf("transparent integration test requires binding %s: %v", addr, err)
+		}
 		_ = listener.Close()
+	}
+}
+
+func assertBlockedRunResult(t *testing.T, result *bbox.RunResult, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("sandbox run transport failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected sandbox run result")
+	}
+	if result.ExitCode == 0 {
+		t.Fatalf("expected blocked network command to fail, stdout=%q stderr=%q", string(result.Stdout), string(result.Stderr))
 	}
 }
 

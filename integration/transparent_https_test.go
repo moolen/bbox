@@ -14,7 +14,7 @@ import (
 
 func TestTransparentHTTPSWithCurl(t *testing.T) {
 	requireSandboxPrereqs(t)
-	requireTransparentRuntimePorts(t)
+	requireTransparentRuntimePortsStrict(t)
 
 	curlPath, err := requireTool("curl")
 	if err != nil {
@@ -117,7 +117,7 @@ func TestTransparentHTTPSWithCurl(t *testing.T) {
 
 func TestTransparentModeRejectsIPLiteralAndNonDefaultPorts(t *testing.T) {
 	requireSandboxPrereqs(t)
-	requireTransparentRuntimePorts(t)
+	requireTransparentRuntimePortsStrict(t)
 
 	curlPath, err := requireTool("curl")
 	if err != nil {
@@ -192,7 +192,7 @@ func TestTransparentModeRejectsIPLiteralAndNonDefaultPorts(t *testing.T) {
 
 func TestProxyAndTransparentSandboxesCanRunConcurrently(t *testing.T) {
 	requireSandboxPrereqs(t)
-	requireTransparentRuntimePorts(t)
+	requireTransparentRuntimePortsStrict(t)
 
 	curlPath, err := requireTool("curl")
 	if err != nil {
