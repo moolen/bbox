@@ -15,6 +15,9 @@ import (
 type helperFlags struct {
 	bridgeFD            int
 	proxyAddr           string
+	dnsAddr             string
+	httpAddr            string
+	httpsAddr           string
 	mitmEnabled         bool
 	maxRequestBodyBytes int64
 	trafficMode         string
@@ -25,9 +28,12 @@ func parseFlags(args []string) (helperFlags, error) {
 	fs := flag.NewFlagSet("bbox-helper", flag.ContinueOnError)
 	fs.IntVar(&parsed.bridgeFD, "bridge-fd", 3, "file descriptor carrying the helper control bridge")
 	fs.StringVar(&parsed.proxyAddr, "proxy-addr", helperruntime.DefaultProxyAddr, "sandbox-local proxy listen address")
+	fs.StringVar(&parsed.dnsAddr, "dns-addr", "", "sandbox-local transparent DNS listen address")
+	fs.StringVar(&parsed.httpAddr, "http-addr", "", "sandbox-local transparent HTTP listen address")
+	fs.StringVar(&parsed.httpsAddr, "https-addr", "", "sandbox-local transparent HTTPS listen address")
 	fs.BoolVar(&parsed.mitmEnabled, "mitm-enabled", false, "enable TLS MITM interception for CONNECT requests")
 	fs.Int64Var(&parsed.maxRequestBodyBytes, "max-request-body-bytes", 0, "maximum intercepted request body bytes to buffer for policy evaluation")
-	fs.StringVar(&parsed.trafficMode, "traffic-mode", "proxy", "traffic mode (proxy or transparent)")
+	fs.StringVar(&parsed.trafficMode, "traffic-mode", string(helperruntime.TrafficModeProxy), "traffic mode (proxy or transparent)")
 	if err := fs.Parse(args); err != nil {
 		return parsed, err
 	}
@@ -42,7 +48,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// trafficMode is parsed for startup compatibility; runtime use is added later.
 
 	bridge, err := helperruntime.OpenBridgeFromFD(parsed.bridgeFD)
 	if err != nil {
@@ -56,7 +61,11 @@ func main() {
 	logger := log.New(os.Stderr, "bbox-helper: ", log.LstdFlags)
 	if err := helperruntime.Run(ctx, helperruntime.Config{
 		Bridge:              bridge,
+		TrafficMode:         helperruntime.TrafficMode(parsed.trafficMode),
 		ProxyAddr:           parsed.proxyAddr,
+		DNSAddr:             parsed.dnsAddr,
+		HTTPAddr:            parsed.httpAddr,
+		HTTPSAddr:           parsed.httpsAddr,
 		Logger:              logger,
 		MITMEnabled:         parsed.mitmEnabled,
 		MaxRequestBodyBytes: parsed.maxRequestBodyBytes,

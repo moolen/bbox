@@ -67,6 +67,31 @@ func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
 	closeReadLoop(t, peer, errCh)
 }
 
+func TestRunTransparentRequiresAllListeners(t *testing.T) {
+	t.Parallel()
+
+	blockedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockedListener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = Run(ctx, Config{
+		Bridge:      newTestBridge(),
+		TrafficMode: TrafficModeTransparent,
+		MITMEnabled: true,
+		DNSAddr:     "127.0.0.1:0",
+		HTTPAddr:    blockedListener.Addr().String(),
+		HTTPSAddr:   "127.0.0.1:0",
+	})
+	if err == nil {
+		t.Fatal("expected transparent startup to fail when a listener cannot bind")
+	}
+}
+
 func TestProxyHandlerMITMHTTP1ForwardsInterceptedRequest(t *testing.T) {
 	bridgeSide, peerSide := net.Pipe()
 	defer bridgeSide.Close()
@@ -1501,6 +1526,24 @@ func closeReadLoop(t *testing.T, peer net.Conn, errCh <-chan error) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for readLoop to exit")
 	}
+}
+
+type testBridge struct{}
+
+func newTestBridge() io.ReadWriteCloser {
+	return testBridge{}
+}
+
+func (testBridge) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (testBridge) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (testBridge) Close() error {
+	return nil
 }
 
 type hijackableResponseWriter struct {

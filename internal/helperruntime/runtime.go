@@ -26,12 +26,26 @@ import (
 )
 
 const DefaultProxyAddr = "127.0.0.1:31111"
+const DefaultTransparentDNSAddr = "127.0.0.1:53"
+const DefaultTransparentHTTPAddr = "127.0.0.1:80"
+const DefaultTransparentHTTPSAddr = "127.0.0.1:443"
 
 const connectHandshakeTimeout = 5 * time.Second
 
+type TrafficMode string
+
+const (
+	TrafficModeProxy       TrafficMode = "proxy"
+	TrafficModeTransparent TrafficMode = "transparent"
+)
+
 type Config struct {
 	Bridge              io.ReadWriteCloser
+	TrafficMode         TrafficMode
 	ProxyAddr           string
+	DNSAddr             string
+	HTTPAddr            string
+	HTTPSAddr           string
 	Logger              *log.Logger
 	MITMEnabled         bool
 	MaxRequestBodyBytes int64
@@ -56,11 +70,26 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Bridge == nil {
 		return fmt.Errorf("bridge is required")
 	}
-	if cfg.ProxyAddr == "" {
-		cfg.ProxyAddr = DefaultProxyAddr
-	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(io.Discard, "", 0)
+	}
+	if cfg.TrafficMode == "" {
+		cfg.TrafficMode = TrafficModeProxy
+	}
+
+	switch cfg.TrafficMode {
+	case TrafficModeProxy:
+		return runProxyMode(ctx, cfg)
+	case TrafficModeTransparent:
+		return runTransparentMode(ctx, cfg)
+	default:
+		return fmt.Errorf("unsupported traffic mode %q", cfg.TrafficMode)
+	}
+}
+
+func runProxyMode(ctx context.Context, cfg Config) error {
+	if cfg.ProxyAddr == "" {
+		cfg.ProxyAddr = DefaultProxyAddr
 	}
 
 	listener, err := net.Listen("tcp", cfg.ProxyAddr)
@@ -110,12 +139,96 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
+func runTransparentMode(ctx context.Context, cfg Config) error {
+	if cfg.DNSAddr == "" {
+		cfg.DNSAddr = DefaultTransparentDNSAddr
+	}
+	if cfg.HTTPAddr == "" {
+		cfg.HTTPAddr = DefaultTransparentHTTPAddr
+	}
+	if cfg.HTTPSAddr == "" {
+		cfg.HTTPSAddr = DefaultTransparentHTTPSAddr
+	}
+
+	dnsListener, err := net.Listen("tcp", cfg.DNSAddr)
+	if err != nil {
+		return fmt.Errorf("listen on DNS address %q: %w", cfg.DNSAddr, err)
+	}
+	defer dnsListener.Close()
+
+	httpListener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("listen on HTTP address %q: %w", cfg.HTTPAddr, err)
+	}
+	defer httpListener.Close()
+
+	httpsListener, err := net.Listen("tcp", cfg.HTTPSAddr)
+	if err != nil {
+		return fmt.Errorf("listen on HTTPS address %q: %w", cfg.HTTPSAddr, err)
+	}
+	defer httpsListener.Close()
+
+	bridge := newBridge(cfg.Bridge, cfg.Logger, "")
+	bridge.mitmEnabled = cfg.MITMEnabled
+	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
+	bridge.dnsAddr = dnsListener.Addr().String()
+	bridge.httpAddr = httpListener.Addr().String()
+	bridge.httpsAddr = httpsListener.Addr().String()
+
+	errCh := make(chan error, 4)
+
+	go func() {
+		<-ctx.Done()
+
+		_ = dnsListener.Close()
+		_ = httpListener.Close()
+		_ = httpsListener.Close()
+		_ = cfg.Bridge.Close()
+	}()
+
+	go func() {
+		errCh <- serveTransparentListener(dnsListener)
+	}()
+	go func() {
+		errCh <- serveTransparentListener(httpListener)
+	}()
+	go func() {
+		errCh <- serveTransparentListener(httpsListener)
+	}()
+	go func() {
+		errCh <- bridge.readLoop(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errCh:
+		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func serveTransparentListener(listener net.Listener) error {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		_ = conn.Close()
+	}
+}
+
 type bridge struct {
 	conn                io.ReadWriteCloser
 	enc                 *gob.Encoder
 	dec                 *gob.Decoder
 	logger              *log.Logger
 	proxyAddr           string
+	dnsAddr             string
+	httpAddr            string
+	httpsAddr           string
 	mitmEnabled         bool
 	maxRequestBodyBytes int64
 	sendMu              sync.Mutex
@@ -180,6 +293,9 @@ func (b *bridge) handleHello(env helperproto.Envelope) error {
 		Ready: &helperproto.Ready{
 			ProtocolVersion: helperproto.ProtocolVersion,
 			ProxyAddr:       b.proxyAddr,
+			DNSAddr:         b.dnsAddr,
+			HTTPAddr:        b.httpAddr,
+			HTTPSAddr:       b.httpsAddr,
 		},
 	})
 }
