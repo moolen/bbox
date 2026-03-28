@@ -68,6 +68,39 @@ func TestResolveFirstAvailableToolErrorsWhenMissing(t *testing.T) {
 	}
 }
 
+func TestResolveFirstAvailableToolRejectsNonExecutablePath(t *testing.T) {
+	dir := t.TempDir()
+	nonExecutable := filepath.Join(dir, "dig")
+	if err := os.WriteFile(nonExecutable, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveFirstAvailableTool([]string{nonExecutable})
+	if err == nil {
+		t.Fatal("expected non-executable path to fail")
+	}
+	if !strings.Contains(err.Error(), "missing required tool") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestListenLoopbackPortReturnsErrorWhenUnavailable(t *testing.T) {
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	blocked, err := listenLoopbackPort(port)
+	if err == nil {
+		if blocked != nil {
+			_ = blocked.Close()
+		}
+		t.Fatal("expected occupied port to fail")
+	}
+}
+
 func requireSandboxPrereqs(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS != "linux" {
@@ -84,7 +117,11 @@ func resolveFirstAvailableTool(candidates []string) (string, error) {
 			continue
 		}
 		if strings.Contains(candidate, string(filepath.Separator)) {
-			if _, err := os.Stat(candidate); err == nil {
+			info, err := os.Stat(candidate)
+			if err != nil {
+				continue
+			}
+			if info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
 				return candidate, nil
 			}
 			continue
@@ -205,10 +242,9 @@ func startTrustedTLSServer(t *testing.T, handler http.Handler) *httptest.Server 
 func mustListenLoopbackPort(t *testing.T, port int) net.Listener {
 	t.Helper()
 
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	listener, err := net.Listen("tcp", addr)
+	listener, err := listenLoopbackPort(port)
 	if err != nil {
-		t.Skipf("transparent sandbox integration test requires binding %s: %v", addr, err)
+		t.Fatalf("transparent sandbox integration test requires binding 127.0.0.1:%d: %v", port, err)
 	}
 	return listener
 }
@@ -217,13 +253,16 @@ func requireTransparentRuntimePortsStrict(t *testing.T) {
 	t.Helper()
 
 	for _, port := range []int{53, 80, 443} {
-		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-		listener, err := net.Listen("tcp", addr)
+		listener, err := listenLoopbackPort(port)
 		if err != nil {
-			t.Fatalf("transparent integration test requires binding %s: %v", addr, err)
+			t.Fatalf("transparent integration test requires binding 127.0.0.1:%d: %v", port, err)
 		}
 		_ = listener.Close()
 	}
+}
+
+func listenLoopbackPort(port int) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 }
 
 func assertBlockedRunResult(t *testing.T, result *bbox.RunResult, err error) {
