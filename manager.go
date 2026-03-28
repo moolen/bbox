@@ -319,6 +319,26 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 	}
 }
 
+func (m *ProxyManager) handleLeafCertRequest(host string) *helperproto.LeafCertResponse {
+	if m == nil || m.mitmCA == nil {
+		return &helperproto.LeafCertResponse{
+			Error: "MITM CA is not configured",
+		}
+	}
+
+	certPEM, keyPEM, err := m.mitmCA.LeafPEMForHost(host)
+	if err != nil {
+		return &helperproto.LeafCertResponse{
+			Error: err.Error(),
+		}
+	}
+
+	return &helperproto.LeafCertResponse{
+		CertPEM: certPEM,
+		KeyPEM:  keyPEM,
+	}
+}
+
 var dialTunnelFn = func(ctx context.Context, host string, port int) (net.Conn, error) {
 	if ctx == nil {
 		ctx = context.Background()

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -28,9 +29,11 @@ const DefaultProxyAddr = "127.0.0.1:31111"
 const connectHandshakeTimeout = 5 * time.Second
 
 type Config struct {
-	Bridge    io.ReadWriteCloser
-	ProxyAddr string
-	Logger    *log.Logger
+	Bridge              io.ReadWriteCloser
+	ProxyAddr           string
+	Logger              *log.Logger
+	MITMEnabled         bool
+	MaxRequestBodyBytes int64
 }
 
 func OpenBridgeFromFD(fd int) (io.ReadWriteCloser, error) {
@@ -66,6 +69,8 @@ func Run(ctx context.Context, cfg Config) error {
 	defer listener.Close()
 
 	bridge := newBridge(cfg.Bridge, cfg.Logger, listener.Addr().String())
+	bridge.mitmEnabled = cfg.MITMEnabled
+	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
 
 	server := &http.Server{
 		Handler: bridge.proxyHandler(),
@@ -105,18 +110,20 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 type bridge struct {
-	conn      io.ReadWriteCloser
-	enc       *gob.Encoder
-	dec       *gob.Decoder
-	logger    *log.Logger
-	proxyAddr string
-	sendMu    sync.Mutex
-	pending   map[uint64]chan helperproto.Envelope
-	pendMu    sync.Mutex
-	tunnels   map[uint64]*tunnelDelivery
-	tunnelMu  sync.Mutex
-	nextID    atomic.Uint64
-	execMu    sync.Mutex
+	conn                io.ReadWriteCloser
+	enc                 *gob.Encoder
+	dec                 *gob.Decoder
+	logger              *log.Logger
+	proxyAddr           string
+	mitmEnabled         bool
+	maxRequestBodyBytes int64
+	sendMu              sync.Mutex
+	pending             map[uint64]chan helperproto.Envelope
+	pendMu              sync.Mutex
+	tunnels             map[uint64]*tunnelDelivery
+	tunnelMu            sync.Mutex
+	nextID              atomic.Uint64
+	execMu              sync.Mutex
 }
 
 type tunnelDelivery struct {
@@ -148,7 +155,7 @@ func (b *bridge) readLoop(ctx context.Context) error {
 			if err := b.handleHello(env); err != nil {
 				return err
 			}
-		case env.ProxyResponse != nil:
+		case env.ProxyResponse != nil, env.MITMResponse != nil, env.LeafCertResponse != nil:
 			b.deliver(env)
 		case env.ConnectResponse != nil:
 			b.deliver(env)
@@ -179,6 +186,10 @@ func (b *bridge) handleHello(env helperproto.Envelope) error {
 func (b *bridge) proxyHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodConnect {
+			if b.mitmEnabled {
+				b.handleMITMConnect(w, req)
+				return
+			}
 			b.handleConnect(w, req)
 			return
 		}
@@ -215,6 +226,98 @@ func (b *bridge) proxyHandler() http.Handler {
 			b.logger.Printf("copy proxied response body: %v", err)
 		}
 	})
+}
+
+func (b *bridge) handleMITMConnect(w http.ResponseWriter, req *http.Request) {
+	host, port, err := parseConnectTarget(req.Host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "proxy does not support connection hijacking", http.StatusInternalServerError)
+		return
+	}
+
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("hijack proxy connection: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	bufferedPayload, err := drainHijackBufferedBytes(rw)
+	if err != nil {
+		b.writeConnectError(conn, http.StatusBadGateway, fmt.Sprintf("read buffered connect payload: %v", err))
+		return
+	}
+
+	_ = conn.SetDeadline(time.Now().Add(connectHandshakeTimeout))
+	connectCtx, cancelConnect := context.WithTimeout(req.Context(), connectHandshakeTimeout)
+	defer cancelConnect()
+
+	response, err := b.authorizeConnect(connectCtx, host, port)
+	if err != nil {
+		_ = conn.SetDeadline(time.Time{})
+		b.writeConnectError(conn, connectErrorStatus(err), err.Error())
+		return
+	}
+	if response == nil {
+		_ = conn.SetDeadline(time.Time{})
+		b.writeConnectError(conn, http.StatusBadGateway, "empty connect response")
+		return
+	}
+
+	statusCode := response.StatusCode
+	if statusCode == 0 {
+		statusCode = http.StatusBadGateway
+	}
+	if response.Error != "" || statusCode < 200 || statusCode >= 300 {
+		message := response.Message
+		if message == "" {
+			message = response.Error
+		}
+		_ = conn.SetDeadline(time.Time{})
+		b.writeConnectError(conn, statusCode, message)
+		return
+	}
+
+	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		_ = conn.Close()
+		return
+	}
+
+	leafCert, err := b.requestLeafCert(connectCtx, host)
+	if err != nil {
+		_ = conn.SetDeadline(time.Time{})
+		_ = conn.Close()
+		return
+	}
+
+	serverConn := net.Conn(conn)
+	if len(bufferedPayload) > 0 {
+		serverConn = &preloadedConn{Conn: conn, reader: bytes.NewReader(bufferedPayload)}
+	}
+
+	tlsConn := tls.Server(serverConn, &tls.Config{
+		Certificates: []tls.Certificate{leafCert},
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"http/1.1"},
+	})
+	if err := tlsConn.HandshakeContext(connectCtx); err != nil {
+		_ = conn.SetDeadline(time.Time{})
+		_ = tlsConn.Close()
+		return
+	}
+	_ = conn.SetDeadline(time.Time{})
+
+	serveErr := (&http.Server{
+		Handler: b.mitmHandler(host, port),
+	}).Serve(&singleConnListener{conn: tlsConn})
+	if serveErr != nil && !errors.Is(serveErr, io.EOF) && !errors.Is(serveErr, net.ErrClosed) {
+		b.logger.Printf("serve MITM connection: %v", serveErr)
+	}
 }
 
 type tunnelRelayResult struct {
@@ -395,6 +498,117 @@ func (b *bridge) connect(ctx context.Context, host string, port int) (uint64, ch
 			return id, nil, nil, fmt.Errorf("bridge response %d did not contain a connect response", id)
 		}
 		return id, tunnelCh, env.ConnectResponse, nil
+	}
+}
+
+func (b *bridge) authorizeConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
+	id := b.nextID.Add(1)
+	ch := make(chan helperproto.Envelope, 1)
+
+	b.pendMu.Lock()
+	b.pending[id] = ch
+	b.pendMu.Unlock()
+
+	defer func() {
+		b.pendMu.Lock()
+		delete(b.pending, id)
+		b.pendMu.Unlock()
+	}()
+
+	if err := b.send(helperproto.Envelope{
+		ID: id,
+		ConnectRequest: &helperproto.ConnectRequest{
+			Host: host,
+			Port: port,
+		},
+	}); err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case env := <-ch:
+		if env.ConnectResponse == nil {
+			return nil, fmt.Errorf("bridge response %d did not contain a connect response", id)
+		}
+		return env.ConnectResponse, nil
+	}
+}
+
+func (b *bridge) requestLeafCert(ctx context.Context, host string) (tls.Certificate, error) {
+	id := b.nextID.Add(1)
+	ch := make(chan helperproto.Envelope, 1)
+
+	b.pendMu.Lock()
+	b.pending[id] = ch
+	b.pendMu.Unlock()
+
+	defer func() {
+		b.pendMu.Lock()
+		delete(b.pending, id)
+		b.pendMu.Unlock()
+	}()
+
+	if err := b.send(helperproto.Envelope{
+		ID: id,
+		LeafCertRequest: &helperproto.LeafCertRequest{
+			Host: host,
+		},
+	}); err != nil {
+		return tls.Certificate{}, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return tls.Certificate{}, ctx.Err()
+	case env := <-ch:
+		if env.LeafCertResponse == nil {
+			return tls.Certificate{}, fmt.Errorf("bridge response %d did not contain a leaf cert response", id)
+		}
+		if env.LeafCertResponse.Error != "" {
+			return tls.Certificate{}, errors.New(env.LeafCertResponse.Error)
+		}
+		cert, err := tls.X509KeyPair(env.LeafCertResponse.CertPEM, env.LeafCertResponse.KeyPEM)
+		if err != nil {
+			return tls.Certificate{}, fmt.Errorf("parse leaf certificate key pair: %w", err)
+		}
+		return cert, nil
+	}
+}
+
+func (b *bridge) mitmRoundTrip(ctx context.Context, req helperproto.MITMRequest) (*helperproto.MITMResponse, error) {
+	id := b.nextID.Add(1)
+	ch := make(chan helperproto.Envelope, 1)
+
+	b.pendMu.Lock()
+	b.pending[id] = ch
+	b.pendMu.Unlock()
+
+	defer func() {
+		b.pendMu.Lock()
+		delete(b.pending, id)
+		b.pendMu.Unlock()
+	}()
+
+	if err := b.send(helperproto.Envelope{
+		ID:          id,
+		MITMRequest: &req,
+	}); err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case env := <-ch:
+		if env.MITMResponse == nil {
+			return nil, fmt.Errorf("bridge response %d did not contain a MITM response", id)
+		}
+		if env.MITMResponse.Error != "" && env.MITMResponse.StatusCode == 0 {
+			return nil, errors.New(env.MITMResponse.Error)
+		}
+		return env.MITMResponse, nil
 	}
 }
 
@@ -591,6 +805,46 @@ func connectErrorStatus(err error) int {
 	}
 }
 
+func (b *bridge) mitmHandler(connectHost string, connectPort int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, tooLarge, err := readBoundedBody(req.Body, b.maxRequestBodyBytes)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		host := req.Host
+		if host == "" {
+			host = connectHost
+		}
+		response, err := b.mitmRoundTrip(req.Context(), helperproto.MITMRequest{
+			Scheme:       "https",
+			Authority:    net.JoinHostPort(connectHost, strconv.Itoa(connectPort)),
+			Host:         host,
+			Method:       req.Method,
+			Path:         req.URL.Path,
+			RawQuery:     req.URL.RawQuery,
+			Header:       req.Header.Clone(),
+			Body:         body,
+			Proto:        req.Proto,
+			BodyTooLarge: tooLarge,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		copyHeader(w.Header(), response.Header)
+		if response.StatusCode == 0 {
+			response.StatusCode = http.StatusBadGateway
+		}
+		w.WriteHeader(response.StatusCode)
+		if _, err := io.Copy(w, bytes.NewReader(response.Body)); err != nil {
+			b.logger.Printf("copy MITM response body: %v", err)
+		}
+	})
+}
+
 func closePayloadWrite(conn net.Conn) error {
 	type closeWriter interface {
 		CloseWrite() error
@@ -600,6 +854,83 @@ func closePayloadWrite(conn net.Conn) error {
 	}
 	return conn.Close()
 }
+
+func readBoundedBody(body io.ReadCloser, maxBytes int64) ([]byte, bool, error) {
+	if body == nil {
+		return nil, false, nil
+	}
+	defer body.Close()
+
+	if maxBytes <= 0 {
+		data, err := io.ReadAll(body)
+		return data, false, err
+	}
+
+	limited, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(limited)) > maxBytes {
+		return limited[:maxBytes], true, nil
+	}
+	return limited, false, nil
+}
+
+type preloadedConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func (c *preloadedConn) Read(p []byte) (int, error) {
+	if c.reader != nil {
+		n, err := c.reader.Read(p)
+		if errors.Is(err, io.EOF) {
+			c.reader = nil
+			if n > 0 {
+				return n, nil
+			}
+		} else if err != nil || n > 0 {
+			return n, err
+		}
+	}
+	return c.Conn.Read(p)
+}
+
+type singleConnListener struct {
+	conn net.Conn
+	once sync.Once
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	var accepted net.Conn
+	l.once.Do(func() {
+		accepted = l.conn
+		l.conn = nil
+	})
+	if accepted != nil {
+		return accepted, nil
+	}
+	return nil, io.EOF
+}
+
+func (l *singleConnListener) Close() error {
+	if l.conn != nil {
+		return l.conn.Close()
+	}
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr {
+	if l.conn != nil {
+		return l.conn.LocalAddr()
+	}
+	return listenerAddr("single-conn")
+}
+
+type listenerAddr string
+
+func (a listenerAddr) Network() string { return string(a) }
+func (a listenerAddr) String() string  { return string(a) }
 
 func (b *bridge) handleExec(ctx context.Context, id uint64, req helperproto.ExecRequest) {
 	b.execMu.Lock()

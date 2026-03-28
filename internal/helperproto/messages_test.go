@@ -228,9 +228,65 @@ func TestMITMResponseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLeafCertRequestRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		ID: 15,
+		LeafCertRequest: &LeafCertRequest{
+			Host: "example.com",
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("unexpected envelope id: got=%d want=%d", got.ID, want.ID)
+	}
+	if got.LeafCertRequest == nil || got.LeafCertRequest.Host != "example.com" {
+		t.Fatalf("unexpected leaf cert request: %#v", got.LeafCertRequest)
+	}
+}
+
+func TestLeafCertResponseRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		ID: 16,
+		LeafCertResponse: &LeafCertResponse{
+			CertPEM: []byte("cert"),
+			KeyPEM:  []byte("key"),
+			Error:   "boom",
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("unexpected envelope id: got=%d want=%d", got.ID, want.ID)
+	}
+	if got.LeafCertResponse == nil || got.LeafCertResponse.Error != "boom" {
+		t.Fatalf("unexpected leaf cert response: %#v", got.LeafCertResponse)
+	}
+}
+
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 3 {
-		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 3)
+	if ProtocolVersion != 4 {
+		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 4)
 	}
 }
 
@@ -299,6 +355,16 @@ func TestEnvelopeKind(t *testing.T) {
 			name: "mitm_request",
 			env:  Envelope{MITMRequest: &MITMRequest{}},
 			want: "mitm_request",
+		},
+		{
+			name: "leaf_cert_request",
+			env:  Envelope{LeafCertRequest: &LeafCertRequest{}},
+			want: "leaf_cert_request",
+		},
+		{
+			name: "leaf_cert_response",
+			env:  Envelope{LeafCertResponse: &LeafCertResponse{}},
+			want: "leaf_cert_response",
 		},
 		{
 			name: "mitm_response",

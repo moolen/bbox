@@ -208,6 +208,9 @@ func (c *helperClient) readLoop() error {
 		case env.ConnectRequest != nil:
 			req := *env.ConnectRequest
 			go c.handleConnectRequest(env.ID, req)
+		case env.LeafCertRequest != nil:
+			req := *env.LeafCertRequest
+			go c.handleLeafCertRequest(env.ID, req)
 		case env.MITMRequest != nil:
 			req := *env.MITMRequest
 			go c.handleMITMRequest(env.ID, req)
@@ -287,6 +290,22 @@ func (c *helperClient) handleConnectRequest(id uint64, req helperproto.ConnectRe
 		return
 	}
 	tunnel.start()
+}
+
+func (c *helperClient) handleLeafCertRequest(id uint64, req helperproto.LeafCertRequest) {
+	response := c.manager.handleLeafCertRequest(req.Host)
+	if response == nil {
+		response = &helperproto.LeafCertResponse{
+			Error: "leaf cert request rejected: empty response",
+		}
+	}
+
+	if err := c.send(helperproto.Envelope{
+		ID:               id,
+		LeafCertResponse: response,
+	}); err != nil {
+		c.failCurrentRun(err)
+	}
 }
 
 func (c *helperClient) handleMITMRequest(id uint64, req helperproto.MITMRequest) {

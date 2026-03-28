@@ -4,14 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/gob"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +64,272 @@ func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
 	}
 
 	closeReadLoop(t, peer, errCh)
+}
+
+func TestProxyHandlerMITMHTTP1ForwardsInterceptedRequest(t *testing.T) {
+	bridgeSide, peerSide := net.Pipe()
+	defer bridgeSide.Close()
+	defer peerSide.Close()
+
+	bridge := newBridge(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111")
+	bridge.mitmEnabled = true
+	bridge.maxRequestBodyBytes = 1024
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	readLoopErrCh := make(chan error, 1)
+	go func() {
+		readLoopErrCh <- bridge.readLoop(ctx)
+	}()
+
+	caRoots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(peerSide)
+		enc := gob.NewEncoder(peerSide)
+
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if connectReq.ConnectRequest == nil {
+			peerErrCh <- fmt.Errorf("expected connect request, got %#v", connectReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var mitmReq helperproto.Envelope
+		if err := dec.Decode(&mitmReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if mitmReq.MITMRequest == nil {
+			peerErrCh <- fmt.Errorf("expected MITM request, got %#v", mitmReq)
+			return
+		}
+		if mitmReq.MITMRequest.Method != http.MethodGet || mitmReq.MITMRequest.Path != "/allowed" {
+			peerErrCh <- fmt.Errorf("unexpected MITM request payload: %#v", mitmReq.MITMRequest)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: mitmReq.ID,
+			MITMResponse: &helperproto.MITMResponse{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"X-Intercepted": []string{"yes"}},
+				Body:       []byte("intercepted ok"),
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	server := httptest.NewServer(bridge.proxyHandler())
+	defer server.Close()
+
+	proxyURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:             http.ProxyURL(proxyURL),
+			TLSClientConfig:   &tls.Config{RootCAs: caRoots},
+			ForceAttemptHTTP2: false,
+		},
+	}
+
+	resp, err := client.Get("https://example.com/allowed")
+	if err != nil {
+		t.Fatalf("client GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "intercepted ok" {
+		t.Fatalf("unexpected body: %q", string(body))
+	}
+	if got := resp.Header.Get("X-Intercepted"); got != "yes" {
+		t.Fatalf("unexpected header: %q", got)
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for MITM bridge peer")
+	}
+
+	cancel()
+	_ = peerSide.Close()
+	select {
+	case err := <-readLoopErrCh:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected readLoop shutdown error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for readLoop to exit")
+	}
+}
+
+func TestProxyHandlerMITMHTTP1ReturnsDeterministicFailure(t *testing.T) {
+	bridgeSide, peerSide := net.Pipe()
+	defer bridgeSide.Close()
+	defer peerSide.Close()
+
+	bridge := newBridge(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111")
+	bridge.mitmEnabled = true
+	bridge.maxRequestBodyBytes = 1024
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	readLoopErrCh := make(chan error, 1)
+	go func() {
+		readLoopErrCh <- bridge.readLoop(ctx)
+	}()
+
+	caRoots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(peerSide)
+		enc := gob.NewEncoder(peerSide)
+
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var mitmReq helperproto.Envelope
+		if err := dec.Decode(&mitmReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: mitmReq.ID,
+			MITMResponse: &helperproto.MITMResponse{
+				StatusCode: http.StatusForbidden,
+				Header:     http.Header{"Content-Type": []string{"text/plain"}},
+				Body:       []byte("blocked by policy"),
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	server := httptest.NewServer(bridge.proxyHandler())
+	defer server.Close()
+
+	proxyURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:             http.ProxyURL(proxyURL),
+			TLSClientConfig:   &tls.Config{RootCAs: caRoots},
+			ForceAttemptHTTP2: false,
+		},
+	}
+
+	resp, err := client.Get("https://example.com/blocked")
+	if err != nil {
+		t.Fatalf("client GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d", resp.StatusCode)
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for MITM bridge peer")
+	}
+
+	cancel()
+	_ = peerSide.Close()
+	select {
+	case err := <-readLoopErrCh:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected readLoop shutdown error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for readLoop to exit")
+	}
 }
 
 func TestReadLoopRejectsHelloWithUnexpectedProtocolVersion(t *testing.T) {
@@ -980,6 +1254,59 @@ func startReadLoop(t *testing.T, proxyAddr string) (net.Conn, net.Conn, <-chan e
 	}()
 
 	return bridgeSide, peerSide, errCh
+}
+
+func issueTestLeafCertPEM(t *testing.T, host string) (*x509.CertPool, []byte, []byte) {
+	t.Helper()
+
+	caPub, caPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test mitm ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caPub, caPriv)
+	if err != nil {
+		t.Fatalf("create CA cert: %v", err)
+	}
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+
+	leafPub, leafPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate leaf key: %v", err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: host},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{host},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caTemplate, leafPub, caPriv)
+	if err != nil {
+		t.Fatalf("create leaf cert: %v", err)
+	}
+	leafPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+	leafKeyDER, err := x509.MarshalPKCS8PrivateKey(leafPriv)
+	if err != nil {
+		t.Fatalf("marshal leaf key: %v", err)
+	}
+	leafKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: leafKeyDER})
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("append CA PEM to roots")
+	}
+	return roots, leafPEM, leafKeyPEM
 }
 
 func closeReadLoop(t *testing.T, peer net.Conn, errCh <-chan error) {

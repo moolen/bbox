@@ -2,23 +2,25 @@ package helperproto
 
 import "net/http"
 
-const ProtocolVersion = 3
+const ProtocolVersion = 4
 
 type Envelope struct {
-	ID              uint64
-	Hello           *Hello
-	Ready           *Ready
-	ProxyRequest    *ProxyRequest
-	ProxyResponse   *ProxyResponse
-	ConnectRequest  *ConnectRequest
-	ConnectResponse *ConnectResponse
-	MITMRequest     *MITMRequest
-	MITMResponse    *MITMResponse
-	TunnelFrame     *TunnelFrame
-	TunnelClose     *TunnelClose
-	ExecRequest     *ExecRequest
-	StreamFrame     *StreamFrame
-	ExecResult      *ExecResult
+	ID               uint64
+	Hello            *Hello
+	Ready            *Ready
+	ProxyRequest     *ProxyRequest
+	ProxyResponse    *ProxyResponse
+	ConnectRequest   *ConnectRequest
+	ConnectResponse  *ConnectResponse
+	LeafCertRequest  *LeafCertRequest
+	LeafCertResponse *LeafCertResponse
+	MITMRequest      *MITMRequest
+	MITMResponse     *MITMResponse
+	TunnelFrame      *TunnelFrame
+	TunnelClose      *TunnelClose
+	ExecRequest      *ExecRequest
+	StreamFrame      *StreamFrame
+	ExecResult       *ExecResult
 }
 
 func (e Envelope) Kind() string {
@@ -35,6 +37,10 @@ func (e Envelope) Kind() string {
 		return "connect_request"
 	case e.ConnectResponse != nil:
 		return "connect_response"
+	case e.LeafCertRequest != nil:
+		return "leaf_cert_request"
+	case e.LeafCertResponse != nil:
+		return "leaf_cert_response"
 	case e.MITMRequest != nil:
 		return "mitm_request"
 	case e.MITMResponse != nil:
@@ -87,6 +93,16 @@ type ConnectResponse struct {
 	StatusCode int
 	Message    string
 	Error      string
+}
+
+type LeafCertRequest struct {
+	Host string
+}
+
+type LeafCertResponse struct {
+	CertPEM []byte
+	KeyPEM  []byte
+	Error   string
 }
 
 type MITMRequest struct {

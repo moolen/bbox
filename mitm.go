@@ -133,6 +133,27 @@ func (c *mitmCA) LeafForHost(host string) (*tls.Certificate, error) {
 	return cert, nil
 }
 
+func (c *mitmCA) LeafPEMForHost(host string) ([]byte, []byte, error) {
+	cert, err := c.LeafForHost(host)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	keyDER, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal leaf private key for %q: %w", host, err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: cert.Certificate[0],
+	})
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: keyDER,
+	})
+	return certPEM, keyPEM, nil
+}
+
 func randomSerialNumber() (*big.Int, error) {
 	limit := new(big.Int).Lsh(big.NewInt(1), 128)
 	return rand.Int(rand.Reader, limit)
