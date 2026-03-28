@@ -105,7 +105,7 @@ func normalizeHostPort(host string, port int) (string, int) {
 		}
 	}
 
-	return normalizedHost, normalizedPort
+	return strings.ToLower(normalizedHost), normalizedPort
 }
 
 func updateAuditStateLocked(state *managerAuditState, event accessEvent) {
@@ -123,7 +123,7 @@ func updateAuditStateLocked(state *managerAuditState, event accessEvent) {
 
 	host, port := normalizeHostPort(event.Host, event.Port)
 	if host == "" {
-		host = event.Host
+		host = strings.ToLower(event.Host)
 	}
 
 	entry, ok := sandboxState[host]

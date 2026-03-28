@@ -283,6 +283,57 @@ func TestRecordAccessEventSkipsEmptySandboxID(t *testing.T) {
 	}
 }
 
+func TestRecordAccessEventNormalizesHostCase(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	manager.recordAccessEvent(accessEvent{
+		Time:      time.Date(2026, 3, 28, 17, 0, 0, 0, time.UTC),
+		SandboxID: "sandbox-a",
+		Kind:      "http",
+		Host:      "EXAMPLE.COM",
+		Port:      80,
+		Result:    "allowed",
+	})
+	manager.recordAccessEvent(accessEvent{
+		Time:      time.Date(2026, 3, 28, 17, 1, 0, 0, time.UTC),
+		SandboxID: "sandbox-a",
+		Kind:      "http",
+		Host:      "example.com",
+		Port:      80,
+		Result:    "allowed",
+	})
+
+	snapshot := manager.accessedDomainsSnapshot("sandbox-a")
+	entry := findAccessedDomain(t, snapshot, "example.com")
+	if entry.Attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", entry.Attempts)
+	}
+}
+
+func TestRecordAccessEventSkipsUnregisteredSandbox(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	logger := &stubAccessLogger{}
+	manager.accessLogger = logger
+
+	manager.recordAccessEvent(accessEvent{
+		Time:      time.Date(2026, 3, 28, 18, 0, 0, 0, time.UTC),
+		SandboxID: "missing-sandbox",
+		Host:      "example.com",
+		Port:      443,
+		Result:    "allowed",
+	})
+
+	if len(logger.entries) != 0 {
+		t.Fatalf("expected no log entries, got %d", len(logger.entries))
+	}
+	if _, ok := auditStateByManager.Load(manager); ok {
+		t.Fatal("expected no audit state for unregistered sandbox ID")
+	}
+}
+
 func findAccessedDomain(t *testing.T, entries []AccessedDomain, host string) AccessedDomain {
 	t.Helper()
 	for _, entry := range entries {

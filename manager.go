@@ -409,6 +409,10 @@ func (m *ProxyManager) recordAccessEvent(event accessEvent) {
 	entry := event.toAccessLogEntry()
 
 	m.mu.Lock()
+	if _, ok := m.sandboxes[event.SandboxID]; !ok {
+		m.mu.Unlock()
+		return
+	}
 	updateAuditStateLocked(auditStateLocked(m), event)
 	logger := m.accessLogger
 	m.mu.Unlock()
