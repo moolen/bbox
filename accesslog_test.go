@@ -13,6 +13,15 @@ func (s *stubAccessLogger) LogAccess(entry AccessLogEntry) {
 	s.entries = append(s.entries, entry)
 }
 
+type panicAccessLogger struct {
+	calls int
+}
+
+func (p *panicAccessLogger) LogAccess(entry AccessLogEntry) {
+	p.calls++
+	panic("access logger failure")
+}
+
 func TestNewProxyManagerInstallsDefaultAccessLogger(t *testing.T) {
 	manager, err := NewProxyManager(ProxyOptions{})
 	if err != nil {

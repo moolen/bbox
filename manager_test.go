@@ -1,11 +1,16 @@
 package bbox
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/moolen/bbox/internal/helperproto"
@@ -151,5 +156,328 @@ func TestProxyManagerMITMRejectsOversizedBody(t *testing.T) {
 
 	if response == nil || response.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("unexpected oversized MITM response: %#v", response)
+	}
+}
+
+func TestHandleProxyRequestRecordsDeniedAccess(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		DenyHostPatterns: []string{`^denied[.]test$`},
+	}))
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleProxyRequest(t.Context(), "sandbox-a", helperproto.ProxyRequest{
+		Method: http.MethodGet,
+		URL:    "http://denied.test/blocked",
+	})
+
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("unexpected proxy response: %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "http" {
+		t.Fatalf("expected http access kind, got %q", entry.Kind)
+	}
+	if entry.Allowed {
+		t.Fatal("expected denied access to be disallowed")
+	}
+	if entry.Result != "denied" {
+		t.Fatalf("expected denied result, got %q", entry.Result)
+	}
+	if entry.Method != http.MethodGet {
+		t.Fatalf("expected GET method, got %q", entry.Method)
+	}
+	if entry.Path != "/blocked" {
+		t.Fatalf("expected path /blocked, got %q", entry.Path)
+	}
+	if entry.Host != "denied.test" {
+		t.Fatalf("expected host denied.test, got %q", entry.Host)
+	}
+	if entry.Port != 80 {
+		t.Fatalf("expected port 80, got %d", entry.Port)
+	}
+	if entry.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d", entry.StatusCode)
+	}
+	if entry.Error == "" {
+		t.Fatal("expected error for denied request")
+	}
+}
+
+func TestHandleProxyRequestRecordsUpstreamErrorAccess(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	manager.transport = &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("dial failed")
+		},
+	}
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleProxyRequest(t.Context(), "sandbox-a", helperproto.ProxyRequest{
+		Method: http.MethodGet,
+		URL:    "http://upstream.test/resource",
+		Header: make(http.Header),
+	})
+
+	if response == nil || response.Error == "" {
+		t.Fatalf("expected upstream error response, got %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "http" {
+		t.Fatalf("expected http access kind, got %q", entry.Kind)
+	}
+	if !entry.Allowed {
+		t.Fatal("expected upstream error to be allowed")
+	}
+	if entry.Result != "upstream_error" {
+		t.Fatalf("expected upstream_error result, got %q", entry.Result)
+	}
+	if entry.Method != http.MethodGet {
+		t.Fatalf("expected GET method, got %q", entry.Method)
+	}
+	if entry.Path != "/resource" {
+		t.Fatalf("expected path /resource, got %q", entry.Path)
+	}
+	if entry.Host != "upstream.test" {
+		t.Fatalf("expected host upstream.test, got %q", entry.Host)
+	}
+	if entry.Port != 80 {
+		t.Fatalf("expected port 80, got %d", entry.Port)
+	}
+	if entry.StatusCode != 0 {
+		t.Fatalf("expected status code 0 for upstream error, got %d", entry.StatusCode)
+	}
+	if !strings.Contains(entry.Error, "dial failed") {
+		t.Fatalf("expected upstream error to include dial failed, got %q", entry.Error)
+	}
+}
+
+func TestHandleConnectRequestRecordsAllowedAccess(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		AllowConnect:      true,
+		AllowConnectPorts: []string{"443"},
+		AllowHostPatterns: []string{`^example[.]com$`},
+	}))
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleConnectRequest(t.Context(), "sandbox-a", helperproto.ConnectRequest{
+		Host: "example.com",
+		Port: 443,
+	})
+
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected connect response: %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "connect" {
+		t.Fatalf("expected connect access kind, got %q", entry.Kind)
+	}
+	if !entry.Allowed {
+		t.Fatal("expected allowed connect access")
+	}
+	if entry.Result != "allowed" {
+		t.Fatalf("expected allowed result, got %q", entry.Result)
+	}
+	if entry.Host != "example.com" {
+		t.Fatalf("expected host example.com, got %q", entry.Host)
+	}
+	if entry.Port != 443 {
+		t.Fatalf("expected port 443, got %d", entry.Port)
+	}
+	if entry.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", entry.StatusCode)
+	}
+}
+
+func TestHandleConnectRequestRecordsDeniedAccess(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+	}))
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleConnectRequest(t.Context(), "sandbox-a", helperproto.ConnectRequest{
+		Host: "example.com",
+		Port: 443,
+	})
+
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("unexpected connect response: %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "connect" {
+		t.Fatalf("expected connect access kind, got %q", entry.Kind)
+	}
+	if entry.Allowed {
+		t.Fatal("expected denied connect access")
+	}
+	if entry.Result != "denied" {
+		t.Fatalf("expected denied result, got %q", entry.Result)
+	}
+	if entry.Host != "example.com" {
+		t.Fatalf("expected host example.com, got %q", entry.Host)
+	}
+	if entry.Port != 443 {
+		t.Fatalf("expected port 443, got %d", entry.Port)
+	}
+	if entry.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d", entry.StatusCode)
+	}
+	if entry.Error == "" {
+		t.Fatal("expected error for denied connect")
+	}
+}
+
+func TestHandleMITMRequestRecordsAccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mitm" {
+			t.Fatalf("unexpected path: %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	port, err := strconv.Atoi(serverURL.Port())
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		AllowConnect:      true,
+		AllowConnectPorts: []string{serverURL.Port()},
+	}))
+	manager.transport = server.Client().Transport.(*http.Transport).Clone()
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	connectResponse := manager.handleConnectRequest(t.Context(), "sandbox-a", helperproto.ConnectRequest{
+		Host: serverURL.Hostname(),
+		Port: port,
+	})
+	if connectResponse == nil || connectResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected connect response: %#v", connectResponse)
+	}
+
+	mitmResponse := manager.handleMITMRequest(t.Context(), "sandbox-a", helperproto.MITMRequest{
+		Scheme:    serverURL.Scheme,
+		Authority: serverURL.Host,
+		Host:      serverURL.Hostname(),
+		Method:    http.MethodGet,
+		Path:      "/mitm",
+		Proto:     "HTTP/1.1",
+	})
+	if mitmResponse == nil || mitmResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected MITM response: %#v", mitmResponse)
+	}
+
+	if len(logger.entries) != 2 {
+		t.Fatalf("expected 2 access entries, got %d", len(logger.entries))
+	}
+
+	connectEntry := logger.entries[0]
+	if connectEntry.Kind != "connect" {
+		t.Fatalf("expected connect entry, got %q", connectEntry.Kind)
+	}
+	if connectEntry.Host != serverURL.Hostname() {
+		t.Fatalf("expected connect host %q, got %q", serverURL.Hostname(), connectEntry.Host)
+	}
+	if connectEntry.Port != port {
+		t.Fatalf("expected connect port %d, got %d", port, connectEntry.Port)
+	}
+
+	mitmEntry := logger.entries[1]
+	if mitmEntry.Kind != "mitm" {
+		t.Fatalf("expected mitm entry, got %q", mitmEntry.Kind)
+	}
+	if mitmEntry.Method != http.MethodGet {
+		t.Fatalf("expected GET method, got %q", mitmEntry.Method)
+	}
+	if mitmEntry.Path != "/mitm" {
+		t.Fatalf("expected mitm path /mitm, got %q", mitmEntry.Path)
+	}
+	if mitmEntry.Host != serverURL.Hostname() {
+		t.Fatalf("expected mitm host %q, got %q", serverURL.Hostname(), mitmEntry.Host)
+	}
+	if mitmEntry.Port != port {
+		t.Fatalf("expected mitm port %d, got %d", port, mitmEntry.Port)
+	}
+	if mitmEntry.Result != "allowed" {
+		t.Fatalf("expected allowed mitm result, got %q", mitmEntry.Result)
+	}
+}
+
+func TestLoggerFailureDoesNotBreakRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	logger := &panicAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	manager.transport = server.Client().Transport.(*http.Transport).Clone()
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("handleProxyRequest panicked: %v", recovered)
+		}
+	}()
+
+	response := manager.handleProxyRequest(t.Context(), "sandbox-a", helperproto.ProxyRequest{
+		Method: http.MethodGet,
+		URL:    serverURL.String(),
+		Header: make(http.Header),
+	})
+
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected proxy response: %#v", response)
+	}
+	if logger.calls != 1 {
+		t.Fatalf("expected logger to be called once, got %d", logger.calls)
 	}
 }
