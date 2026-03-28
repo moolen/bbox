@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -31,6 +32,19 @@ func (l *stdoutJSONAccessLogger) LogAccess(entry AccessLogEntry) {
 	_ = l.enc.Encode(entry)
 }
 
+func isNilAccessLogger(logger AccessLogger) bool {
+	if logger == nil {
+		return true
+	}
+	value := reflect.ValueOf(logger)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
 // NewProxyManager validates the supplied options and returns a manager that can
 // create multiple sandboxes sharing the same host-side proxy policy engine.
 func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
@@ -53,7 +67,7 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	manager := newProxyManager(policy)
 	manager.listenAddr = listenAddr
 	manager.mitm = opts.MITM
-	if opts.AccessLogger == nil {
+	if isNilAccessLogger(opts.AccessLogger) {
 		manager.accessLogger = sharedStdoutAccessLogger
 	} else {
 		manager.accessLogger = opts.AccessLogger

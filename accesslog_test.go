@@ -55,6 +55,28 @@ func TestNewProxyManagerSharesDefaultAccessLogger(t *testing.T) {
 	}
 }
 
+type typedNilAccessLogger struct{}
+
+func (t *typedNilAccessLogger) LogAccess(AccessLogEntry) {}
+
+func TestNewProxyManagerTreatsTypedNilAccessLoggerAsNil(t *testing.T) {
+	var logger *typedNilAccessLogger
+	manager, err := NewProxyManager(ProxyOptions{
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	defer manager.Close()
+
+	if manager.accessLogger == logger {
+		t.Fatal("expected typed-nil access logger to be replaced")
+	}
+	if manager.accessLogger != sharedStdoutAccessLogger {
+		t.Fatal("expected default access logger for typed-nil input")
+	}
+}
+
 func TestNilSandboxAccessedDomains(t *testing.T) {
 	var sandbox Sandbox
 
