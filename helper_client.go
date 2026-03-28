@@ -290,14 +290,19 @@ func (c *helperClient) handleConnectRequest(id uint64, req helperproto.ConnectRe
 }
 
 func (c *helperClient) handleMITMRequest(id uint64, req helperproto.MITMRequest) {
-	_ = req
-
+	response := c.manager.handleMITMRequest(c.ctx, c.sandboxID, req)
+	if response == nil {
+		response = &helperproto.MITMResponse{
+			StatusCode: http.StatusBadGateway,
+			Error:      "MITM request rejected: empty response",
+		}
+	}
+	if response.StatusCode == 0 {
+		response.StatusCode = http.StatusBadGateway
+	}
 	if err := c.send(helperproto.Envelope{
-		ID: id,
-		MITMResponse: &helperproto.MITMResponse{
-			StatusCode: http.StatusNotImplemented,
-			Error:      "MITM request handling is not implemented",
-		},
+		ID:           id,
+		MITMResponse: response,
 	}); err != nil {
 		c.failCurrentRun(err)
 	}

@@ -220,6 +220,105 @@ func (m *ProxyManager) handleConnectRequest(ctx context.Context, sandboxID strin
 	}
 }
 
+func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, req helperproto.MITMRequest) *helperproto.MITMResponse {
+	policy, ok := m.policyForSandbox(sandboxID)
+	if !ok {
+		return &helperproto.MITMResponse{
+			StatusCode: http.StatusBadGateway,
+			Error:      fmt.Sprintf("sandbox %q is not registered", sandboxID),
+		}
+	}
+	if req.BodyTooLarge {
+		return &helperproto.MITMResponse{
+			StatusCode: http.StatusRequestEntityTooLarge,
+			Header: http.Header{
+				"Content-Type": []string{"text/plain; charset=utf-8"},
+			},
+			Body: []byte("proxy request denied: request body exceeds inspection limit\n"),
+		}
+	}
+
+	if err := policy.CheckRequest(PolicyRequest{
+		Method:       req.Method,
+		Host:         req.Host,
+		Path:         req.Path,
+		Header:       req.Header,
+		Body:         req.Body,
+		BodyTooLarge: req.BodyTooLarge,
+	}); err != nil {
+		return &helperproto.MITMResponse{
+			StatusCode: http.StatusForbidden,
+			Header: http.Header{
+				"Content-Type": []string{"text/plain; charset=utf-8"},
+			},
+			Body: []byte("proxy request denied: " + err.Error() + "\n"),
+		}
+	}
+
+	scheme := req.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	authority := req.Authority
+	if authority == "" {
+		authority = req.Host
+	}
+	if authority == "" {
+		return &helperproto.MITMResponse{
+			StatusCode: http.StatusBadRequest,
+			Error:      "MITM request authority is required",
+		}
+	}
+	path := req.Path
+	if path == "" {
+		path = "/"
+	}
+
+	targetURL := &url.URL{
+		Scheme:   scheme,
+		Host:     authority,
+		Path:     path,
+		RawQuery: req.RawQuery,
+	}
+	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL.String(), bytes.NewReader(req.Body))
+	if err != nil {
+		return &helperproto.MITMResponse{
+			StatusCode: http.StatusBadGateway,
+			Error:      fmt.Sprintf("build outbound MITM request: %v", err),
+		}
+	}
+	outReq.Header = req.Header.Clone()
+	if outReq.Header == nil {
+		outReq.Header = make(http.Header)
+	}
+	if req.Host != "" {
+		outReq.Host = req.Host
+	}
+
+	resp, err := m.outboundTransport().RoundTrip(outReq)
+	if err != nil {
+		return &helperproto.MITMResponse{
+			StatusCode: http.StatusBadGateway,
+			Error:      err.Error(),
+		}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return &helperproto.MITMResponse{
+			StatusCode: http.StatusBadGateway,
+			Error:      fmt.Sprintf("read outbound MITM response body: %v", err),
+		}
+	}
+
+	return &helperproto.MITMResponse{
+		StatusCode: resp.StatusCode,
+		Header:     resp.Header.Clone(),
+		Body:       body,
+	}
+}
+
 var dialTunnelFn = func(ctx context.Context, host string, port int) (net.Conn, error) {
 	if ctx == nil {
 		ctx = context.Background()
