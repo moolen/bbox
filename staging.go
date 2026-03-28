@@ -13,6 +13,12 @@ const (
 	defaultSandboxHelperPath = "/app/bbox-helper"
 )
 
+var mitmTrustBundlePaths = []string{
+	"/etc/ssl/certs/ca-certificates.crt",
+	"/etc/pki/tls/certs/ca-bundle.crt",
+	"/etc/ssl/cert.pem",
+}
+
 func resolveBinary(nameOrPath string) (string, error) {
 	if nameOrPath == "" {
 		return "", fmt.Errorf("binary path is required")
@@ -75,7 +81,7 @@ func runtimeFilesForBinary(binaryPath string) ([]string, error) {
 	return parseLddOutput(string(output)), nil
 }
 
-func stageSandboxRoot(opts SandboxOptions, helperBinary string) (root string, err error) {
+func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte) (root string, err error) {
 	root, err = os.MkdirTemp("", "bwrap-go-root-")
 	if err != nil {
 		return "", fmt.Errorf("create sandbox root: %w", err)
@@ -132,17 +138,22 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string) (root string, er
 		return "", err
 	}
 
-	if err := writeSandboxConfig(root); err != nil {
+	if err := writeSandboxConfig(root, mitmCAPEM); err != nil {
 		return "", err
 	}
 
 	return root, nil
 }
 
-func writeSandboxConfig(root string) error {
+func writeSandboxConfig(root string, mitmCAPEM []byte) error {
 	files := map[string]string{
 		"/etc/hosts":         "127.0.0.1 localhost\n::1 localhost\n",
 		"/etc/nsswitch.conf": "hosts: files\n",
+	}
+	if len(mitmCAPEM) > 0 {
+		for _, path := range mitmTrustBundlePaths {
+			files[path] = string(mitmCAPEM)
+		}
 	}
 	for path, content := range files {
 		dest, err := sandboxPathInRoot(root, path)

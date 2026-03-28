@@ -64,7 +64,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, err
 	}
 
-	root, err := stageSandboxRoot(opts, helperBinary)
+	root, err := stageSandboxRoot(opts, helperBinary, m.CACertPEM())
 	if err != nil {
 		return nil, err
 	}
