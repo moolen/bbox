@@ -123,10 +123,20 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 	}
 	if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_files.so.2")); ok {
 		extras = append(extras, path)
+		deps, err := runtimeFilesForBinary(path)
+		if err != nil {
+			return "", err
+		}
+		files = append(files, deps...)
 	}
 	if normalizeTrafficMode(mode) == TrafficModeTransparent {
 		if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2")); ok {
 			extras = append(extras, path)
+			deps, err := runtimeFilesForBinary(path)
+			if err != nil {
+				return "", err
+			}
+			files = append(files, deps...)
 		}
 	}
 	for _, extra := range extras {
@@ -246,13 +256,32 @@ func sandboxPathInRoot(root, sandboxPath string) (string, error) {
 }
 
 func nssModuleCandidatePaths(module string) []string {
-	return []string{
-		filepath.Join("/usr/lib", module),
-		filepath.Join("/usr/lib/x86_64-linux-gnu", module),
-		filepath.Join("/lib/x86_64-linux-gnu", module),
-		filepath.Join("/lib64", module),
-		filepath.Join("/usr/lib64", module),
+	var candidates []string
+	baseDirs := []string{"/usr/lib", "/lib", "/usr/lib64", "/lib64"}
+	for _, dir := range baseDirs {
+		candidates = append(candidates, filepath.Join(dir, module))
 	}
+	for _, root := range []string{"/usr/lib", "/lib"} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		var multiarch []string
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasSuffix(name, "-linux-gnu") {
+				multiarch = append(multiarch, filepath.Join(root, name))
+			}
+		}
+		slices.Sort(multiarch)
+		for _, dir := range multiarch {
+			candidates = append(candidates, filepath.Join(dir, module))
+		}
+	}
+	return candidates
 }
 
 func firstExistingPath(paths []string) (string, bool) {

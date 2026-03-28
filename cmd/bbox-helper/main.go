@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -24,7 +23,6 @@ type helperFlags struct {
 func parseFlags(args []string) (helperFlags, error) {
 	var parsed helperFlags
 	fs := flag.NewFlagSet("bbox-helper", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
 	fs.IntVar(&parsed.bridgeFD, "bridge-fd", 3, "file descriptor carrying the helper control bridge")
 	fs.StringVar(&parsed.proxyAddr, "proxy-addr", helperruntime.DefaultProxyAddr, "sandbox-local proxy listen address")
 	fs.BoolVar(&parsed.mitmEnabled, "mitm-enabled", false, "enable TLS MITM interception for CONNECT requests")

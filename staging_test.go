@@ -3,6 +3,7 @@ package bbox
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -175,8 +176,8 @@ func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
 }
 
 func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
-	libPath := firstExistingNSSModulePath("libnss_dns.so.2")
-	if libPath == "" {
+	libPath, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2"))
+	if !ok {
 		t.Skip("skip: libnss_dns.so.2 not available")
 	}
 
@@ -190,27 +191,45 @@ func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
 	if _, err := os.Stat(expected); err != nil {
 		t.Fatalf("expected staged libnss_dns at %q: %v", expected, err)
 	}
-}
 
-func firstExistingNSSModulePath(module string) string {
-	for _, candidate := range nssModuleCandidatePaths(module) {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+	deps, err := runtimeFilesForBinary(libPath)
+	if err != nil {
+		t.Fatalf("runtimeFilesForBinary failed: %v", err)
+	}
+	for _, dep := range deps {
+		staged := filepath.Join(root, strings.TrimPrefix(dep, string(filepath.Separator)))
+		if _, err := os.Stat(staged); err != nil {
+			t.Fatalf("expected staged dependency %q: %v", staged, err)
 		}
 	}
-	return ""
 }
 
-func TestNSSModuleCandidatePathsIncludesCommonLinuxDirs(t *testing.T) {
+func TestNSSModuleCandidatePaths(t *testing.T) {
 	candidates := nssModuleCandidatePaths("libnss_dns.so.2")
 	if !containsString(candidates, "/usr/lib/libnss_dns.so.2") {
 		t.Fatalf("expected /usr/lib candidate in %v", candidates)
 	}
-	if !containsString(candidates, "/usr/lib/x86_64-linux-gnu/libnss_dns.so.2") {
-		t.Fatalf("expected /usr/lib/x86_64-linux-gnu candidate in %v", candidates)
+	if !containsString(candidates, "/lib/libnss_dns.so.2") {
+		t.Fatalf("expected /lib candidate in %v", candidates)
 	}
-	if !containsString(candidates, "/lib/x86_64-linux-gnu/libnss_dns.so.2") {
-		t.Fatalf("expected /lib/x86_64-linux-gnu candidate in %v", candidates)
+	if !containsString(candidates, "/usr/lib64/libnss_dns.so.2") {
+		t.Fatalf("expected /usr/lib64 candidate in %v", candidates)
+	}
+	if !containsString(candidates, "/lib64/libnss_dns.so.2") {
+		t.Fatalf("expected /lib64 candidate in %v", candidates)
+	}
+
+	for _, dir := range linuxGNUDirs("/usr/lib") {
+		expected := filepath.Join(dir, "libnss_dns.so.2")
+		if !containsString(candidates, expected) {
+			t.Fatalf("expected %s candidate in %v", expected, candidates)
+		}
+	}
+	for _, dir := range linuxGNUDirs("/lib") {
+		expected := filepath.Join(dir, "libnss_dns.so.2")
+		if !containsString(candidates, expected) {
+			t.Fatalf("expected %s candidate in %v", expected, candidates)
+		}
 	}
 }
 
@@ -221,6 +240,25 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func linuxGNUDirs(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, "-linux-gnu") {
+			dirs = append(dirs, filepath.Join(root, name))
+		}
+	}
+	slices.Sort(dirs)
+	return dirs
 }
 
 func containsArgSequence(haystack []string, needle []string) bool {
