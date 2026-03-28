@@ -39,6 +39,48 @@ type hostCommandResult struct {
 	output   string
 }
 
+func TestProxyBlockedProbeSpecsOmitICMPWhenHostUnavailable(t *testing.T) {
+	probes := proxyBlockedProbeSpecs("/bin/sh", networkToolPaths{
+		curl: "/usr/bin/curl",
+		ping: "/usr/bin/ping",
+		dns:  "/usr/bin/dig",
+		nc:   "/usr/bin/nc",
+	}, networkRestrictionTargets{
+		dnsHost:    "127.0.0.1",
+		dnsPort:    5300,
+		rawTCPPort: 1234,
+		rawUDPPort: 5678,
+	})
+
+	for _, probe := range probes {
+		if probe.name == "icmp" {
+			t.Fatalf("expected ICMP probe to be omitted when no ICMP host is available: %#v", probes)
+		}
+	}
+}
+
+func TestTransparentBlockedProbeSpecsIncludeICMPWhenHostAvailable(t *testing.T) {
+	probes := transparentBlockedProbeSpecs("/bin/sh", networkToolPaths{
+		curl: "/usr/bin/curl",
+		ping: "/usr/bin/ping",
+		dns:  "/usr/bin/dig",
+		nc:   "/usr/bin/nc",
+	}, networkRestrictionTargets{
+		dnsHost:    "127.0.0.1",
+		dnsPort:    5300,
+		rawTCPPort: 1234,
+		rawUDPPort: 5678,
+		icmpHost:   "192.0.2.10",
+	})
+
+	for _, probe := range probes {
+		if probe.name == "icmp" {
+			return
+		}
+	}
+	t.Fatalf("expected ICMP probe to be present when an ICMP host is available: %#v", probes)
+}
+
 func TestNetworkRestrictionsProxyMode(t *testing.T) {
 	requireSandboxPrereqs(t)
 	tools := mustRequireNetworkTools(t)
@@ -104,7 +146,7 @@ func TestNetworkRestrictionsProxyMode(t *testing.T) {
 		t.Fatalf("unexpected proxy HTTP preflight output: %q", got)
 	}
 
-	requireSandboxICMPPreflight(t, ctx, sandbox, tools)
+	requireSandboxICMPPreflight(t, ctx, sandbox, tools, targets)
 
 	for _, probe := range proxyBlockedProbeSpecs(shellPath, tools, targets) {
 		t.Run(probe.name, func(t *testing.T) {
@@ -204,7 +246,7 @@ func TestNetworkRestrictionsTransparentMode(t *testing.T) {
 		t.Fatalf("unexpected transparent HTTPS preflight output: %q", got)
 	}
 
-	requireSandboxICMPPreflight(t, ctx, sandbox, tools)
+	requireSandboxICMPPreflight(t, ctx, sandbox, tools, targets)
 
 	for _, probe := range transparentBlockedProbeSpecs(shellPath, tools, targets) {
 		t.Run(probe.name, func(t *testing.T) {
@@ -215,20 +257,28 @@ func TestNetworkRestrictionsTransparentMode(t *testing.T) {
 }
 
 func proxyBlockedProbeSpecs(shellPath string, tools networkToolPaths, targets networkRestrictionTargets) []blockedProbeSpec {
-	return []blockedProbeSpec{
+	probes := []blockedProbeSpec{
 		{name: "dns-udp", argv: dnsUDPProbeArgv(tools, targets.dnsHost, targets.dnsPort)},
 		{name: "dns-tcp", argv: dnsTCPProbeArgv(tools, targets.dnsHost, targets.dnsPort)},
-		{name: "icmp", argv: []string{tools.ping, "-n", "-c", "1", "-W", "1", targets.icmpHost}},
 		{name: "tcp", argv: []string{tools.nc, "-n", "-z", "-v", "-w", "1", "127.0.0.1", strconv.Itoa(targets.rawTCPPort)}},
 		{name: "udp", argv: udpProbeArgv(shellPath, tools, targets.rawUDPPort)},
 		{name: "other-curl-telnet", argv: []string{tools.curl, "-sS", "--connect-timeout", "1", "--max-time", "2", fmt.Sprintf("telnet://127.0.0.1:%d", targets.rawTCPPort)}},
 	}
+	if targets.icmpHost != "" {
+		probes = append(probes, blockedProbeSpec{
+			name: "icmp",
+			argv: []string{tools.ping, "-n", "-c", "1", "-W", "1", targets.icmpHost},
+		})
+	}
+	return probes
 }
 
 func transparentBlockedProbeSpecs(shellPath string, tools networkToolPaths, targets networkRestrictionTargets) []blockedProbeSpec {
 	probes := append([]blockedProbeSpec(nil), proxyBlockedProbeSpecs(shellPath, tools, targets)...)
 	probes = append(probes,
+		// Transparent mode only supports hostname-based HTTPS on the default port.
 		blockedProbeSpec{name: "ip-literal-https", argv: []string{tools.curl, "-sS", "--connect-timeout", "5", "--max-time", "10", "https://127.0.0.1/ok"}},
+		// Transparent mode intentionally does not proxy arbitrary HTTPS destination ports.
 		blockedProbeSpec{name: "non-default-port-https", argv: []string{tools.curl, "-sS", "--connect-timeout", "5", "--max-time", "10", "https://secure.localhost:8443/ok"}},
 	)
 	return probes
@@ -293,18 +343,20 @@ func startNetworkRestrictionTargets(t *testing.T) networkRestrictionTargets {
 		rawTCPPort:    rawTCPPort,
 		rawUDPPort:    rawUDPPort,
 		closedUDPPort: reserveClosedLoopbackUDPPort(t),
-		icmpHost:      requireNonLoopbackIPv4(t),
+		icmpHost:      findNonLoopbackIPv4(t),
 	}
 }
 
 func preflightHostRestrictionProbes(t *testing.T, ctx context.Context, shellPath string, tools networkToolPaths, targets networkRestrictionTargets) {
 	t.Helper()
 
-	assertHostCommandSuccess(t, runHostCommand(t, ctx, dnsUDPProbeArgv(tools, targets.dnsHost, targets.dnsPort)))
-	assertHostCommandOutputContains(t, runHostCommand(t, ctx, dnsUDPProbeArgv(tools, targets.dnsHost, targets.dnsPort)), "127.0.0.1")
+	udpDNSResult := runHostCommand(t, ctx, dnsUDPProbeArgv(tools, targets.dnsHost, targets.dnsPort))
+	assertHostCommandSuccess(t, udpDNSResult)
+	assertHostCommandOutputContains(t, udpDNSResult, "127.0.0.1")
 
-	assertHostCommandSuccess(t, runHostCommand(t, ctx, dnsTCPProbeArgv(tools, targets.dnsHost, targets.dnsPort)))
-	assertHostCommandOutputContains(t, runHostCommand(t, ctx, dnsTCPProbeArgv(tools, targets.dnsHost, targets.dnsPort)), "127.0.0.1")
+	tcpDNSResult := runHostCommand(t, ctx, dnsTCPProbeArgv(tools, targets.dnsHost, targets.dnsPort))
+	assertHostCommandSuccess(t, tcpDNSResult)
+	assertHostCommandOutputContains(t, tcpDNSResult, "127.0.0.1")
 
 	assertHostCommandSuccess(t, runHostCommand(t, ctx, []string{
 		tools.nc, "-n", "-z", "-v", "-w", "1", "127.0.0.1", strconv.Itoa(targets.rawTCPPort),
@@ -317,17 +369,22 @@ func preflightHostRestrictionProbes(t *testing.T, ctx context.Context, shellPath
 		shellPath, "-c", `printf bbox-udp | exec "$1" -n -u -c -w 1 127.0.0.1 "$2"`, "sh", tools.nc, strconv.Itoa(targets.closedUDPPort),
 	}))
 
-	assertHostCommandSuccess(t, runHostCommand(t, ctx, []string{
-		tools.ping, "-n", "-c", "1", "-W", "1", targets.icmpHost,
-	}))
+	if targets.icmpHost != "" {
+		assertHostCommandSuccess(t, runHostCommand(t, ctx, []string{
+			tools.ping, "-n", "-c", "1", "-W", "1", targets.icmpHost,
+		}))
+	}
 
 	assertHostCommandSuccess(t, runHostCommand(t, ctx, []string{
 		tools.curl, "-sS", "--connect-timeout", "1", "--max-time", "2", fmt.Sprintf("telnet://127.0.0.1:%d", targets.rawTCPPort),
 	}))
 }
 
-func requireSandboxICMPPreflight(t *testing.T, ctx context.Context, sandbox *bbox.Sandbox, tools networkToolPaths) {
+func requireSandboxICMPPreflight(t *testing.T, ctx context.Context, sandbox *bbox.Sandbox, tools networkToolPaths, targets networkRestrictionTargets) {
 	t.Helper()
+	if targets.icmpHost == "" {
+		return
+	}
 
 	result, err := sandbox.Run(ctx, []string{
 		tools.ping, "-n", "-c", "1", "-W", "1", "127.0.0.1",
@@ -406,7 +463,7 @@ func assertHostCommandOutputContains(t *testing.T, result hostCommandResult, wan
 	}
 }
 
-func requireNonLoopbackIPv4(t *testing.T) string {
+func findNonLoopbackIPv4(t *testing.T) string {
 	t.Helper()
 
 	ifaces, err := net.Interfaces()
@@ -431,7 +488,6 @@ func requireNonLoopbackIPv4(t *testing.T) string {
 			}
 		}
 	}
-	t.Skip("network restriction suite requires a non-loopback IPv4 address for external ICMP probes")
 	return ""
 }
 
