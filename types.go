@@ -1,6 +1,7 @@
 package bbox
 
 import (
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,12 @@ type ProxyOptions struct {
 	// If empty, bbox uses 127.0.0.1:31111. Use 127.0.0.1:0 to request an
 	// ephemeral port and read the effective address from Sandbox.ProxyAddr.
 	ListenAddr string
+	// MaxRequestBodyBytes caps buffered request bodies across proxy and MITM
+	// flows. Zero uses the secure default.
+	MaxRequestBodyBytes int64
+	// MaxResponseBodyBytes caps buffered upstream response bodies across proxy
+	// and MITM flows. Zero uses the secure default.
+	MaxResponseBodyBytes int64
 	// NetworkPolicy is the default policy inherited by sandboxes that do not
 	// supply their own SandboxOptions.Policy.
 	NetworkPolicy NetworkPolicy
@@ -60,7 +67,8 @@ type ProxyOptions struct {
 type MITMOptions struct {
 	// Enabled enables MITM handling for HTTP CONNECT traffic.
 	Enabled bool
-	// MaxRequestBodyBytes caps buffered request bodies when inspecting traffic.
+	// MaxRequestBodyBytes caps buffered MITM request bodies. Zero falls back to
+	// ProxyOptions.MaxRequestBodyBytes, then the secure default.
 	MaxRequestBodyBytes int64
 }
 
@@ -100,6 +108,15 @@ type SandboxOptions struct {
 	Policy NetworkPolicy
 	// WorkDir is the default working directory for sandbox.Run.
 	WorkDir string
+	// Seccomp configures seccomp filtering for this sandbox. The zero value
+	// enables the baseline built-in profile.
+	Seccomp SeccompOptions
+}
+
+// TerminalSize describes terminal dimensions for interactive runs.
+type TerminalSize struct {
+	Rows uint16
+	Cols uint16
 }
 
 // RunOptions configures an individual process execution inside a sandbox.
@@ -108,6 +125,22 @@ type RunOptions struct {
 	Env []string
 	// WorkDir overrides the sandbox default working directory for one run.
 	WorkDir string
+	// Interactive enables stdin/stdout/stderr streaming instead of buffered
+	// output only.
+	Interactive bool
+	// Stdin is forwarded to the sandboxed process when interactive execution is
+	// enabled.
+	Stdin io.Reader
+	// Stdout receives streamed stdout frames during interactive execution.
+	Stdout io.Writer
+	// Stderr receives streamed stderr frames during interactive execution.
+	Stderr io.Writer
+	// Terminal requests a real PTY-backed terminal session for the payload.
+	Terminal bool
+	// TerminalSize is the initial PTY size for terminal-backed runs.
+	TerminalSize TerminalSize
+	// Resize delivers PTY resize updates for terminal-backed runs.
+	Resize <-chan TerminalSize
 }
 
 // RunResult contains the exit status and captured output from a sandboxed
@@ -158,17 +191,19 @@ type NetworkPolicy struct {
 // ProxyManager owns the shared proxy policy state and creates sandboxes that
 // route traffic through it.
 type ProxyManager struct {
-	mu              sync.RWMutex
-	policy          *compiledPolicy
-	sandboxes       map[string]*Sandbox
-	sandboxPolicies map[string]*compiledPolicy
-	transport       *http.Transport
-	accessLogger    AccessLogger
-	listenAddr      string
-	mitm            MITMOptions
-	mitmCA          *mitmCA
-	caCertPEM       []byte
-	nextSandboxID   atomic.Uint64
+	mu                     sync.RWMutex
+	policy                 *compiledPolicy
+	sandboxes              map[string]*Sandbox
+	sandboxPolicies        map[string]*compiledPolicy
+	transport              *http.Transport
+	accessLogger           AccessLogger
+	listenAddr             string
+	requestBodyLimitBytes  int64
+	responseBodyLimitBytes int64
+	mitm                   MITMOptions
+	mitmCA                 *mitmCA
+	caCertPEM              []byte
+	nextSandboxID          atomic.Uint64
 
 	helperBinaryOnce sync.Once
 	helperBinaryPath string

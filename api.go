@@ -12,6 +12,11 @@ import (
 	"github.com/moolen/bbox/internal/helperruntime"
 )
 
+const (
+	defaultMaxRequestBodyBytes  = 1 << 20
+	defaultMaxResponseBodyBytes = 4 << 20
+)
+
 type stdoutJSONAccessLogger struct {
 	mu  sync.Mutex
 	enc *json.Encoder
@@ -52,6 +57,12 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	if err != nil {
 		return nil, err
 	}
+	if opts.MaxRequestBodyBytes < 0 {
+		return nil, fmt.Errorf("max request body bytes must be non-negative")
+	}
+	if opts.MaxResponseBodyBytes < 0 {
+		return nil, fmt.Errorf("max response body bytes must be non-negative")
+	}
 	if opts.MITM.MaxRequestBodyBytes < 0 {
 		return nil, fmt.Errorf("MITM max request body bytes must be non-negative")
 	}
@@ -66,6 +77,8 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 
 	manager := newProxyManager(policy)
 	manager.listenAddr = listenAddr
+	manager.requestBodyLimitBytes = effectiveRequestBodyLimit(opts)
+	manager.responseBodyLimitBytes = effectiveResponseBodyLimit(opts)
 	manager.mitm = opts.MITM
 	if isNilAccessLogger(opts.AccessLogger) {
 		manager.accessLogger = sharedStdoutAccessLogger
@@ -80,4 +93,21 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 		manager.caCertPEM = manager.mitmCA.CertPEM()
 	}
 	return manager, nil
+}
+
+func effectiveRequestBodyLimit(opts ProxyOptions) int64 {
+	if opts.MaxRequestBodyBytes > 0 {
+		return opts.MaxRequestBodyBytes
+	}
+	if opts.MITM.MaxRequestBodyBytes > 0 {
+		return opts.MITM.MaxRequestBodyBytes
+	}
+	return defaultMaxRequestBodyBytes
+}
+
+func effectiveResponseBodyLimit(opts ProxyOptions) int64 {
+	if opts.MaxResponseBodyBytes > 0 {
+		return opts.MaxResponseBodyBytes
+	}
+	return defaultMaxResponseBodyBytes
 }

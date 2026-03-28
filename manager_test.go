@@ -1,10 +1,12 @@
 package bbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -156,6 +158,50 @@ func TestProxyManagerMITMRejectsOversizedBody(t *testing.T) {
 
 	if response == nil || response.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("unexpected oversized MITM response: %#v", response)
+	}
+}
+
+func TestProxyManagerMITMRejectsHostAuthorityMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^allowed[.]example$`},
+	}))
+	manager.transport = server.Client().Transport.(*http.Transport).Clone()
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleMITMRequest(t.Context(), "sandbox-a", helperproto.MITMRequest{
+		Scheme:    serverURL.Scheme,
+		Authority: serverURL.Host,
+		Host:      "allowed.example",
+		Method:    http.MethodGet,
+		Path:      "/",
+		Proto:     "HTTP/1.1",
+	})
+
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected mismatch to be denied, got %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+	if logger.entries[0].Result != "denied" {
+		t.Fatalf("expected denied access result, got %q", logger.entries[0].Result)
+	}
+	if !strings.Contains(logger.entries[0].Error, "authority") {
+		t.Fatalf("expected mismatch error to mention authority, got %q", logger.entries[0].Error)
 	}
 }
 
@@ -516,7 +562,7 @@ func TestHandleMITMRequestRecordsAccess(t *testing.T) {
 	}
 }
 
-func TestHandleMITMRequestRecordsAccessUsesRequestHost(t *testing.T) {
+func TestHandleMITMRequestRejectsHostAuthorityMismatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -544,8 +590,8 @@ func TestHandleMITMRequestRecordsAccessUsesRequestHost(t *testing.T) {
 		Path:      "/",
 		Proto:     "HTTP/1.1",
 	})
-	if response == nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected MITM response: %#v", response)
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected mismatch to be denied, got %#v", response)
 	}
 	if len(logger.entries) != 1 {
 		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
@@ -555,18 +601,18 @@ func TestHandleMITMRequestRecordsAccessUsesRequestHost(t *testing.T) {
 	if entry.Kind != "mitm" {
 		t.Fatalf("expected mitm entry, got %q", entry.Kind)
 	}
-	if entry.Host != "decrypted.test" {
-		t.Fatalf("expected decrypted host, got %q", entry.Host)
+	if entry.Host == "" {
+		t.Fatal("expected denied entry host to be recorded")
 	}
-	if entry.Host == serverURL.Hostname() {
-		t.Fatalf("expected host to differ from authority %q", serverURL.Hostname())
+	if entry.Result != "denied" {
+		t.Fatalf("expected denied entry result, got %q", entry.Result)
 	}
-	if entry.Port == 0 {
-		t.Fatalf("expected non-zero port, got %d", entry.Port)
+	if !strings.Contains(entry.Error, "authority") {
+		t.Fatalf("expected mismatch error to mention authority, got %q", entry.Error)
 	}
 }
 
-func TestHandleMITMRequestRecordsAccessUsesAuthorityPortWhenRequestHostMissingPort(t *testing.T) {
+func TestHandleMITMRequestRejectsHostAuthorityMismatchUsingAuthorityPort(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -599,8 +645,8 @@ func TestHandleMITMRequestRecordsAccessUsesAuthorityPortWhenRequestHostMissingPo
 		Path:      "/",
 		Proto:     "HTTP/1.1",
 	})
-	if response == nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected MITM response: %#v", response)
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected mismatch to be denied, got %#v", response)
 	}
 	if len(logger.entries) != 1 {
 		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
@@ -610,11 +656,95 @@ func TestHandleMITMRequestRecordsAccessUsesAuthorityPortWhenRequestHostMissingPo
 	if entry.Kind != "mitm" {
 		t.Fatalf("expected mitm entry, got %q", entry.Kind)
 	}
-	if entry.Host != "decrypted.test" {
-		t.Fatalf("expected decrypted host, got %q", entry.Host)
+	if entry.Host == "" {
+		t.Fatal("expected denied entry host to be recorded")
 	}
 	if entry.Port != port {
 		t.Fatalf("expected port %d from authority, got %d", port, entry.Port)
+	}
+	if entry.Result != "denied" {
+		t.Fatalf("expected denied entry result, got %q", entry.Result)
+	}
+}
+
+func TestHandleProxyRequestRejectsOversizedRequestBody(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+	}))
+	manager.requestBodyLimitBytes = 8
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleProxyRequest(t.Context(), "sandbox-a", helperproto.ProxyRequest{
+		Method: http.MethodPost,
+		URL:    "http://example.com/upload",
+		Body:   bytes.Repeat([]byte("a"), 9),
+	})
+
+	if response == nil || response.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected oversized request to be rejected, got %#v", response)
+	}
+}
+
+func TestProxyManagerRejectsOversizedResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("b"), 17))
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
+	}))
+	manager.transport = server.Client().Transport.(*http.Transport).Clone()
+	manager.responseBodyLimitBytes = 16
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleProxyRequest(t.Context(), "sandbox-a", helperproto.ProxyRequest{
+		Method: http.MethodGet,
+		URL:    serverURL.String(),
+		Header: make(http.Header),
+	})
+
+	if response == nil || response.Error == "" {
+		t.Fatalf("expected oversized response body error, got %#v", response)
+	}
+	if !strings.Contains(response.Error, "response body exceeds") {
+		t.Fatalf("expected body limit error, got %q", response.Error)
+	}
+}
+
+func TestProxyManagerUsesDefaultBodyLimits(t *testing.T) {
+	manager, err := NewProxyManager(ProxyOptions{})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	if manager.requestBodyLimitBytes != defaultMaxRequestBodyBytes {
+		t.Fatalf("unexpected default request body limit: got %d want %d", manager.requestBodyLimitBytes, defaultMaxRequestBodyBytes)
+	}
+	if manager.responseBodyLimitBytes != defaultMaxResponseBodyBytes {
+		t.Fatalf("unexpected default response body limit: got %d want %d", manager.responseBodyLimitBytes, defaultMaxResponseBodyBytes)
+	}
+}
+
+func TestReadBoundedResponseRejectsOversizedBody(t *testing.T) {
+	body, tooLarge, err := readBoundedResponse(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("x"), 6))), 5)
+	if err != nil {
+		t.Fatalf("readBoundedResponse returned error: %v", err)
+	}
+	if !tooLarge {
+		t.Fatal("expected oversized response body to be flagged")
+	}
+	if len(body) != 5 {
+		t.Fatalf("expected truncated body length 5, got %d", len(body))
 	}
 }
 

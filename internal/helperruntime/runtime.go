@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/moolen/bbox/internal/helperproto"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
@@ -434,11 +435,19 @@ type bridge struct {
 	tunnelMu            sync.Mutex
 	nextID              atomic.Uint64
 	execMu              sync.Mutex
+	execStateMu         sync.Mutex
+	currentExec         *execSession
 }
 
 type tunnelDelivery struct {
 	ch     chan helperproto.Envelope
 	closed chan struct{}
+}
+
+type execSession struct {
+	stdin    io.WriteCloser
+	ptyFile  *os.File
+	terminal bool
 }
 
 func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
@@ -473,6 +482,8 @@ func (b *bridge) readLoop(ctx context.Context) error {
 			b.deliverTunnel(env)
 		case env.ExecRequest != nil:
 			go b.handleExec(ctx, env.ID, *env.ExecRequest)
+		case env.ExecInput != nil:
+			b.handleExecInput(*env.ExecInput)
 		default:
 			b.logger.Printf("ignoring unsupported helper envelope kind %q", env.Kind())
 		}
@@ -579,9 +590,14 @@ func (b *bridge) serveHTTPForward(w http.ResponseWriter, req *http.Request, rewr
 
 	var body []byte
 	if outReq.Body != nil {
-		body, err = io.ReadAll(outReq.Body)
+		var tooLarge bool
+		body, tooLarge, err = readBoundedBody(outReq.Body, b.maxRequestBodyBytes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if tooLarge {
+			http.Error(w, "request body exceeds inspection limit", http.StatusRequestEntityTooLarge)
 			return
 		}
 	}
@@ -1336,38 +1352,28 @@ func (b *bridge) handleExec(ctx context.Context, id uint64, req helperproto.Exec
 	cmd.Env = append([]string(nil), req.Env...)
 	cmd.Dir = req.WorkDir
 
-	stdout, err := cmd.StdoutPipe()
+	session, streams, err := b.startExecSession(cmd, req)
 	if err != nil {
 		b.sendExecError(id, err)
 		return
 	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		b.sendExecError(id, err)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		b.sendExecError(id, err)
-		return
-	}
+	b.setCurrentExec(session)
+	defer b.clearCurrentExec()
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		b.streamOutput(id, helperproto.StreamStdout, stdout)
-	}()
-
-	go func() {
-		defer wg.Done()
-		b.streamOutput(id, helperproto.StreamStderr, stderr)
-	}()
+	for _, stream := range streams {
+		wg.Add(1)
+		go func(stream execOutputStream) {
+			defer wg.Done()
+			b.streamOutput(id, stream.stream, stream.reader)
+		}(stream)
+	}
 
 	waitErr := cmd.Wait()
 	wg.Wait()
+	if session != nil && session.ptyFile != nil {
+		_ = session.ptyFile.Close()
+	}
 
 	result := &helperproto.ExecResult{}
 	if waitErr == nil {
@@ -1389,6 +1395,68 @@ func (b *bridge) handleExec(ctx context.Context, id uint64, req helperproto.Exec
 	}); err != nil {
 		b.logger.Printf("send exec result: %v", err)
 	}
+}
+
+type execOutputStream struct {
+	stream helperproto.StreamType
+	reader io.Reader
+}
+
+func (b *bridge) startExecSession(cmd *exec.Cmd, req helperproto.ExecRequest) (*execSession, []execOutputStream, error) {
+	if req.Interactive && req.Terminal {
+		size := &pty.Winsize{Rows: 24, Cols: 80}
+		if req.InitialSize != nil {
+			if req.InitialSize.Rows > 0 {
+				size.Rows = req.InitialSize.Rows
+			}
+			if req.InitialSize.Cols > 0 {
+				size.Cols = req.InitialSize.Cols
+			}
+		}
+		ptmx, err := pty.StartWithSize(cmd, size)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &execSession{
+				stdin:    ptmx,
+				ptyFile:  ptmx,
+				terminal: true,
+			}, []execOutputStream{{
+				stream: helperproto.StreamStdout,
+				reader: ptmx,
+			}}, nil
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var session *execSession
+	if req.Interactive {
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return nil, nil, err
+		}
+		session = &execSession{stdin: stdin}
+	}
+
+	if err := cmd.Start(); err != nil {
+		if session != nil && session.stdin != nil {
+			_ = session.stdin.Close()
+		}
+		return nil, nil, err
+	}
+
+	return session, []execOutputStream{
+		{stream: helperproto.StreamStdout, reader: stdout},
+		{stream: helperproto.StreamStderr, reader: stderr},
+	}, nil
 }
 
 func (b *bridge) sendExecError(id uint64, err error) {
@@ -1423,11 +1491,60 @@ func (b *bridge) streamOutput(id uint64, stream helperproto.StreamType, src io.R
 		if errors.Is(err, io.EOF) {
 			return
 		}
+		if errors.Is(err, syscall.EIO) {
+			return
+		}
 		if err != nil {
 			b.logger.Printf("read %s stream: %v", stream, err)
 			return
 		}
 	}
+}
+
+func (b *bridge) handleExecInput(input helperproto.ExecInput) {
+	b.execStateMu.Lock()
+	session := b.currentExec
+	b.execStateMu.Unlock()
+	if session == nil {
+		return
+	}
+
+	if input.Resize != nil && session.terminal && session.ptyFile != nil {
+		if input.Resize.Rows > 0 || input.Resize.Cols > 0 {
+			_ = pty.Setsize(session.ptyFile, &pty.Winsize{
+				Rows: maxUint16(input.Resize.Rows, 24),
+				Cols: maxUint16(input.Resize.Cols, 80),
+			})
+		}
+	}
+
+	if len(input.Data) > 0 && session.stdin != nil {
+		if _, err := session.stdin.Write(input.Data); err != nil {
+			return
+		}
+	}
+	if input.EOF && session.stdin != nil && !session.terminal {
+		_ = session.stdin.Close()
+	}
+}
+
+func (b *bridge) setCurrentExec(session *execSession) {
+	b.execStateMu.Lock()
+	defer b.execStateMu.Unlock()
+	b.currentExec = session
+}
+
+func (b *bridge) clearCurrentExec() {
+	b.execStateMu.Lock()
+	defer b.execStateMu.Unlock()
+	b.currentExec = nil
+}
+
+func maxUint16(value, fallback uint16) uint16 {
+	if value == 0 {
+		return fallback
+	}
+	return value
 }
 
 func (b *bridge) send(env helperproto.Envelope) error {

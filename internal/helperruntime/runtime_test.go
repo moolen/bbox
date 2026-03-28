@@ -541,6 +541,64 @@ func TestTransparentHTTPSForwardsDecryptedRequestsThroughMITMPath(t *testing.T) 
 	}
 }
 
+func TestProxyModeRejectsOversizedRequestBody(t *testing.T) {
+	ready, peerSide, _, dec, shutdown := startProxyRuntimeBridge(t, 8)
+	defer shutdown()
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var env helperproto.Envelope
+		if err := dec.Decode(&env); err == nil {
+			peerErrCh <- fmt.Errorf("unexpected bridge traffic for oversized proxy request: %#v", env)
+			return
+		}
+		peerErrCh <- nil
+	}()
+
+	conn, err := net.Dial("tcp", ready.ProxyAddr)
+	if err != nil {
+		t.Fatalf("dial proxy listener: %v", err)
+	}
+	defer conn.Close()
+
+	request := strings.Join([]string{
+		"POST http://example.com/upload HTTP/1.1",
+		"Host: example.com",
+		"Content-Length: 9",
+		"",
+		"123456789",
+	}, "\r\n")
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatalf("write proxy request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+	if err != nil {
+		t.Fatalf("read proxy response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("unexpected status: got %d want %d", resp.StatusCode, http.StatusRequestEntityTooLarge)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read proxy response body: %v", err)
+	}
+	if !strings.Contains(string(body), "request body exceeds inspection limit") {
+		t.Fatalf("unexpected oversized body response: %q", string(body))
+	}
+
+	_ = peerSide.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 func TestTransparentHTTPSSupportsHTTP2MITM(t *testing.T) {
 	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
 	defer shutdown()
@@ -2156,6 +2214,62 @@ func startTransparentRuntimeBridge(t *testing.T) (*helperproto.Ready, net.Conn, 
 			}
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for transparent runtime to exit")
+		}
+	}
+
+	return ready.Ready, peerSide, enc, dec, shutdown
+}
+
+func startProxyRuntimeBridge(t *testing.T, maxRequestBodyBytes int64) (*helperproto.Ready, net.Conn, *gob.Encoder, *gob.Decoder, func()) {
+	t.Helper()
+
+	bridgeSide, peerSide := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- Run(ctx, Config{
+			Bridge:              bridgeSide,
+			TrafficMode:         TrafficModeProxy,
+			ProxyAddr:           "127.0.0.1:0",
+			MaxRequestBodyBytes: maxRequestBodyBytes,
+			Logger:              log.New(io.Discard, "", 0),
+		})
+	}()
+
+	enc := gob.NewEncoder(peerSide)
+	dec := gob.NewDecoder(peerSide)
+	if err := enc.Encode(&helperproto.Envelope{
+		ID: 1,
+		Hello: &helperproto.Hello{
+			ProtocolVersion: helperproto.ProtocolVersion,
+			SandboxID:       "proxy-body-limit-test",
+		},
+	}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	var ready helperproto.Envelope
+	if err := dec.Decode(&ready); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if ready.Ready == nil {
+		t.Fatalf("expected ready response, got %#v", ready)
+	}
+	if ready.Ready.ProxyAddr == "" {
+		t.Fatal("expected proxy runtime to report a proxy address")
+	}
+
+	shutdown := func() {
+		cancel()
+		_ = peerSide.Close()
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+				t.Fatalf("unexpected proxy runtime shutdown error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for proxy runtime to exit")
 		}
 	}
 

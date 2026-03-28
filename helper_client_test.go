@@ -91,6 +91,109 @@ func TestHelperClientRunPropagatesExecResultError(t *testing.T) {
 	}
 }
 
+func TestHelperClientInteractiveRunStreamsOutput(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	client := newHelperClient(nil, "sandbox-a", clientSide)
+	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = serverSide.Close() })
+
+	go func() {
+		client.loopDone <- client.readLoop()
+	}()
+
+	var (
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	)
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(serverSide)
+		enc := gob.NewEncoder(serverSide)
+
+		var req helperproto.Envelope
+		if err := dec.Decode(&req); err != nil {
+			serverErrCh <- err
+			return
+		}
+		if req.ExecRequest == nil {
+			serverErrCh <- errors.New("expected exec request")
+			return
+		}
+		if !req.ExecRequest.Interactive {
+			serverErrCh <- errors.New("expected interactive exec request")
+			return
+		}
+
+		var input helperproto.Envelope
+		if err := dec.Decode(&input); err != nil {
+			serverErrCh <- err
+			return
+		}
+		if input.ExecInput == nil {
+			serverErrCh <- errors.New("expected exec input envelope")
+			return
+		}
+		if got := string(input.ExecInput.Data); got != "ping\n" {
+			serverErrCh <- errors.New("unexpected stdin frame payload: " + got)
+			return
+		}
+
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: req.ID,
+			StreamFrame: &helperproto.StreamFrame{
+				Stream: helperproto.StreamStdout,
+				Data:   []byte("hello stdout\n"),
+			},
+		}); err != nil {
+			serverErrCh <- err
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: req.ID,
+			StreamFrame: &helperproto.StreamFrame{
+				Stream: helperproto.StreamStderr,
+				Data:   []byte("hello stderr\n"),
+			},
+		}); err != nil {
+			serverErrCh <- err
+			return
+		}
+		serverErrCh <- enc.Encode(&helperproto.Envelope{
+			ID: req.ID,
+			ExecResult: &helperproto.ExecResult{
+				ExitCode: 0,
+			},
+		})
+	}()
+
+	result, err := client.Run(context.Background(), []string{"/bin/sh"}, RunOptions{
+		Interactive: true,
+		Stdin:       strings.NewReader("ping\n"),
+		Stdout:      &stdout,
+		Stderr:      &stderr,
+	})
+	if err != nil {
+		t.Fatalf("expected interactive run to succeed, got %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected run result")
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("unexpected exit code: got %d", result.ExitCode)
+	}
+	if got := stdout.String(); got != "hello stdout\n" {
+		t.Fatalf("unexpected streamed stdout: got %q", got)
+	}
+	if got := stderr.String(); got != "hello stderr\n" {
+		t.Fatalf("unexpected streamed stderr: got %q", got)
+	}
+
+	if err := <-serverErrCh; err != nil {
+		t.Fatalf("server side failed: %v", err)
+	}
+}
+
 func TestHelperClientStartAcceptsTransparentReadyEnvelope(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	client := newHelperClient(nil, "sandbox-a", clientSide)

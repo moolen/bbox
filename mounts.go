@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -62,8 +63,20 @@ func targetsOverlap(a, b string) bool {
 	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
-func buildBwrapArgs(root string, helperPath string, proxyListenAddr string, mitm MITMOptions, mounts []Mount, mode TrafficMode) []string {
-	normalizedMode := normalizeTrafficMode(mode)
+type bwrapArgsConfig struct {
+	root                string
+	helperPath          string
+	proxyListenAddr     string
+	mitm                MITMOptions
+	maxRequestBodyBytes int64
+	mounts              []Mount
+	trafficMode         TrafficMode
+	bridgeFD            int
+	seccompFD           int
+}
+
+func buildBwrapArgs(cfg bwrapArgsConfig) []string {
+	normalizedMode := normalizeTrafficMode(cfg.trafficMode)
 	args := []string{
 		"--unshare-user",
 		"--unshare-pid",
@@ -73,15 +86,18 @@ func buildBwrapArgs(root string, helperPath string, proxyListenAddr string, mitm
 		"--clearenv",
 		"--setenv", "PATH", "/usr/bin",
 	}
+	if cfg.seccompFD >= 0 {
+		args = append(args, "--seccomp", strconv.Itoa(cfg.seccompFD))
+	}
 
 	for _, dir := range []string{"app", "usr", "etc", "lib", "lib64"} {
-		hostDir := filepath.Join(root, dir)
+		hostDir := filepath.Join(cfg.root, dir)
 		if info, err := os.Stat(hostDir); err == nil && info.IsDir() {
 			args = append(args, "--ro-bind", hostDir, "/"+dir)
 		}
 	}
 
-	for _, mount := range mounts {
+	for _, mount := range cfg.mounts {
 		flag := "--bind"
 		if mount.ReadOnly {
 			flag = "--ro-bind"
@@ -95,11 +111,12 @@ func buildBwrapArgs(root string, helperPath string, proxyListenAddr string, mitm
 		"--tmpfs", "/tmp",
 		"--chdir", "/tmp",
 		"--",
-		helperPath,
-		"--proxy-addr", proxyListenAddr,
+		cfg.helperPath,
+		"--bridge-fd", strconv.Itoa(cfg.bridgeFD),
+		"--proxy-addr", cfg.proxyListenAddr,
 		"--traffic-mode", string(normalizedMode),
-		"--mitm-enabled="+fmt.Sprintf("%t", mitm.Enabled),
-		"--max-request-body-bytes", fmt.Sprintf("%d", mitm.MaxRequestBodyBytes),
+		"--mitm-enabled="+fmt.Sprintf("%t", cfg.mitm.Enabled),
+		"--max-request-body-bytes", fmt.Sprintf("%d", cfg.maxRequestBodyBytes),
 		"child-proxy",
 	)
 

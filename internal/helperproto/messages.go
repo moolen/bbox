@@ -2,7 +2,7 @@ package helperproto
 
 import "net/http"
 
-const ProtocolVersion = 5
+const ProtocolVersion = 6
 
 type Envelope struct {
 	ID               uint64
@@ -19,6 +19,7 @@ type Envelope struct {
 	TunnelFrame      *TunnelFrame
 	TunnelClose      *TunnelClose
 	ExecRequest      *ExecRequest
+	ExecInput        *ExecInput
 	StreamFrame      *StreamFrame
 	ExecResult       *ExecResult
 }
@@ -51,6 +52,8 @@ func (e Envelope) Kind() string {
 		return "tunnel_close"
 	case e.ExecRequest != nil:
 		return "exec_request"
+	case e.ExecInput != nil:
+		return "exec_input"
 	case e.StreamFrame != nil:
 		return "stream_frame"
 	case e.ExecResult != nil:
@@ -138,9 +141,23 @@ type TunnelClose struct {
 }
 
 type ExecRequest struct {
-	Argv    []string
-	Env     []string
-	WorkDir string
+	Argv        []string
+	Env         []string
+	WorkDir     string
+	Interactive bool
+	Terminal    bool
+	InitialSize *TerminalSize
+}
+
+type TerminalSize struct {
+	Rows uint16
+	Cols uint16
+}
+
+type ExecInput struct {
+	Data   []byte
+	EOF    bool
+	Resize *TerminalSize
 }
 
 type StreamType string

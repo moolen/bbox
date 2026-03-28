@@ -85,18 +85,52 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, fmt.Errorf("create helper log file: %w", err)
 	}
 
-	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, m.listenAddr, m.mitm, opts.Mounts, mode)...)
+	seccompProgram, err := prepareSeccompProgram(opts.Seccomp)
+	if err != nil {
+		_ = helperLog.Close()
+		_ = os.Remove(helperLog.Name())
+		_ = childBridge.Close()
+		_ = parentBridge.Close()
+		_ = os.RemoveAll(root)
+		return nil, err
+	}
+
+	bridgeFD := 3
+	seccompFD := -1
+	extraFiles := []*os.File{childBridge}
+	if seccompProgram != nil {
+		seccompFD = bridgeFD + len(extraFiles)
+		extraFiles = append(extraFiles, seccompProgram.file)
+	}
+
+	cmd := exec.Command("bwrap", buildBwrapArgs(bwrapArgsConfig{
+		root:                root,
+		helperPath:          defaultSandboxHelperPath,
+		proxyListenAddr:     m.listenAddr,
+		mitm:                m.mitm,
+		maxRequestBodyBytes: m.requestBodyLimitBytes,
+		mounts:              opts.Mounts,
+		trafficMode:         mode,
+		bridgeFD:            bridgeFD,
+		seccompFD:           seccompFD,
+	})...)
 	cmd.Stderr = helperLog
 	cmd.Stdout = helperLog
-	cmd.ExtraFiles = []*os.File{childBridge}
+	cmd.ExtraFiles = extraFiles
 
 	if err := cmd.Start(); err != nil {
+		if seccompProgram != nil {
+			_ = seccompProgram.Close()
+		}
 		_ = helperLog.Close()
 		_ = os.Remove(helperLog.Name())
 		_ = childBridge.Close()
 		_ = parentBridge.Close()
 		_ = os.RemoveAll(root)
 		return nil, fmt.Errorf("start bwrap helper: %w", err)
+	}
+	if seccompProgram != nil {
+		_ = seccompProgram.Close()
 	}
 	_ = childBridge.Close()
 
@@ -148,6 +182,15 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 // Run executes argv inside the sandbox and returns its exit code and captured
 // output.
 func (s *Sandbox) Run(ctx context.Context, argv []string, opts RunOptions) (*RunResult, error) {
+	return s.run(ctx, argv, opts, false)
+}
+
+// RunInteractive executes argv inside the sandbox with live stdio forwarding.
+func (s *Sandbox) RunInteractive(ctx context.Context, argv []string, opts RunOptions) (*RunResult, error) {
+	return s.run(ctx, argv, opts, true)
+}
+
+func (s *Sandbox) run(ctx context.Context, argv []string, opts RunOptions, interactive bool) (*RunResult, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("argv must not be empty")
 	}
@@ -159,8 +202,15 @@ func (s *Sandbox) Run(ctx context.Context, argv []string, opts RunOptions) (*Run
 	}
 
 	runOpts := RunOptions{
-		Env:     mergeEnv(s.baseEnv, opts.Env),
-		WorkDir: opts.WorkDir,
+		Env:          mergeEnv(s.baseEnv, opts.Env),
+		WorkDir:      opts.WorkDir,
+		Interactive:  opts.Interactive || interactive,
+		Stdin:        opts.Stdin,
+		Stdout:       opts.Stdout,
+		Stderr:       opts.Stderr,
+		Terminal:     opts.Terminal,
+		TerminalSize: opts.TerminalSize,
+		Resize:       opts.Resize,
 	}
 	if runOpts.WorkDir == "" {
 		runOpts.WorkDir = s.workDir
@@ -267,6 +317,9 @@ func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {
 	}
 	if mode == TrafficModeTransparent && !mitmEnabled {
 		return errors.New("transparent traffic mode requires MITM to be enabled")
+	}
+	if err := validateSeccompOptions(opts.Seccomp); err != nil {
+		return err
 	}
 	return nil
 }

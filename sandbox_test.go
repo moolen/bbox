@@ -10,6 +10,14 @@ func TestSandboxRunRejectsEmptyArgv(t *testing.T) {
 	}
 }
 
+func TestSandboxRunInteractiveRejectsEmptyArgv(t *testing.T) {
+	s := &Sandbox{}
+	_, err := s.RunInteractive(nil, nil, RunOptions{})
+	if err == nil {
+		t.Fatal("expected empty argv to fail")
+	}
+}
+
 func TestSandboxCloseDoesNotUnregisterExistingSandboxOnDuplicateStartupFailure(t *testing.T) {
 	policy, err := compilePolicy(NetworkPolicy{})
 	if err != nil {

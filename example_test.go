@@ -17,6 +17,8 @@ type recordingAccessLogger struct {
 
 type ProxyModeSandbox struct{}
 
+type SeccompSandbox struct{}
+
 type TransparentModeSandbox struct{}
 
 func (r *recordingAccessLogger) LogAccess(entry bbox.AccessLogEntry) {
@@ -140,6 +142,23 @@ func ExampleProxyModeSandbox() {
 
 	fmt.Println(opts.TrafficMode)
 	// Output: proxy
+}
+
+func ExampleSeccompSandbox() {
+	opts := bbox.SandboxOptions{
+		Seccomp: bbox.SeccompOptions{
+			Profile: bbox.SeccompProfileRestricted,
+			Rules: []bbox.SeccompRule{
+				bbox.DenySyscall("socketpair"),
+			},
+		},
+	}
+
+	fmt.Println(opts.Seccomp.Profile)
+	fmt.Println(opts.Seccomp.Rules[0].Syscall)
+	// Output:
+	// restricted
+	// socketpair
 }
 
 func ExampleTransparentModeSandbox() {

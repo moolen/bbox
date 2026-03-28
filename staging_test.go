@@ -169,9 +169,33 @@ func TestWriteSandboxConfigWritesTransparentResolvConf(t *testing.T) {
 }
 
 func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
-	args := buildBwrapArgs("/tmp/root", "/app/bbox-helper", "127.0.0.1:31111", MITMOptions{}, nil, TrafficModeTransparent)
+	args := buildBwrapArgs(bwrapArgsConfig{
+		root:            "/tmp/root",
+		helperPath:      "/app/bbox-helper",
+		proxyListenAddr: "127.0.0.1:31111",
+		bridgeFD:        3,
+		trafficMode:     TrafficModeTransparent,
+	})
 	if !containsArgSequence(args, []string{"--traffic-mode", "transparent"}) {
 		t.Fatalf("expected args to include --traffic-mode transparent, got %v", args)
+	}
+}
+
+func TestBuildBwrapArgsPassesBridgeAndSeccompFDs(t *testing.T) {
+	args := buildBwrapArgs(bwrapArgsConfig{
+		root:            "/tmp/root",
+		helperPath:      "/app/bbox-helper",
+		proxyListenAddr: "127.0.0.1:31111",
+		bridgeFD:        3,
+		seccompFD:       4,
+		trafficMode:     TrafficModeProxy,
+	})
+
+	if !containsArgSequence(args, []string{"--seccomp", "4"}) {
+		t.Fatalf("expected args to include --seccomp 4, got %v", args)
+	}
+	if !containsArgSequence(args, []string{"--bridge-fd", "3"}) {
+		t.Fatalf("expected args to include --bridge-fd 3, got %v", args)
 	}
 }
 
@@ -200,6 +224,48 @@ func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
 		staged := filepath.Join(root, strings.TrimPrefix(dep, string(filepath.Separator)))
 		if _, err := os.Stat(staged); err != nil {
 			t.Fatalf("expected staged dependency %q: %v", staged, err)
+		}
+	}
+}
+
+func TestStageSandboxRootStagesShebangInterpreter(t *testing.T) {
+	scriptPath := filepath.Join(t.TempDir(), "script.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, "/bin/echo", nil, TrafficModeProxy)
+	if err != nil {
+		t.Fatalf("stageSandboxRoot failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	stagedInterpreter := filepath.Join(root, strings.TrimPrefix("/bin/sh", string(filepath.Separator)))
+	if _, err := os.Stat(stagedInterpreter); err != nil {
+		t.Fatalf("expected staged shebang interpreter at %q: %v", stagedInterpreter, err)
+	}
+}
+
+func TestStageSandboxRootStagesEnvShebangTarget(t *testing.T) {
+	scriptPath := filepath.Join(t.TempDir(), "script-env.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolvedSh, err := resolveBinary("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, "/bin/echo", nil, TrafficModeProxy)
+	if err != nil {
+		t.Fatalf("stageSandboxRoot failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	for _, path := range []string{"/usr/bin/env", resolvedSh} {
+		staged := filepath.Join(root, strings.TrimPrefix(path, string(filepath.Separator)))
+		if _, err := os.Stat(staged); err != nil {
+			t.Fatalf("expected staged interpreter dependency at %q: %v", staged, err)
 		}
 	}
 }

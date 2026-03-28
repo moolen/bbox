@@ -52,9 +52,11 @@ type helperReady struct {
 }
 
 type runState struct {
-	stdout   bytes.Buffer
-	stderr   bytes.Buffer
-	resultCh chan runOutcome
+	stdout       bytes.Buffer
+	stderr       bytes.Buffer
+	stdoutWriter io.Writer
+	stderrWriter io.Writer
+	resultCh     chan runOutcome
 }
 
 type runOutcome struct {
@@ -129,7 +131,9 @@ func (c *helperClient) Run(ctx context.Context, argv []string, opts RunOptions) 
 	defer c.execMu.Unlock()
 
 	state := &runState{
-		resultCh: make(chan runOutcome, 1),
+		stdoutWriter: opts.Stdout,
+		stderrWriter: opts.Stderr,
+		resultCh:     make(chan runOutcome, 1),
 	}
 
 	c.currentMu.Lock()
@@ -140,18 +144,40 @@ func (c *helperClient) Run(ctx context.Context, argv []string, opts RunOptions) 
 	c.currentRun = state
 	c.currentMu.Unlock()
 
+	interactive := opts.Interactive || opts.Stdin != nil || opts.Stdout != nil || opts.Stderr != nil || opts.Terminal || opts.Resize != nil
+
+	var initialSize *helperproto.TerminalSize
+	if opts.TerminalSize.Rows > 0 || opts.TerminalSize.Cols > 0 {
+		initialSize = &helperproto.TerminalSize{
+			Rows: opts.TerminalSize.Rows,
+			Cols: opts.TerminalSize.Cols,
+		}
+	}
+
 	env := helperproto.Envelope{
 		ID: c.nextID.Add(1),
 		ExecRequest: &helperproto.ExecRequest{
-			Argv:    append([]string(nil), argv...),
-			Env:     append([]string(nil), opts.Env...),
-			WorkDir: opts.WorkDir,
+			Argv:        append([]string(nil), argv...),
+			Env:         append([]string(nil), opts.Env...),
+			WorkDir:     opts.WorkDir,
+			Interactive: interactive,
+			Terminal:    opts.Terminal,
+			InitialSize: initialSize,
 		},
 	}
 	if err := c.send(env); err != nil {
 		runErr := fmt.Errorf("send exec request: %w", err)
 		c.failCurrentRun(runErr)
 		return nil, runErr
+	}
+
+	if interactive {
+		if opts.Stdin != nil {
+			go c.pumpRunInput(env.ID, opts.Stdin)
+		}
+		if opts.Resize != nil {
+			go c.pumpRunResize(env.ID, opts.Resize)
+		}
 	}
 
 	select {
@@ -430,17 +456,24 @@ func (c *helperClient) shutdownTunnels() {
 
 func (c *helperClient) handleStream(frame helperproto.StreamFrame) {
 	c.currentMu.Lock()
-	defer c.currentMu.Unlock()
+	state := c.currentRun
+	c.currentMu.Unlock()
 
-	if c.currentRun == nil {
+	if state == nil {
 		return
 	}
 
 	switch frame.Stream {
 	case helperproto.StreamStdout:
-		_, _ = c.currentRun.stdout.Write(frame.Data)
+		_, _ = state.stdout.Write(frame.Data)
+		if state.stdoutWriter != nil {
+			_, _ = state.stdoutWriter.Write(frame.Data)
+		}
 	case helperproto.StreamStderr:
-		_, _ = c.currentRun.stderr.Write(frame.Data)
+		_, _ = state.stderr.Write(frame.Data)
+		if state.stderrWriter != nil {
+			_, _ = state.stderrWriter.Write(frame.Data)
+		}
 	}
 }
 
@@ -457,6 +490,9 @@ func (c *helperClient) handleExecResult(result helperproto.ExecResult) {
 	stderr := append([]byte(nil), state.stderr.Bytes()...)
 	if len(result.Stderr) > 0 {
 		stderr = append(stderr, result.Stderr...)
+		if state.stderrWriter != nil {
+			_, _ = state.stderrWriter.Write(result.Stderr)
+		}
 	}
 
 	state.resultCh <- runOutcome{
@@ -505,6 +541,54 @@ func execResultError(result helperproto.ExecResult) error {
 		return nil
 	}
 	return errors.New(result.Error)
+}
+
+func (c *helperClient) pumpRunInput(id uint64, src io.Reader) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			if sendErr := c.send(helperproto.Envelope{
+				ID: id,
+				ExecInput: &helperproto.ExecInput{
+					Data: append([]byte(nil), buf[:n]...),
+				},
+			}); sendErr != nil {
+				return
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			_ = c.send(helperproto.Envelope{
+				ID: id,
+				ExecInput: &helperproto.ExecInput{
+					EOF: true,
+				},
+			})
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (c *helperClient) pumpRunResize(id uint64, sizes <-chan TerminalSize) {
+	for size := range sizes {
+		if size.Rows == 0 && size.Cols == 0 {
+			continue
+		}
+		if err := c.send(helperproto.Envelope{
+			ID: id,
+			ExecInput: &helperproto.ExecInput{
+				Resize: &helperproto.TerminalSize{
+					Rows: size.Rows,
+					Cols: size.Cols,
+				},
+			},
+		}); err != nil {
+			return
+		}
+	}
 }
 
 func (c *helperClient) send(env helperproto.Envelope) error {

@@ -13,8 +13,11 @@ func TestExecRequestRoundTrip(t *testing.T) {
 	dec := gob.NewDecoder(&buf)
 
 	want := ExecRequest{
-		Argv: []string{"/usr/bin/curl", "-v", "http://example.com"},
-		Env:  []string{"HTTP_PROXY=http://127.0.0.1:31111"},
+		Argv:        []string{"/usr/bin/curl", "-v", "http://example.com"},
+		Env:         []string{"HTTP_PROXY=http://127.0.0.1:31111"},
+		Interactive: true,
+		Terminal:    true,
+		InitialSize: &TerminalSize{Rows: 24, Cols: 80},
 	}
 	if err := enc.Encode(&want); err != nil {
 		t.Fatal(err)
@@ -26,6 +29,38 @@ func TestExecRequestRoundTrip(t *testing.T) {
 	}
 	if len(got.Argv) != 3 {
 		t.Fatalf("unexpected argv: %#v", got.Argv)
+	}
+	if !got.Interactive || !got.Terminal {
+		t.Fatalf("unexpected interactive flags: %#v", got)
+	}
+	if got.InitialSize == nil || got.InitialSize.Rows != 24 || got.InitialSize.Cols != 80 {
+		t.Fatalf("unexpected initial size: %#v", got.InitialSize)
+	}
+}
+
+func TestExecInputRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := ExecInput{
+		Data:   []byte("hello"),
+		EOF:    true,
+		Resize: &TerminalSize{Rows: 42, Cols: 120},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got ExecInput
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Data, want.Data) || !got.EOF {
+		t.Fatalf("unexpected exec input payload: got=%#v want=%#v", got, want)
+	}
+	if got.Resize == nil || got.Resize.Rows != want.Resize.Rows || got.Resize.Cols != want.Resize.Cols {
+		t.Fatalf("unexpected resize payload: got=%#v want=%#v", got.Resize, want.Resize)
 	}
 }
 
@@ -327,8 +362,8 @@ func TestReadyRoundTripIncludesTrafficModeAddrs(t *testing.T) {
 }
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 5 {
-		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 5)
+	if ProtocolVersion != 6 {
+		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 6)
 	}
 }
 
@@ -362,6 +397,11 @@ func TestEnvelopeKind(t *testing.T) {
 			name: "exec_request",
 			env:  Envelope{ExecRequest: &ExecRequest{}},
 			want: "exec_request",
+		},
+		{
+			name: "exec_input",
+			env:  Envelope{ExecInput: &ExecInput{}},
+			want: "exec_input",
 		},
 		{
 			name: "stream_frame",
