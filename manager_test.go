@@ -748,6 +748,25 @@ func TestReadBoundedResponseRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// Keep assertions package-local for now; these tests become the safety net
+// while functions move into smaller packages in later tasks.
+func TestReadBoundedResponseFlagsOversize(t *testing.T) {
+	body := io.NopCloser(strings.NewReader("abcdef"))
+	got, tooLarge, err := readBoundedResponse(body, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abc" || !tooLarge {
+		t.Fatalf("got %q tooLarge=%v", string(got), tooLarge)
+	}
+}
+
+func TestValidateMITMHostAuthorityRejectsMismatch(t *testing.T) {
+	if err := validateMITMHostAuthority("allowed.example", "127.0.0.1:443"); err == nil {
+		t.Fatal("expected mismatch")
+	}
+}
+
 func TestLoggerFailureDoesNotBreakRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -31,6 +31,8 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// Keep assertions package-local for now; these tests become the safety net
+// while runtime internals move into smaller packages in later tasks.
 func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
 	bridge, peer, errCh := startReadLoop(t, "127.0.0.1:31111")
 	defer bridge.Close()

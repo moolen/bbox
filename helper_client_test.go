@@ -239,6 +239,18 @@ func TestHelperClientStartAcceptsTransparentReadyEnvelope(t *testing.T) {
 	}
 }
 
+func TestHelperClientTunnelActivationIsIdempotent(t *testing.T) {
+	client := newHelperClient(nil, "sandbox-a", failingConn{writeErr: io.EOF})
+	tunnel := &hostTunnel{}
+	client.registerPendingTunnel(7, tunnel)
+	if !client.activateTunnel(7) {
+		t.Fatal("first activation should succeed")
+	}
+	if client.activateTunnel(7) {
+		t.Fatal("second activation should fail")
+	}
+}
+
 type failingConn struct {
 	writeErr error
 }
