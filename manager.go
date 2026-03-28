@@ -511,27 +511,50 @@ func authorityPort(authority string) string {
 }
 
 func mitmHostPort(requestHost, authority, scheme string) (string, int) {
-	base := strings.TrimSpace(requestHost)
+	requestHost = strings.TrimSpace(requestHost)
+	base := requestHost
 	if base == "" {
 		base = authority
 	}
 	if base == "" {
 		return normalizeHostPort(base, 0)
 	}
+	if requestHost != "" {
+		if rawPort := authorityPort(base); rawPort != "" {
+			if parsed, err := strconv.Atoi(rawPort); err == nil {
+				return normalizeHostPort(base, parsed)
+			}
+			return normalizeHostPort(base, 0)
+		}
+		if rawPort := authorityPort(authority); rawPort != "" {
+			if parsed, err := strconv.Atoi(rawPort); err == nil {
+				return normalizeHostPort(base, parsed)
+			}
+		}
+		port := defaultPortForScheme(scheme)
+		return normalizeHostPort(base, port)
+	}
+
 	port := 0
 	if rawPort := authorityPort(base); rawPort != "" {
 		if parsed, err := strconv.Atoi(rawPort); err == nil {
 			port = parsed
 		}
 	} else {
-		switch strings.ToLower(scheme) {
-		case "https":
-			port = 443
-		case "http":
-			port = 80
-		}
+		port = defaultPortForScheme(scheme)
 	}
 	return normalizeHostPort(base, port)
+}
+
+func defaultPortForScheme(scheme string) int {
+	switch strings.ToLower(scheme) {
+	case "https":
+		return 443
+	case "http":
+		return 80
+	default:
+		return 0
+	}
 }
 
 func (m *ProxyManager) handleLeafCertRequest(host string) *helperproto.LeafCertResponse {

@@ -375,7 +375,6 @@ func TestHandleMITMRequestRecordsAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse server port: %v", err)
 	}
-
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
 		AllowConnect:      true,
@@ -435,8 +434,8 @@ func TestHandleMITMRequestRecordsAccess(t *testing.T) {
 	if mitmEntry.Host != serverURL.Hostname() {
 		t.Fatalf("expected mitm host %q, got %q", serverURL.Hostname(), mitmEntry.Host)
 	}
-	if mitmEntry.Port != 80 {
-		t.Fatalf("expected mitm port 80, got %d", mitmEntry.Port)
+	if mitmEntry.Port != port {
+		t.Fatalf("expected mitm port %d, got %d", port, mitmEntry.Port)
 	}
 	if mitmEntry.Result != "allowed" {
 		t.Fatalf("expected allowed mitm result, got %q", mitmEntry.Result)
@@ -444,6 +443,56 @@ func TestHandleMITMRequestRecordsAccess(t *testing.T) {
 }
 
 func TestHandleMITMRequestRecordsAccessUsesRequestHost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^decrypted[.]test$`},
+	}))
+	manager.transport = server.Client().Transport.(*http.Transport).Clone()
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleMITMRequest(t.Context(), "sandbox-a", helperproto.MITMRequest{
+		Scheme:    serverURL.Scheme,
+		Authority: serverURL.Host,
+		Host:      "decrypted.test",
+		Method:    http.MethodGet,
+		Path:      "/",
+		Proto:     "HTTP/1.1",
+	})
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected MITM response: %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "mitm" {
+		t.Fatalf("expected mitm entry, got %q", entry.Kind)
+	}
+	if entry.Host != "decrypted.test" {
+		t.Fatalf("expected decrypted host, got %q", entry.Host)
+	}
+	if entry.Host == serverURL.Hostname() {
+		t.Fatalf("expected host to differ from authority %q", serverURL.Hostname())
+	}
+	if entry.Port == 0 {
+		t.Fatalf("expected non-zero port, got %d", entry.Port)
+	}
+}
+
+func TestHandleMITMRequestRecordsAccessUsesAuthorityPortWhenRequestHostMissingPort(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -490,14 +539,8 @@ func TestHandleMITMRequestRecordsAccessUsesRequestHost(t *testing.T) {
 	if entry.Host != "decrypted.test" {
 		t.Fatalf("expected decrypted host, got %q", entry.Host)
 	}
-	if entry.Host == serverURL.Hostname() {
-		t.Fatalf("expected host to differ from authority %q", serverURL.Hostname())
-	}
-	if entry.Port != 80 {
-		t.Fatalf("expected port 80 for http scheme, got %d", entry.Port)
-	}
-	if entry.Port == port {
-		t.Fatalf("expected port to differ from authority port %d", port)
+	if entry.Port != port {
+		t.Fatalf("expected port %d from authority, got %d", port, entry.Port)
 	}
 }
 
