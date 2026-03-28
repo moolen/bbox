@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -22,16 +24,31 @@ import (
 	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
 
 const DefaultProxyAddr = "127.0.0.1:31111"
+const DefaultTransparentDNSAddr = "127.0.0.1:53"
+const DefaultTransparentHTTPAddr = "127.0.0.1:80"
+const DefaultTransparentHTTPSAddr = "127.0.0.1:443"
 
 const connectHandshakeTimeout = 5 * time.Second
 
+type TrafficMode string
+
+const (
+	TrafficModeProxy       TrafficMode = "proxy"
+	TrafficModeTransparent TrafficMode = "transparent"
+)
+
 type Config struct {
 	Bridge              io.ReadWriteCloser
+	TrafficMode         TrafficMode
 	ProxyAddr           string
+	DNSAddr             string
+	HTTPAddr            string
+	HTTPSAddr           string
 	Logger              *log.Logger
 	MITMEnabled         bool
 	MaxRequestBodyBytes int64
@@ -56,11 +73,26 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Bridge == nil {
 		return fmt.Errorf("bridge is required")
 	}
-	if cfg.ProxyAddr == "" {
-		cfg.ProxyAddr = DefaultProxyAddr
-	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(io.Discard, "", 0)
+	}
+	if cfg.TrafficMode == "" {
+		cfg.TrafficMode = TrafficModeProxy
+	}
+
+	switch cfg.TrafficMode {
+	case TrafficModeProxy:
+		return runProxyMode(ctx, cfg)
+	case TrafficModeTransparent:
+		return runTransparentMode(ctx, cfg)
+	default:
+		return fmt.Errorf("unsupported traffic mode %q", cfg.TrafficMode)
+	}
+}
+
+func runProxyMode(ctx context.Context, cfg Config) error {
+	if cfg.ProxyAddr == "" {
+		cfg.ProxyAddr = DefaultProxyAddr
 	}
 
 	listener, err := net.Listen("tcp", cfg.ProxyAddr)
@@ -110,12 +142,289 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
+func runTransparentMode(ctx context.Context, cfg Config) error {
+	if cfg.DNSAddr == "" {
+		cfg.DNSAddr = DefaultTransparentDNSAddr
+	}
+	if cfg.HTTPAddr == "" {
+		cfg.HTTPAddr = DefaultTransparentHTTPAddr
+	}
+	if cfg.HTTPSAddr == "" {
+		cfg.HTTPSAddr = DefaultTransparentHTTPSAddr
+	}
+
+	dnsServer, err := newTransparentDNSServer(cfg.DNSAddr)
+	if err != nil {
+		return fmt.Errorf("listen on DNS address %q: %w", cfg.DNSAddr, err)
+	}
+	defer dnsServer.Close()
+
+	httpListener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("listen on HTTP address %q: %w", cfg.HTTPAddr, err)
+	}
+	defer httpListener.Close()
+
+	httpsListener, err := net.Listen("tcp", cfg.HTTPSAddr)
+	if err != nil {
+		return fmt.Errorf("listen on HTTPS address %q: %w", cfg.HTTPSAddr, err)
+	}
+	defer httpsListener.Close()
+
+	bridge := newBridge(cfg.Bridge, cfg.Logger, "")
+	bridge.mitmEnabled = cfg.MITMEnabled
+	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
+	bridge.dnsAddr = dnsServer.Addr()
+	bridge.httpAddr = httpListener.Addr().String()
+	bridge.httpsAddr = httpsListener.Addr().String()
+
+	httpServer := &http.Server{
+		Handler: bridge.transparentHTTPHandler(),
+	}
+
+	errCh := make(chan error, 4)
+
+	go func() {
+		<-ctx.Done()
+
+		_ = dnsServer.Close()
+		_ = httpServer.Shutdown(context.Background())
+		_ = httpListener.Close()
+		_ = httpsListener.Close()
+		_ = cfg.Bridge.Close()
+	}()
+
+	go func() {
+		errCh <- dnsServer.Serve()
+	}()
+	go func() {
+		if err := httpServer.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("serve transparent HTTP listener: %w", err)
+		}
+	}()
+	go func() {
+		errCh <- serveTransparentListener(httpsListener, bridge)
+	}()
+	go func() {
+		errCh <- bridge.readLoop(ctx)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errCh:
+		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func serveTransparentListener(listener net.Listener, bridge *bridge) error {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		go bridge.handleTransparentHTTPSConn(conn)
+	}
+}
+
+type transparentDNSServer struct {
+	tcpListener net.Listener
+	udpConn     net.PacketConn
+}
+
+func newTransparentDNSServer(addr string) (*transparentDNSServer, error) {
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	udpAddr, err := transparentDNSUDPAddr(tcpListener.Addr())
+	if err != nil {
+		_ = tcpListener.Close()
+		return nil, err
+	}
+
+	udpConn, err := net.ListenPacket("udp", udpAddr)
+	if err != nil {
+		_ = tcpListener.Close()
+		return nil, err
+	}
+
+	return &transparentDNSServer{
+		tcpListener: tcpListener,
+		udpConn:     udpConn,
+	}, nil
+}
+
+func transparentDNSUDPAddr(addr net.Addr) (string, error) {
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", fmt.Errorf("split DNS listener address %q: %w", addr.String(), err)
+	}
+
+	return net.JoinHostPort(host, port), nil
+}
+
+func (s *transparentDNSServer) Addr() string {
+	return s.tcpListener.Addr().String()
+}
+
+func (s *transparentDNSServer) Close() error {
+	var errs []error
+	if s.udpConn != nil {
+		if err := s.udpConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, err)
+		}
+	}
+	if s.tcpListener != nil {
+		if err := s.tcpListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func (s *transparentDNSServer) Serve() error {
+	errCh := make(chan error, 2)
+
+	go func() {
+		errCh <- serveTransparentDNSUDP(s.udpConn)
+	}()
+	go func() {
+		errCh <- serveTransparentDNSTCP(s.tcpListener)
+	}()
+
+	err := <-errCh
+	if err != nil {
+		_ = s.Close()
+	}
+
+	return err
+}
+
+func serveTransparentDNSUDP(conn net.PacketConn) error {
+	buf := make([]byte, 1500)
+	for {
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			return err
+		}
+
+		response, ok := handleTransparentDNSQuery(buf[:n])
+		if !ok {
+			continue
+		}
+		if _, err := conn.WriteTo(response, addr); err != nil {
+			return err
+		}
+	}
+}
+
+func serveTransparentDNSTCP(listener net.Listener) error {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+
+		go func() {
+			_ = serveTransparentDNSTCPConn(conn)
+		}()
+	}
+}
+
+func serveTransparentDNSTCPConn(conn net.Conn) error {
+	defer conn.Close()
+
+	var lengthBuf [2]byte
+	if _, err := io.ReadFull(conn, lengthBuf[:]); err != nil {
+		return err
+	}
+
+	queryLen := int(binary.BigEndian.Uint16(lengthBuf[:]))
+	query := make([]byte, queryLen)
+	if _, err := io.ReadFull(conn, query); err != nil {
+		return err
+	}
+
+	response, ok := handleTransparentDNSQuery(query)
+	if !ok {
+		return nil
+	}
+
+	frame := make([]byte, 2+len(response))
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(response)))
+	copy(frame[2:], response)
+	_, err := conn.Write(frame)
+	return err
+}
+
+func handleTransparentDNSQuery(payload []byte) ([]byte, bool) {
+	var parser dnsmessage.Parser
+	header, err := parser.Start(payload)
+	if err != nil {
+		return nil, false
+	}
+
+	questions, err := parser.AllQuestions()
+	if err != nil || len(questions) != 1 {
+		return nil, false
+	}
+
+	response := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 header.ID,
+			Response:           true,
+			OpCode:             header.OpCode,
+			Authoritative:      true,
+			RecursionDesired:   header.RecursionDesired,
+			RecursionAvailable: false,
+		},
+		Questions: questions,
+	}
+
+	question := questions[0]
+	if question.Class != dnsmessage.ClassINET {
+		response.Header.RCode = dnsmessage.RCodeRefused
+	} else {
+		switch question.Type {
+		case dnsmessage.TypeA:
+			response.Answers = []dnsmessage.Resource{{
+				Header: dnsmessage.ResourceHeader{
+					Name:  question.Name,
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+					TTL:   60,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}},
+			}}
+		case dnsmessage.TypeAAAA:
+		default:
+			response.Header.RCode = dnsmessage.RCodeRefused
+		}
+	}
+
+	packed, err := response.Pack()
+	if err != nil {
+		return nil, false
+	}
+
+	return packed, true
+}
+
 type bridge struct {
 	conn                io.ReadWriteCloser
 	enc                 *gob.Encoder
 	dec                 *gob.Decoder
 	logger              *log.Logger
 	proxyAddr           string
+	dnsAddr             string
+	httpAddr            string
+	httpsAddr           string
 	mitmEnabled         bool
 	maxRequestBodyBytes int64
 	sendMu              sync.Mutex
@@ -180,6 +489,9 @@ func (b *bridge) handleHello(env helperproto.Envelope) error {
 		Ready: &helperproto.Ready{
 			ProtocolVersion: helperproto.ProtocolVersion,
 			ProxyAddr:       b.proxyAddr,
+			DNSAddr:         b.dnsAddr,
+			HTTPAddr:        b.httpAddr,
+			HTTPSAddr:       b.httpsAddr,
 		},
 	})
 }
@@ -195,38 +507,101 @@ func (b *bridge) proxyHandler() http.Handler {
 			return
 		}
 
-		outReq, err := rewriteProxyRequest(req)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		b.serveHTTPForward(w, req, rewriteProxyRequest)
+	})
+}
+
+func (b *bridge) transparentHTTPHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodConnect {
+			http.Error(w, "transparent HTTP listener does not accept CONNECT", http.StatusMethodNotAllowed)
 			return
 		}
 
-		var body []byte
-		if outReq.Body != nil {
-			body, err = io.ReadAll(outReq.Body)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-		}
+		b.serveHTTPForward(w, req, rewriteTransparentHTTPRequest)
+	})
+}
 
-		response, err := b.proxyRoundTrip(req.Context(), helperproto.ProxyRequest{
-			Method: outReq.Method,
-			URL:    outReq.URL.String(),
-			Header: outReq.Header.Clone(),
-			Body:   body,
-		})
+func (b *bridge) handleTransparentHTTPSConn(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	if !b.mitmEnabled {
+		_ = conn.Close()
+		return
+	}
+
+	_ = conn.SetDeadline(time.Now().Add(connectHandshakeTimeout))
+	handshakeCtx, cancel := context.WithTimeout(context.Background(), connectHandshakeTimeout)
+	defer cancel()
+
+	var (
+		serverName string
+		leafCert   *tls.Certificate
+	)
+	tlsConn := tls.Server(conn, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2", "http/1.1"},
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if leafCert != nil {
+				return leafCert, nil
+			}
+
+			serverName = strings.ToLower(strings.TrimSpace(hello.ServerName))
+			if serverName == "" {
+				return nil, fmt.Errorf("transparent HTTPS requires SNI")
+			}
+
+			cert, err := b.requestLeafCert(handshakeCtx, serverName)
+			if err != nil {
+				return nil, err
+			}
+			leafCert = &cert
+			return leafCert, nil
+		},
+	})
+	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+		_ = conn.SetDeadline(time.Time{})
+		_ = tlsConn.Close()
+		return
+	}
+	_ = conn.SetDeadline(time.Time{})
+
+	b.serveMITMConn(tlsConn, serverName, 443)
+}
+
+func (b *bridge) serveHTTPForward(w http.ResponseWriter, req *http.Request, rewrite func(*http.Request) (*http.Request, error)) {
+	outReq, err := rewrite(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var body []byte
+	if outReq.Body != nil {
+		body, err = io.ReadAll(outReq.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+	}
 
-		copyHeader(w.Header(), response.Header)
-		w.WriteHeader(response.StatusCode)
-		if _, err := io.Copy(w, bytes.NewReader(response.Body)); err != nil {
-			b.logger.Printf("copy proxied response body: %v", err)
-		}
+	response, err := b.proxyRoundTrip(req.Context(), helperproto.ProxyRequest{
+		Method: outReq.Method,
+		URL:    outReq.URL.String(),
+		Header: outReq.Header.Clone(),
+		Body:   body,
 	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	copyHeader(w.Header(), response.Header)
+	w.WriteHeader(response.StatusCode)
+	if _, err := io.Copy(w, bytes.NewReader(response.Body)); err != nil {
+		b.logger.Printf("copy proxied response body: %v", err)
+	}
 }
 
 func (b *bridge) handleMITMConnect(w http.ResponseWriter, req *http.Request) {
@@ -313,16 +688,7 @@ func (b *bridge) handleMITMConnect(w http.ResponseWriter, req *http.Request) {
 	}
 	_ = conn.SetDeadline(time.Time{})
 
-	server := &http.Server{
-		Handler: b.mitmHandler(host, port),
-	}
-	if err := http2.ConfigureServer(server, &http2.Server{}); err != nil {
-		b.logger.Printf("configure MITM HTTP/2 server: %v", err)
-	}
-	serveErr := server.Serve(&singleConnListener{conn: tlsConn})
-	if serveErr != nil && !errors.Is(serveErr, io.EOF) && !errors.Is(serveErr, net.ErrClosed) {
-		b.logger.Printf("serve MITM connection: %v", serveErr)
-	}
+	b.serveMITMConn(tlsConn, host, port)
 }
 
 type tunnelRelayResult struct {
@@ -850,6 +1216,19 @@ func (b *bridge) mitmHandler(connectHost string, connectPort int) http.Handler {
 	})
 }
 
+func (b *bridge) serveMITMConn(conn net.Conn, connectHost string, connectPort int) {
+	server := &http.Server{
+		Handler: b.mitmHandler(connectHost, connectPort),
+	}
+	if err := http2.ConfigureServer(server, &http2.Server{}); err != nil {
+		b.logger.Printf("configure MITM HTTP/2 server: %v", err)
+	}
+	serveErr := server.Serve(&singleConnListener{conn: conn})
+	if serveErr != nil && !errors.Is(serveErr, io.EOF) && !errors.Is(serveErr, net.ErrClosed) {
+		b.logger.Printf("serve MITM connection: %v", serveErr)
+	}
+}
+
 func closePayloadWrite(conn net.Conn) error {
 	type closeWriter interface {
 		CloseWrite() error
@@ -1064,6 +1443,38 @@ func rewriteProxyRequest(req *http.Request) (*http.Request, error) {
 
 	out := req.Clone(req.Context())
 	urlCopy := *req.URL
+	out.URL = &urlCopy
+	out.RequestURI = ""
+	out.Host = out.URL.Host
+	out.Header = req.Header.Clone()
+	out.Header.Del("Proxy-Connection")
+
+	return out, nil
+}
+
+func rewriteTransparentHTTPRequest(req *http.Request) (*http.Request, error) {
+	if req.URL == nil {
+		return nil, errors.New("transparent HTTP request URL is required")
+	}
+
+	host := strings.TrimSpace(req.Host)
+	if host == "" {
+		return nil, errors.New("transparent HTTP request host is required")
+	}
+
+	path := req.URL.Path
+	if path == "" {
+		path = "/"
+	}
+
+	out := req.Clone(req.Context())
+	urlCopy := url.URL{
+		Scheme:   "http",
+		Host:     host,
+		Path:     path,
+		RawPath:  req.URL.RawPath,
+		RawQuery: req.URL.RawQuery,
+	}
 	out.URL = &urlCopy
 	out.RequestURI = ""
 	out.Host = out.URL.Host

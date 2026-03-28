@@ -284,9 +284,51 @@ func TestLeafCertResponseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestReadyRoundTripIncludesTrafficModeAddrs(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		Ready: &Ready{
+			ProtocolVersion: ProtocolVersion,
+			ProxyAddr:       "127.0.0.1:31111",
+			HTTPAddr:        "127.0.0.1:80",
+			HTTPSAddr:       "127.0.0.1:443",
+			DNSAddr:         "127.0.0.1:53",
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Ready == nil {
+		t.Fatalf("unexpected ready payload: %#v", got.Ready)
+	}
+	if got.Ready.ProtocolVersion != want.Ready.ProtocolVersion {
+		t.Fatalf("unexpected protocol version: got=%d want=%d", got.Ready.ProtocolVersion, want.Ready.ProtocolVersion)
+	}
+	if got.Ready.ProxyAddr != want.Ready.ProxyAddr {
+		t.Fatalf("unexpected proxy address: got=%q want=%q", got.Ready.ProxyAddr, want.Ready.ProxyAddr)
+	}
+	if got.Ready.HTTPAddr != want.Ready.HTTPAddr {
+		t.Fatalf("unexpected HTTP address: got=%q want=%q", got.Ready.HTTPAddr, want.Ready.HTTPAddr)
+	}
+	if got.Ready.HTTPSAddr != want.Ready.HTTPSAddr {
+		t.Fatalf("unexpected HTTPS address: got=%q want=%q", got.Ready.HTTPSAddr, want.Ready.HTTPSAddr)
+	}
+	if got.Ready.DNSAddr != want.Ready.DNSAddr {
+		t.Fatalf("unexpected DNS address: got=%q want=%q", got.Ready.DNSAddr, want.Ready.DNSAddr)
+	}
+}
+
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 4 {
-		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 4)
+	if ProtocolVersion != 5 {
+		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 5)
 	}
 }
 

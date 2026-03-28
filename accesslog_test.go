@@ -271,6 +271,71 @@ func TestRecordAccessEventMapsResultsToAggregate(t *testing.T) {
 	}
 }
 
+func TestAccessLogEntryIncludesTrafficMode(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	logger := &stubAccessLogger{}
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	manager.recordAccessEvent(accessEvent{
+		Time:        time.Date(2026, 3, 28, 15, 30, 0, 0, time.UTC),
+		SandboxID:   "sandbox-a",
+		TrafficMode: TrafficModeTransparent,
+		Kind:        "http",
+		Host:        "example.com",
+		Port:        80,
+		Result:      "allowed",
+	})
+
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+	if got := logger.entries[0].TrafficMode; got != TrafficModeTransparent {
+		t.Fatalf("expected transparent traffic mode, got %q", got)
+	}
+}
+
+func TestAccessedDomainsTracksTrafficModeKinds(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	manager.recordAccessEvent(accessEvent{
+		Time:        time.Date(2026, 3, 28, 15, 40, 0, 0, time.UTC),
+		SandboxID:   "sandbox-a",
+		TrafficMode: TrafficModeTransparent,
+		Kind:        "http",
+		Host:        "example.com",
+		Port:        80,
+		Result:      "allowed",
+	})
+	manager.recordAccessEvent(accessEvent{
+		Time:        time.Date(2026, 3, 28, 15, 41, 0, 0, time.UTC),
+		SandboxID:   "sandbox-a",
+		TrafficMode: TrafficModeTransparent,
+		Kind:        "mitm",
+		Host:        "example.com",
+		Port:        443,
+		Result:      "denied",
+		Error:       "policy denied",
+	})
+
+	snapshot := manager.accessedDomainsSnapshot("sandbox-a")
+	entry := findAccessedDomain(t, snapshot, "example.com")
+	if entry.TrafficMode != TrafficModeTransparent {
+		t.Fatalf("expected transparent traffic mode, got %q", entry.TrafficMode)
+	}
+	if !entry.HTTPSeen {
+		t.Fatal("expected HTTPSeen to be true")
+	}
+	if !entry.MITMSeen {
+		t.Fatal("expected MITMSeen to be true")
+	}
+}
+
 func TestRecordAccessEventSkipsEmptySandboxID(t *testing.T) {
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
 	logger := &stubAccessLogger{}

@@ -183,7 +183,7 @@ func TestSandboxAccessedDomainsTracksConnectWhenMITMDenied(t *testing.T) {
 		t.Skip(err.Error())
 	}
 
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := startTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ok" {
 			http.NotFound(w, r)
 			return
@@ -291,7 +291,7 @@ func TestSandboxInjectedAccessLoggerReceivesConnectAndMITMEntries(t *testing.T) 
 		t.Skip(err.Error())
 	}
 
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := startTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ok" {
 			http.NotFound(w, r)
 			return

@@ -159,6 +159,7 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 	if !ok {
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("sandbox %q is not registered", sandboxID)}
 	}
+	trafficMode := m.trafficModeForSandbox(sandboxID)
 
 	targetURL, err := url.Parse(req.URL)
 	if err != nil {
@@ -184,16 +185,17 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 	host, port := normalizeHostPort(targetURL.Host, port)
 	if err := policy.Check(req.Method, targetURL.Host, req.Method == http.MethodConnect); err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "http",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusForbidden,
-			Result:     "denied",
-			Error:      err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "http",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     false,
+			StatusCode:  http.StatusForbidden,
+			Result:      "denied",
+			Error:       err.Error(),
 		})
 		return &helperproto.ProxyResponse{
 			StatusCode: http.StatusForbidden,
@@ -207,15 +209,16 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL.String(), bytes.NewReader(req.Body))
 	if err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID: sandboxID,
-			Kind:      "http",
-			Host:      host,
-			Port:      port,
-			Method:    req.Method,
-			Path:      path,
-			Allowed:   true,
-			Result:    "upstream_error",
-			Error:     err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "http",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     true,
+			Result:      "upstream_error",
+			Error:       err.Error(),
 		})
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("build outbound request: %v", err)}
 	}
@@ -225,15 +228,16 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 	resp, err := m.outboundTransport().RoundTrip(outReq)
 	if err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID: sandboxID,
-			Kind:      "http",
-			Host:      host,
-			Port:      port,
-			Method:    req.Method,
-			Path:      path,
-			Allowed:   true,
-			Result:    "upstream_error",
-			Error:     err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "http",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     true,
+			Result:      "upstream_error",
+			Error:       err.Error(),
 		})
 		return &helperproto.ProxyResponse{Error: err.Error()}
 	}
@@ -242,30 +246,32 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "http",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    true,
-			StatusCode: resp.StatusCode,
-			Result:     "upstream_error",
-			Error:      err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "http",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     true,
+			StatusCode:  resp.StatusCode,
+			Result:      "upstream_error",
+			Error:       err.Error(),
 		})
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("read outbound response body: %v", err)}
 	}
 
 	m.recordAccessEvent(accessEvent{
-		SandboxID:  sandboxID,
-		Kind:       "http",
-		Host:       host,
-		Port:       port,
-		Method:     req.Method,
-		Path:       path,
-		Allowed:    true,
-		StatusCode: resp.StatusCode,
-		Result:     "allowed",
+		SandboxID:   sandboxID,
+		TrafficMode: trafficMode,
+		Kind:        "http",
+		Host:        host,
+		Port:        port,
+		Method:      req.Method,
+		Path:        path,
+		Allowed:     true,
+		StatusCode:  resp.StatusCode,
+		Result:      "allowed",
 	})
 	return &helperproto.ProxyResponse{
 		StatusCode: resp.StatusCode,
@@ -282,20 +288,22 @@ func (m *ProxyManager) handleConnectRequest(ctx context.Context, sandboxID strin
 			Error:      fmt.Sprintf("sandbox %q is not registered", sandboxID),
 		}
 	}
+	trafficMode := m.trafficModeForSandbox(sandboxID)
 
 	host, port := normalizeHostPort(req.Host, req.Port)
 	hostport := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
 	if err := policy.Check(http.MethodConnect, hostport, true); err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "connect",
-			Host:       host,
-			Port:       port,
-			Method:     http.MethodConnect,
-			Allowed:    false,
-			StatusCode: http.StatusForbidden,
-			Result:     "denied",
-			Error:      err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "connect",
+			Host:        host,
+			Port:        port,
+			Method:      http.MethodConnect,
+			Allowed:     false,
+			StatusCode:  http.StatusForbidden,
+			Result:      "denied",
+			Error:       err.Error(),
 		})
 		return &helperproto.ConnectResponse{
 			StatusCode: http.StatusForbidden,
@@ -305,14 +313,15 @@ func (m *ProxyManager) handleConnectRequest(ctx context.Context, sandboxID strin
 	}
 
 	m.recordAccessEvent(accessEvent{
-		SandboxID:  sandboxID,
-		Kind:       "connect",
-		Host:       host,
-		Port:       port,
-		Method:     http.MethodConnect,
-		Allowed:    true,
-		StatusCode: http.StatusOK,
-		Result:     "allowed",
+		SandboxID:   sandboxID,
+		TrafficMode: trafficMode,
+		Kind:        "connect",
+		Host:        host,
+		Port:        port,
+		Method:      http.MethodConnect,
+		Allowed:     true,
+		StatusCode:  http.StatusOK,
+		Result:      "allowed",
 	})
 	return &helperproto.ConnectResponse{
 		StatusCode: http.StatusOK,
@@ -327,6 +336,7 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 			Error:      fmt.Sprintf("sandbox %q is not registered", sandboxID),
 		}
 	}
+	trafficMode := m.trafficModeForSandbox(sandboxID)
 	scheme := req.Scheme
 	if scheme == "" {
 		scheme = "https"
@@ -342,16 +352,17 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 	host, port := mitmHostPort(req.Host, authority, scheme)
 	if req.BodyTooLarge {
 		m.recordAccessEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusRequestEntityTooLarge,
-			Result:     "denied",
-			Error:      "request body exceeds inspection limit",
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "mitm",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     false,
+			StatusCode:  http.StatusRequestEntityTooLarge,
+			Result:      "denied",
+			Error:       "request body exceeds inspection limit",
 		})
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusRequestEntityTooLarge,
@@ -371,16 +382,17 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 		BodyTooLarge: req.BodyTooLarge,
 	}); err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusForbidden,
-			Result:     "denied",
-			Error:      err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "mitm",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     false,
+			StatusCode:  http.StatusForbidden,
+			Result:      "denied",
+			Error:       err.Error(),
 		})
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusForbidden,
@@ -392,16 +404,17 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 	}
 	if authority == "" {
 		m.recordAccessEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusBadRequest,
-			Result:     "denied",
-			Error:      "MITM request authority is required",
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "mitm",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     false,
+			StatusCode:  http.StatusBadRequest,
+			Result:      "denied",
+			Error:       "MITM request authority is required",
 		})
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadRequest,
@@ -418,15 +431,16 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL.String(), bytes.NewReader(req.Body))
 	if err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID: sandboxID,
-			Kind:      "mitm",
-			Host:      host,
-			Port:      port,
-			Method:    req.Method,
-			Path:      path,
-			Allowed:   true,
-			Result:    "upstream_error",
-			Error:     err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "mitm",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     true,
+			Result:      "upstream_error",
+			Error:       err.Error(),
 		})
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadGateway,
@@ -444,15 +458,16 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 	resp, err := m.outboundTransport().RoundTrip(outReq)
 	if err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID: sandboxID,
-			Kind:      "mitm",
-			Host:      host,
-			Port:      port,
-			Method:    req.Method,
-			Path:      path,
-			Allowed:   true,
-			Result:    "upstream_error",
-			Error:     err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "mitm",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     true,
+			Result:      "upstream_error",
+			Error:       err.Error(),
 		})
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadGateway,
@@ -464,16 +479,17 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		m.recordAccessEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    true,
-			StatusCode: resp.StatusCode,
-			Result:     "upstream_error",
-			Error:      err.Error(),
+			SandboxID:   sandboxID,
+			TrafficMode: trafficMode,
+			Kind:        "mitm",
+			Host:        host,
+			Port:        port,
+			Method:      req.Method,
+			Path:        path,
+			Allowed:     true,
+			StatusCode:  resp.StatusCode,
+			Result:      "upstream_error",
+			Error:       err.Error(),
 		})
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadGateway,
@@ -482,15 +498,16 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 	}
 
 	m.recordAccessEvent(accessEvent{
-		SandboxID:  sandboxID,
-		Kind:       "mitm",
-		Host:       host,
-		Port:       port,
-		Method:     req.Method,
-		Path:       path,
-		Allowed:    true,
-		StatusCode: resp.StatusCode,
-		Result:     "allowed",
+		SandboxID:   sandboxID,
+		TrafficMode: trafficMode,
+		Kind:        "mitm",
+		Host:        host,
+		Port:        port,
+		Method:      req.Method,
+		Path:        path,
+		Allowed:     true,
+		StatusCode:  resp.StatusCode,
+		Result:      "allowed",
 	})
 	return &helperproto.MITMResponse{
 		StatusCode: resp.StatusCode,
@@ -642,6 +659,7 @@ func (m *ProxyManager) recordAccessEvent(event accessEvent) {
 	if event.Time.IsZero() {
 		event.Time = time.Now()
 	}
+	event.TrafficMode = normalizeTrafficMode(event.TrafficMode)
 	entry := event.toAccessLogEntry()
 
 	m.mu.Lock()
@@ -661,6 +679,21 @@ func (m *ProxyManager) recordAccessEvent(event accessEvent) {
 			logger.LogAccess(entry)
 		}()
 	}
+}
+
+func (m *ProxyManager) trafficModeForSandbox(sandboxID string) TrafficMode {
+	if m == nil || sandboxID == "" {
+		return TrafficModeProxy
+	}
+
+	m.mu.RLock()
+	sandbox := m.sandboxes[sandboxID]
+	m.mu.RUnlock()
+	if sandbox == nil {
+		return TrafficModeProxy
+	}
+
+	return normalizeTrafficMode(sandbox.trafficMode)
 }
 
 func (m *ProxyManager) accessedDomainsSnapshot(sandboxID string) []AccessedDomain {

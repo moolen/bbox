@@ -15,6 +15,10 @@ type recordingAccessLogger struct {
 	entries []bbox.AccessLogEntry
 }
 
+type ProxyModeSandbox struct{}
+
+type TransparentModeSandbox struct{}
+
 func (r *recordingAccessLogger) LogAccess(entry bbox.AccessLogEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -121,4 +125,42 @@ func ExampleProxyManager_NewSandbox() {
 
 	log.Printf("proxy=%s exit=%d stdout=%dB stderr=%dB", sandbox.ProxyURL(), result.ExitCode, len(result.Stdout), len(result.Stderr))
 	log.Printf("accessed=%d entries=%d", len(sandbox.AccessedDomains()), len(logger.snapshot()))
+}
+
+func ExampleProxyModeSandbox() {
+	opts := bbox.SandboxOptions{
+		TrafficMode: bbox.TrafficModeProxy,
+		Policy: bbox.NetworkPolicy{
+			AllowHostPatterns: []string{`^example[.]com$`},
+			AllowHTTPMethods:  []string{"GET"},
+			AllowConnect:      true,
+			AllowConnectPorts: []string{"443"},
+		},
+	}
+
+	fmt.Println(opts.TrafficMode)
+	// Output: proxy
+}
+
+func ExampleTransparentModeSandbox() {
+	managerOpts := bbox.ProxyOptions{
+		MITM: bbox.MITMOptions{
+			Enabled:             true,
+			MaxRequestBodyBytes: 64 << 10,
+		},
+	}
+	sandboxOpts := bbox.SandboxOptions{
+		TrafficMode: bbox.TrafficModeTransparent,
+		Policy: bbox.NetworkPolicy{
+			AllowHostPatterns: []string{`^api[.]github[.]com$`},
+			AllowHTTPMethods:  []string{"GET"},
+			AllowPathPatterns: []string{`^/repos/`},
+		},
+	}
+
+	fmt.Println(managerOpts.MITM.Enabled)
+	fmt.Println(sandboxOpts.TrafficMode)
+	// Output:
+	// true
+	// transparent
 }

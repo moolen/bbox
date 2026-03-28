@@ -26,9 +26,10 @@ type Sandbox struct {
 	cmd     *exec.Cmd
 	done    chan error
 
-	proxyAddr string
-	baseEnv   []string
-	workDir   string
+	trafficMode TrafficMode
+	proxyAddr   string
+	baseEnv     []string
+	workDir     string
 
 	helperLogMu     sync.Mutex
 	helperLogFile   *os.File
@@ -53,6 +54,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	if err := validateSandboxOptions(opts, m.mitm.Enabled); err != nil {
 		return nil, err
 	}
+	mode := normalizeTrafficMode(opts.TrafficMode)
 
 	policy, err := compilePolicy(opts.Policy)
 	if err != nil {
@@ -64,7 +66,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, err
 	}
 
-	root, err := stageSandboxRoot(opts, helperBinary, m.CACertPEM())
+	root, err := stageSandboxRoot(opts, helperBinary, m.CACertPEM(), mode)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +85,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, fmt.Errorf("create helper log file: %w", err)
 	}
 
-	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, m.listenAddr, m.mitm, opts.Mounts)...)
+	cmd := exec.Command("bwrap", buildBwrapArgs(root, defaultSandboxHelperPath, m.listenAddr, m.mitm, opts.Mounts, mode)...)
 	cmd.Stderr = helperLog
 	cmd.Stdout = helperLog
 	cmd.ExtraFiles = []*os.File{childBridge}
@@ -107,6 +109,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		client:        client,
 		cmd:           cmd,
 		done:          make(chan error, 1),
+		trafficMode:   mode,
 		workDir:       opts.WorkDir,
 		helperLogFile: helperLog,
 		helperLogPath: helperLog.Name(),
@@ -122,8 +125,10 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		_ = sandbox.Close()
 		return nil, fmt.Errorf("start sandbox helper: %w%s", err, sandbox.helperErrorSuffix())
 	}
-	sandbox.proxyAddr = proxyAddr
-	sandbox.baseEnv = runEnvForTrafficMode(normalizeTrafficMode(opts.TrafficMode), proxyAddr, opts.Env)
+	if mode == TrafficModeProxy {
+		sandbox.proxyAddr = proxyAddr
+	}
+	sandbox.baseEnv = runEnvForTrafficMode(mode, proxyAddr, opts.Env)
 
 	if err := m.registerSandbox(sandboxID, policy); err != nil {
 		sandbox.closeErr = nil
@@ -170,12 +175,15 @@ func (s *Sandbox) ProxyAddr() string {
 	if s == nil {
 		return ""
 	}
+	if normalizeTrafficMode(s.trafficMode) != TrafficModeProxy {
+		return ""
+	}
 	return s.proxyAddr
 }
 
 // ProxyURL returns the helper's sandbox-local proxy endpoint as an HTTP URL.
 func (s *Sandbox) ProxyURL() string {
-	if s == nil || s.proxyAddr == "" {
+	if s == nil || s.ProxyAddr() == "" {
 		return ""
 	}
 	return proxyURL(s.proxyAddr)

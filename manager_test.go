@@ -267,6 +267,80 @@ func TestHandleProxyRequestRecordsUpstreamErrorAccess(t *testing.T) {
 	}
 }
 
+func TestHandleProxyRequestAcceptsOriginStyleURLFromTransparentIngress(t *testing.T) {
+	var gotHost string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method: %q", r.Method)
+		}
+		if r.URL.Path != "/allowed" {
+			t.Fatalf("unexpected path: %q", r.URL.Path)
+		}
+		if r.URL.RawQuery != "source=transparent" {
+			t.Fatalf("unexpected query: %q", r.URL.RawQuery)
+		}
+		gotHost = r.Host
+		w.Header().Set("X-Upstream", "ok")
+		_, _ = w.Write([]byte("upstream ok"))
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{`^127[.]0[.]0[.]1(:[0-9]+)?$`},
+		AllowPathPatterns: []string{`^/allowed$`},
+	}))
+	manager.transport = server.Client().Transport.(*http.Transport).Clone()
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleProxyRequest(t.Context(), "sandbox-a", helperproto.ProxyRequest{
+		Method: http.MethodGet,
+		URL:    "http://" + serverURL.Host + "/allowed?source=transparent",
+		Header: http.Header{"X-Test": []string{"present"}},
+	})
+
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected proxy response: %#v", response)
+	}
+	if string(response.Body) != "upstream ok" {
+		t.Fatalf("unexpected response body: %q", string(response.Body))
+	}
+	if got := response.Header.Get("X-Upstream"); got != "ok" {
+		t.Fatalf("unexpected upstream header: %q", got)
+	}
+	if gotHost != serverURL.Host {
+		t.Fatalf("unexpected host forwarding: got %q want %q", gotHost, serverURL.Host)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "http" {
+		t.Fatalf("expected http access kind, got %q", entry.Kind)
+	}
+	if !entry.Allowed {
+		t.Fatal("expected request to be allowed")
+	}
+	if entry.Result != "allowed" {
+		t.Fatalf("expected allowed result, got %q", entry.Result)
+	}
+	if entry.Path != "/allowed" {
+		t.Fatalf("expected path /allowed, got %q", entry.Path)
+	}
+	if entry.Host != serverURL.Hostname() {
+		t.Fatalf("expected host %q, got %q", serverURL.Hostname(), entry.Host)
+	}
+}
+
 func TestHandleConnectRequestRecordsAllowedAccess(t *testing.T) {
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{

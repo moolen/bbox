@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -11,23 +12,44 @@ import (
 	"github.com/moolen/bbox/internal/helperruntime"
 )
 
+type helperFlags struct {
+	bridgeFD            int
+	proxyAddr           string
+	dnsAddr             string
+	httpAddr            string
+	httpsAddr           string
+	mitmEnabled         bool
+	maxRequestBodyBytes int64
+	trafficMode         string
+}
+
+func parseFlags(args []string) (helperFlags, error) {
+	var parsed helperFlags
+	fs := flag.NewFlagSet("bbox-helper", flag.ContinueOnError)
+	fs.IntVar(&parsed.bridgeFD, "bridge-fd", 3, "file descriptor carrying the helper control bridge")
+	fs.StringVar(&parsed.proxyAddr, "proxy-addr", helperruntime.DefaultProxyAddr, "sandbox-local proxy listen address")
+	fs.StringVar(&parsed.dnsAddr, "dns-addr", "", "sandbox-local transparent DNS listen address")
+	fs.StringVar(&parsed.httpAddr, "http-addr", "", "sandbox-local transparent HTTP listen address")
+	fs.StringVar(&parsed.httpsAddr, "https-addr", "", "sandbox-local transparent HTTPS listen address")
+	fs.BoolVar(&parsed.mitmEnabled, "mitm-enabled", false, "enable TLS MITM interception for CONNECT requests")
+	fs.Int64Var(&parsed.maxRequestBodyBytes, "max-request-body-bytes", 0, "maximum intercepted request body bytes to buffer for policy evaluation")
+	fs.StringVar(&parsed.trafficMode, "traffic-mode", string(helperruntime.TrafficModeProxy), "traffic mode (proxy or transparent)")
+	if err := fs.Parse(args); err != nil {
+		return parsed, err
+	}
+	if fs.NArg() > 0 && fs.Arg(0) != "child-proxy" {
+		return parsed, fmt.Errorf("unexpected subcommand %q", fs.Arg(0))
+	}
+	return parsed, nil
+}
+
 func main() {
-	var bridgeFD int
-	var proxyAddr string
-	var mitmEnabled bool
-	var maxRequestBodyBytes int64
-
-	flag.IntVar(&bridgeFD, "bridge-fd", 3, "file descriptor carrying the helper control bridge")
-	flag.StringVar(&proxyAddr, "proxy-addr", helperruntime.DefaultProxyAddr, "sandbox-local proxy listen address")
-	flag.BoolVar(&mitmEnabled, "mitm-enabled", false, "enable TLS MITM interception for CONNECT requests")
-	flag.Int64Var(&maxRequestBodyBytes, "max-request-body-bytes", 0, "maximum intercepted request body bytes to buffer for policy evaluation")
-	flag.Parse()
-
-	if flag.NArg() > 0 && flag.Arg(0) != "child-proxy" {
-		log.Fatalf("unexpected subcommand %q", flag.Arg(0))
+	parsed, err := parseFlags(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	bridge, err := helperruntime.OpenBridgeFromFD(bridgeFD)
+	bridge, err := helperruntime.OpenBridgeFromFD(parsed.bridgeFD)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -39,10 +61,14 @@ func main() {
 	logger := log.New(os.Stderr, "bbox-helper: ", log.LstdFlags)
 	if err := helperruntime.Run(ctx, helperruntime.Config{
 		Bridge:              bridge,
-		ProxyAddr:           proxyAddr,
+		TrafficMode:         helperruntime.TrafficMode(parsed.trafficMode),
+		ProxyAddr:           parsed.proxyAddr,
+		DNSAddr:             parsed.dnsAddr,
+		HTTPAddr:            parsed.httpAddr,
+		HTTPSAddr:           parsed.httpsAddr,
 		Logger:              logger,
-		MITMEnabled:         mitmEnabled,
-		MaxRequestBodyBytes: maxRequestBodyBytes,
+		MITMEnabled:         parsed.mitmEnabled,
+		MaxRequestBodyBytes: parsed.maxRequestBodyBytes,
 	}); err != nil {
 		logger.Fatal(err)
 	}

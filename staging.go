@@ -81,7 +81,7 @@ func runtimeFilesForBinary(binaryPath string) ([]string, error) {
 	return parseLddOutput(string(output)), nil
 }
 
-func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte) (root string, err error) {
+func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte, mode TrafficMode) (root string, err error) {
 	root, err = os.MkdirTemp("", "bwrap-go-root-")
 	if err != nil {
 		return "", fmt.Errorf("create sandbox root: %w", err)
@@ -118,10 +118,28 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 	}
 	files = append(files, helperRuntimeFiles...)
 
-	for _, extra := range []string{
+	extras := []string{
 		"/lib64/ld-linux-x86-64.so.2",
-		"/usr/lib/libnss_files.so.2",
-	} {
+	}
+	if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_files.so.2")); ok {
+		extras = append(extras, path)
+		deps, err := runtimeFilesForBinary(path)
+		if err != nil {
+			return "", err
+		}
+		files = append(files, deps...)
+	}
+	if normalizeTrafficMode(mode) == TrafficModeTransparent {
+		if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2")); ok {
+			extras = append(extras, path)
+			deps, err := runtimeFilesForBinary(path)
+			if err != nil {
+				return "", err
+			}
+			files = append(files, deps...)
+		}
+	}
+	for _, extra := range extras {
 		if _, err := os.Stat(extra); err == nil {
 			files = append(files, extra)
 		}
@@ -138,17 +156,24 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 		return "", err
 	}
 
-	if err := writeSandboxConfig(root, mitmCAPEM); err != nil {
+	if err := writeSandboxConfig(root, mitmCAPEM, mode); err != nil {
 		return "", err
 	}
 
 	return root, nil
 }
 
-func writeSandboxConfig(root string, mitmCAPEM []byte) error {
+func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
+	nsswitchContent := "hosts: files\n"
+	if normalizeTrafficMode(mode) == TrafficModeTransparent {
+		nsswitchContent = "hosts: files dns\n"
+	}
 	files := map[string]string{
 		"/etc/hosts":         "127.0.0.1 localhost\n::1 localhost\n",
-		"/etc/nsswitch.conf": "hosts: files\n",
+		"/etc/nsswitch.conf": nsswitchContent,
+	}
+	if normalizeTrafficMode(mode) == TrafficModeTransparent {
+		files["/etc/resolv.conf"] = "nameserver 127.0.0.1\noptions ndots:1\n"
 	}
 	if len(mitmCAPEM) > 0 {
 		for _, path := range mitmTrustBundlePaths {
@@ -228,4 +253,42 @@ func sandboxPathInRoot(root, sandboxPath string) (string, error) {
 	}
 
 	return dest, nil
+}
+
+func nssModuleCandidatePaths(module string) []string {
+	var candidates []string
+	baseDirs := []string{"/usr/lib", "/lib", "/usr/lib64", "/lib64"}
+	for _, dir := range baseDirs {
+		candidates = append(candidates, filepath.Join(dir, module))
+	}
+	for _, root := range []string{"/usr/lib", "/lib"} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		var multiarch []string
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasSuffix(name, "-linux-gnu") {
+				multiarch = append(multiarch, filepath.Join(root, name))
+			}
+		}
+		slices.Sort(multiarch)
+		for _, dir := range multiarch {
+			candidates = append(candidates, filepath.Join(dir, module))
+		}
+	}
+	return candidates
+}
+
+func firstExistingPath(paths []string) (string, bool) {
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return path, true
+		}
+	}
+	return "", false
 }

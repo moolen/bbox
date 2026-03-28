@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/pem"
 	"errors"
@@ -26,6 +27,8 @@ import (
 	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/http2"
 )
 
 func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
@@ -65,6 +68,604 @@ func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
 	}
 
 	closeReadLoop(t, peer, errCh)
+}
+
+func TestRunTransparentRequiresAllListeners(t *testing.T) {
+	t.Parallel()
+
+	blockedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockedListener.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = Run(ctx, Config{
+		Bridge:      newTestBridge(),
+		TrafficMode: TrafficModeTransparent,
+		MITMEnabled: true,
+		DNSAddr:     "127.0.0.1:0",
+		HTTPAddr:    blockedListener.Addr().String(),
+		HTTPSAddr:   "127.0.0.1:0",
+	})
+	if err == nil {
+		t.Fatal("expected transparent startup to fail when a listener cannot bind")
+	}
+}
+
+func TestTransparentDNSReturnsLoopbackForAQuery(t *testing.T) {
+	dnsAddr, shutdown := startTransparentRuntime(t)
+	defer shutdown()
+
+	response := exchangeTransparentDNS(t, "udp", dnsAddr, dnsmessage.TypeA)
+
+	if got := response.Header.RCode; got != dnsmessage.RCodeSuccess {
+		t.Fatalf("unexpected DNS rcode: got %v want %v", got, dnsmessage.RCodeSuccess)
+	}
+	if len(response.Answers) != 1 {
+		t.Fatalf("unexpected number of answers: got %d want 1", len(response.Answers))
+	}
+
+	answer, ok := response.Answers[0].Body.(*dnsmessage.AResource)
+	if !ok {
+		t.Fatalf("unexpected answer type: got %T", response.Answers[0].Body)
+	}
+	if got := net.IP(answer.A[:]).String(); got != "127.0.0.1" {
+		t.Fatalf("unexpected A record: got %q want %q", got, "127.0.0.1")
+	}
+}
+
+func TestTransparentDNSReturnsEmptySuccessForAAAAQuery(t *testing.T) {
+	dnsAddr, shutdown := startTransparentRuntime(t)
+	defer shutdown()
+
+	response := exchangeTransparentDNS(t, "udp", dnsAddr, dnsmessage.TypeAAAA)
+
+	if got := response.Header.RCode; got != dnsmessage.RCodeSuccess {
+		t.Fatalf("unexpected DNS rcode: got %v want %v", got, dnsmessage.RCodeSuccess)
+	}
+	if len(response.Answers) != 0 {
+		t.Fatalf("unexpected number of answers: got %d want 0", len(response.Answers))
+	}
+}
+
+func TestTransparentDNSRefusesUnsupportedQueryType(t *testing.T) {
+	dnsAddr, shutdown := startTransparentRuntime(t)
+	defer shutdown()
+
+	response := exchangeTransparentDNS(t, "udp", dnsAddr, dnsmessage.TypeMX)
+
+	if got := response.Header.RCode; got != dnsmessage.RCodeRefused {
+		t.Fatalf("unexpected DNS rcode: got %v want %v", got, dnsmessage.RCodeRefused)
+	}
+	if len(response.Answers) != 0 {
+		t.Fatalf("unexpected number of answers: got %d want 0", len(response.Answers))
+	}
+}
+
+func TestTransparentDNSHandlesTCPAndUDP(t *testing.T) {
+	dnsAddr, shutdown := startTransparentRuntime(t)
+	defer shutdown()
+
+	for _, network := range []string{"udp", "tcp"} {
+		network := network
+		t.Run(network, func(t *testing.T) {
+			response := exchangeTransparentDNS(t, network, dnsAddr, dnsmessage.TypeA)
+
+			if got := response.Header.RCode; got != dnsmessage.RCodeSuccess {
+				t.Fatalf("unexpected DNS rcode: got %v want %v", got, dnsmessage.RCodeSuccess)
+			}
+			if len(response.Answers) != 1 {
+				t.Fatalf("unexpected number of answers: got %d want 1", len(response.Answers))
+			}
+
+			answer, ok := response.Answers[0].Body.(*dnsmessage.AResource)
+			if !ok {
+				t.Fatalf("unexpected answer type: got %T", response.Answers[0].Body)
+			}
+			if got := net.IP(answer.A[:]).String(); got != "127.0.0.1" {
+				t.Fatalf("unexpected A record: got %q want %q", got, "127.0.0.1")
+			}
+		})
+	}
+}
+
+func TestTransparentHTTPRejectsMissingHost(t *testing.T) {
+	ready, shutdown := startTransparentRuntimeReady(t)
+	defer shutdown()
+
+	conn, err := net.Dial("tcp", ready.HTTPAddr)
+	if err != nil {
+		t.Fatalf("dial transparent HTTP listener: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := io.WriteString(conn, "GET /missing-host HTTP/1.0\r\n\r\n"); err != nil {
+		t.Fatalf("write transparent HTTP request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read transparent HTTP response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status: got %d want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if !strings.Contains(string(body), "host is required") {
+		t.Fatalf("unexpected response body: %q", string(body))
+	}
+}
+
+func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
+	bridgeSide, peerSide := net.Pipe()
+	defer peerSide.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Config{
+			Bridge:      bridgeSide,
+			TrafficMode: TrafficModeTransparent,
+			DNSAddr:     "127.0.0.1:0",
+			HTTPAddr:    "127.0.0.1:0",
+			HTTPSAddr:   "127.0.0.1:0",
+			Logger:      log.New(io.Discard, "", 0),
+		})
+	}()
+
+	enc := gob.NewEncoder(peerSide)
+	dec := gob.NewDecoder(peerSide)
+	if err := enc.Encode(&helperproto.Envelope{
+		ID: 1,
+		Hello: &helperproto.Hello{
+			ProtocolVersion: helperproto.ProtocolVersion,
+			SandboxID:       "transparent-http-test",
+		},
+	}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	var ready helperproto.Envelope
+	if err := dec.Decode(&ready); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if ready.Ready == nil {
+		t.Fatalf("expected ready response, got %#v", ready)
+	}
+	if ready.Ready.HTTPAddr == "" {
+		t.Fatal("expected transparent runtime to report an HTTP address")
+	}
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var req helperproto.Envelope
+		if err := dec.Decode(&req); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if req.ProxyRequest == nil {
+			peerErrCh <- fmt.Errorf("expected proxy request, got %#v", req)
+			return
+		}
+		if req.ProxyRequest.Method != http.MethodGet {
+			peerErrCh <- fmt.Errorf("unexpected method: got %q", req.ProxyRequest.Method)
+			return
+		}
+		if req.ProxyRequest.URL != "http://example.com/normalized/path?hello=world" {
+			peerErrCh <- fmt.Errorf("unexpected normalized URL: got %q", req.ProxyRequest.URL)
+			return
+		}
+		if got := req.ProxyRequest.Header.Get("Proxy-Connection"); got != "" {
+			peerErrCh <- fmt.Errorf("expected Proxy-Connection header to be stripped, got %q", got)
+			return
+		}
+		if got := req.ProxyRequest.Header.Get("X-Test"); got != "present" {
+			peerErrCh <- fmt.Errorf("expected X-Test header to survive, got %q", got)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: req.ID,
+			ProxyResponse: &helperproto.ProxyResponse{
+				StatusCode: http.StatusNoContent,
+				Header:     make(http.Header),
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+		peerErrCh <- nil
+	}()
+
+	conn, err := net.Dial("tcp", ready.Ready.HTTPAddr)
+	if err != nil {
+		t.Fatalf("dial transparent HTTP listener: %v", err)
+	}
+	defer conn.Close()
+
+	request := strings.Join([]string{
+		"GET /normalized/path?hello=world HTTP/1.1",
+		"Host: example.com",
+		"Proxy-Connection: keep-alive",
+		"X-Test: present",
+		"",
+		"",
+	}, "\r\n")
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatalf("write transparent HTTP request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read transparent HTTP response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected status: got %d want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for proxy request")
+	}
+
+	cancel()
+	_ = peerSide.Close()
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent runtime to exit")
+	}
+}
+
+func TestTransparentHTTPSRejectsMissingSNI(t *testing.T) {
+	ready, _, _, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var env helperproto.Envelope
+		if err := dec.Decode(&env); err == nil {
+			peerErrCh <- fmt.Errorf("unexpected envelope without SNI: %#v", env)
+			return
+		}
+		peerErrCh <- nil
+	}()
+
+	conn, err := net.Dial("tcp", ready.HTTPSAddr)
+	if err != nil {
+		t.Fatalf("dial transparent HTTPS listener: %v", err)
+	}
+	defer conn.Close()
+
+	tlsConn := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	err = tlsConn.Handshake()
+	if err == nil {
+		_ = tlsConn.Close()
+		t.Fatal("expected transparent HTTPS handshake without SNI to fail")
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestTransparentHTTPSRequestsLeafCertForSNIHost(t *testing.T) {
+	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	conn, err := tls.Dial("tcp", ready.HTTPSAddr, &tls.Config{
+		RootCAs:    roots,
+		ServerName: "example.com",
+		NextProtos: []string{"http/1.1"},
+	})
+	if err != nil {
+		t.Fatalf("dial transparent HTTPS listener with SNI: %v", err)
+	}
+	_ = conn.Close()
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for leaf cert request")
+	}
+}
+
+func TestTransparentHTTPSForwardsDecryptedRequestsThroughMITMPath(t *testing.T) {
+	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var mitmReq helperproto.Envelope
+		if err := dec.Decode(&mitmReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if mitmReq.MITMRequest == nil {
+			peerErrCh <- fmt.Errorf("expected MITM request, got %#v", mitmReq)
+			return
+		}
+		if mitmReq.MITMRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("unexpected MITM host: %q", mitmReq.MITMRequest.Host)
+			return
+		}
+		if mitmReq.MITMRequest.Path != "/allowed" || mitmReq.MITMRequest.RawQuery != "via=transparent" {
+			peerErrCh <- fmt.Errorf("unexpected MITM path/query: %#v", mitmReq.MITMRequest)
+			return
+		}
+		if mitmReq.MITMRequest.Authority != "example.com:443" {
+			peerErrCh <- fmt.Errorf("unexpected MITM authority: %q", mitmReq.MITMRequest.Authority)
+			return
+		}
+		if mitmReq.MITMRequest.Proto != "HTTP/1.1" {
+			peerErrCh <- fmt.Errorf("unexpected MITM proto: %q", mitmReq.MITMRequest.Proto)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: mitmReq.ID,
+			MITMResponse: &helperproto.MITMResponse{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"X-Intercepted": []string{"yes"}},
+				Body:       []byte("transparent ok"),
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	conn, err := tls.Dial("tcp", ready.HTTPSAddr, &tls.Config{
+		RootCAs:    roots,
+		ServerName: "example.com",
+		NextProtos: []string{"http/1.1"},
+	})
+	if err != nil {
+		t.Fatalf("dial transparent HTTPS listener: %v", err)
+	}
+	defer conn.Close()
+
+	request := strings.Join([]string{
+		"GET /allowed?via=transparent HTTP/1.1",
+		"Host: example.com",
+		"",
+		"",
+	}, "\r\n")
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatalf("write transparent HTTPS request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read transparent HTTPS response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Intercepted"); got != "yes" {
+		t.Fatalf("unexpected header: %q", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "transparent ok" {
+		t.Fatalf("unexpected body: %q", string(body))
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent HTTPS bridge peer")
+	}
+}
+
+func TestTransparentHTTPSSupportsHTTP2MITM(t *testing.T) {
+	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var mitmReq helperproto.Envelope
+		if err := dec.Decode(&mitmReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if mitmReq.MITMRequest == nil {
+			peerErrCh <- fmt.Errorf("expected MITM request, got %#v", mitmReq)
+			return
+		}
+		if mitmReq.MITMRequest.Proto != "HTTP/2.0" {
+			peerErrCh <- fmt.Errorf("expected HTTP/2.0 request, got %#v", mitmReq.MITMRequest)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: mitmReq.ID,
+			MITMResponse: &helperproto.MITMResponse{
+				StatusCode: http.StatusOK,
+				Body:       []byte("h2 transparent ok"),
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	transport := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			rawConn, err := d.DialContext(ctx, network, ready.HTTPSAddr)
+			if err != nil {
+				return nil, err
+			}
+
+			tlsCfg := cfg.Clone()
+			tlsCfg.RootCAs = roots
+			tlsCfg.ServerName = "example.com"
+			tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+
+			tlsConn := tls.Client(rawConn, tlsCfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+	}
+
+	client := &http.Client{Transport: transport}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/h2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("transparent HTTPS HTTP/2 GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "h2 transparent ok" {
+		t.Fatalf("unexpected body: %q", string(body))
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent HTTPS HTTP/2 bridge peer")
+	}
+}
+
+func TestProxyHandlerRejectsOriginFormRequest(t *testing.T) {
+	bridgeSide, peerSide := net.Pipe()
+	defer bridgeSide.Close()
+	defer peerSide.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/origin", nil)
+	req.Host = "example.com"
+	w := httptest.NewRecorder()
+
+	newBridge(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111").proxyHandler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "absolute URL") {
+		t.Fatalf("unexpected response body: %q", w.Body.String())
+	}
 }
 
 func TestProxyHandlerMITMHTTP1ForwardsInterceptedRequest(t *testing.T) {
@@ -1433,6 +2034,250 @@ func startReadLoop(t *testing.T, proxyAddr string) (net.Conn, net.Conn, <-chan e
 	return bridgeSide, peerSide, errCh
 }
 
+func startTransparentRuntime(t *testing.T) (string, func()) {
+	t.Helper()
+
+	ready, shutdown := startTransparentRuntimeReady(t)
+	return ready.DNSAddr, shutdown
+}
+
+func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
+	t.Helper()
+
+	bridgeSide, peerSide := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- Run(ctx, Config{
+			Bridge:      bridgeSide,
+			TrafficMode: TrafficModeTransparent,
+			DNSAddr:     "127.0.0.1:0",
+			HTTPAddr:    "127.0.0.1:0",
+			HTTPSAddr:   "127.0.0.1:0",
+			Logger:      log.New(io.Discard, "", 0),
+		})
+	}()
+
+	enc := gob.NewEncoder(peerSide)
+	dec := gob.NewDecoder(peerSide)
+	if err := enc.Encode(&helperproto.Envelope{
+		ID: 1,
+		Hello: &helperproto.Hello{
+			ProtocolVersion: helperproto.ProtocolVersion,
+			SandboxID:       "transparent-dns-test",
+		},
+	}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	var ready helperproto.Envelope
+	if err := dec.Decode(&ready); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if ready.Ready == nil {
+		t.Fatalf("expected ready response, got %#v", ready)
+	}
+	if ready.Ready.DNSAddr == "" {
+		t.Fatal("expected transparent runtime to report a DNS address")
+	}
+	if ready.Ready.HTTPAddr == "" {
+		t.Fatal("expected transparent runtime to report an HTTP address")
+	}
+	if ready.Ready.HTTPSAddr == "" {
+		t.Fatal("expected transparent runtime to report an HTTPS address")
+	}
+
+	shutdown := func() {
+		cancel()
+		_ = peerSide.Close()
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+				t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for transparent runtime to exit")
+		}
+	}
+
+	return ready.Ready, shutdown
+}
+
+func startTransparentRuntimeBridge(t *testing.T) (*helperproto.Ready, net.Conn, *gob.Encoder, *gob.Decoder, func()) {
+	t.Helper()
+
+	bridgeSide, peerSide := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- Run(ctx, Config{
+			Bridge:      bridgeSide,
+			TrafficMode: TrafficModeTransparent,
+			MITMEnabled: true,
+			DNSAddr:     "127.0.0.1:0",
+			HTTPAddr:    "127.0.0.1:0",
+			HTTPSAddr:   "127.0.0.1:0",
+			Logger:      log.New(io.Discard, "", 0),
+		})
+	}()
+
+	enc := gob.NewEncoder(peerSide)
+	dec := gob.NewDecoder(peerSide)
+	if err := enc.Encode(&helperproto.Envelope{
+		ID: 1,
+		Hello: &helperproto.Hello{
+			ProtocolVersion: helperproto.ProtocolVersion,
+			SandboxID:       "transparent-https-test",
+		},
+	}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	var ready helperproto.Envelope
+	if err := dec.Decode(&ready); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if ready.Ready == nil {
+		t.Fatalf("expected ready response, got %#v", ready)
+	}
+	if ready.Ready.HTTPSAddr == "" {
+		t.Fatal("expected transparent runtime to report an HTTPS address")
+	}
+
+	shutdown := func() {
+		cancel()
+		_ = peerSide.Close()
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+				t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for transparent runtime to exit")
+		}
+	}
+
+	return ready.Ready, peerSide, enc, dec, shutdown
+}
+
+func exchangeTransparentDNS(t *testing.T, network, addr string, queryType dnsmessage.Type) dnsmessage.Message {
+	t.Helper()
+
+	query := packTransparentDNSQuery(t, queryType)
+
+	switch network {
+	case "udp":
+		return exchangeTransparentDNSUDP(t, addr, query)
+	case "tcp":
+		return exchangeTransparentDNSTCP(t, addr, query)
+	default:
+		t.Fatalf("unsupported DNS transport %q", network)
+		return dnsmessage.Message{}
+	}
+}
+
+func packTransparentDNSQuery(t *testing.T, queryType dnsmessage.Type) []byte {
+	t.Helper()
+
+	name, err := dnsmessage.NewName("example.com.")
+	if err != nil {
+		t.Fatalf("construct DNS name: %v", err)
+	}
+
+	query := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 7,
+			RecursionDesired:   true,
+			Response:           false,
+			Authoritative:      false,
+			RecursionAvailable: false,
+		},
+		Questions: []dnsmessage.Question{{
+			Name:  name,
+			Type:  queryType,
+			Class: dnsmessage.ClassINET,
+		}},
+	}
+
+	payload, err := query.Pack()
+	if err != nil {
+		t.Fatalf("pack DNS query: %v", err)
+	}
+
+	return payload
+}
+
+func exchangeTransparentDNSUDP(t *testing.T, addr string, query []byte) dnsmessage.Message {
+	t.Helper()
+
+	conn, err := net.DialTimeout("udp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial UDP DNS listener: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set UDP deadline: %v", err)
+	}
+	if _, err := conn.Write(query); err != nil {
+		t.Fatalf("write UDP DNS query: %v", err)
+	}
+
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read UDP DNS response: %v", err)
+	}
+
+	return unpackTransparentDNSResponse(t, buf[:n])
+}
+
+func exchangeTransparentDNSTCP(t *testing.T, addr string, query []byte) dnsmessage.Message {
+	t.Helper()
+
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial TCP DNS listener: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set TCP deadline: %v", err)
+	}
+
+	frame := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(query)))
+	copy(frame[2:], query)
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("write TCP DNS query: %v", err)
+	}
+
+	var lengthBuf [2]byte
+	if _, err := io.ReadFull(conn, lengthBuf[:]); err != nil {
+		t.Fatalf("read TCP DNS response length: %v", err)
+	}
+	responseLen := int(binary.BigEndian.Uint16(lengthBuf[:]))
+	response := make([]byte, responseLen)
+	if _, err := io.ReadFull(conn, response); err != nil {
+		t.Fatalf("read TCP DNS response: %v", err)
+	}
+
+	return unpackTransparentDNSResponse(t, response)
+}
+
+func unpackTransparentDNSResponse(t *testing.T, payload []byte) dnsmessage.Message {
+	t.Helper()
+
+	var response dnsmessage.Message
+	if err := response.Unpack(payload); err != nil {
+		t.Fatalf("unpack DNS response: %v", err)
+	}
+
+	return response
+}
+
 func issueTestLeafCertPEM(t *testing.T, host string) (*x509.CertPool, []byte, []byte) {
 	t.Helper()
 
@@ -1501,6 +2346,24 @@ func closeReadLoop(t *testing.T, peer net.Conn, errCh <-chan error) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for readLoop to exit")
 	}
+}
+
+type testBridge struct{}
+
+func newTestBridge() io.ReadWriteCloser {
+	return testBridge{}
+}
+
+func (testBridge) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (testBridge) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (testBridge) Close() error {
+	return nil
 }
 
 type hijackableResponseWriter struct {
