@@ -233,6 +233,17 @@ func (m *ProxyManager) dialTunnel(ctx context.Context, host string, port int) (n
 	return dialTunnelFn(ctx, host, port)
 }
 
+// CACertPEM returns the manager's MITM CA certificate in PEM form.
+func (m *ProxyManager) CACertPEM() []byte {
+	if m == nil || len(m.caCertPEM) == 0 {
+		return nil
+	}
+
+	out := make([]byte, len(m.caCertPEM))
+	copy(out, m.caCertPEM)
+	return out
+}
+
 // Close stops all registered sandboxes, closes idle outbound proxy connections,
 // and removes temporary helper build artifacts.
 func (m *ProxyManager) Close() error {

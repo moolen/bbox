@@ -15,6 +15,9 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	if err != nil {
 		return nil, err
 	}
+	if opts.MITM.MaxRequestBodyBytes < 0 {
+		return nil, fmt.Errorf("MITM max request body bytes must be non-negative")
+	}
 
 	listenAddr := strings.TrimSpace(opts.ListenAddr)
 	if listenAddr == "" {
@@ -26,5 +29,6 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 
 	manager := newProxyManager(policy)
 	manager.listenAddr = listenAddr
+	manager.mitm = opts.MITM
 	return manager, nil
 }

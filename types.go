@@ -14,6 +14,16 @@ type ProxyOptions struct {
 	// NetworkPolicy is the default policy inherited by sandboxes that do not
 	// supply their own SandboxOptions.Policy.
 	NetworkPolicy NetworkPolicy
+	// MITM configures proxy-wide man-in-the-middle handling.
+	MITM MITMOptions
+}
+
+// MITMOptions configures manager-wide MITM behavior.
+type MITMOptions struct {
+	// Enabled enables MITM handling for HTTP CONNECT traffic.
+	Enabled bool
+	// MaxRequestBodyBytes caps buffered request bodies when inspecting traffic.
+	MaxRequestBodyBytes int64
 }
 
 // Mount binds a host path into the sandbox.
@@ -86,6 +96,8 @@ type ProxyManager struct {
 	sandboxPolicies map[string]*compiledPolicy
 	transport       *http.Transport
 	listenAddr      string
+	mitm            MITMOptions
+	caCertPEM       []byte
 	nextSandboxID   atomic.Uint64
 
 	helperBinaryOnce sync.Once
