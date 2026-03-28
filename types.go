@@ -92,7 +92,7 @@ type SandboxOptions struct {
 	Mounts []Mount
 	// Env adds process environment entries for runs in this sandbox.
 	Env []string
-	// TrafficMode selects proxy env injection vs transparent mode.
+	// TrafficMode selects proxy env injection vs transparent mode (defaults to proxy).
 	TrafficMode TrafficMode
 	// Policy overrides the manager default for this sandbox when non-zero.
 	Policy NetworkPolicy

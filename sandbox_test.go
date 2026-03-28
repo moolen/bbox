@@ -104,9 +104,29 @@ func TestNilSandboxProxyAccessorsReturnEmptyString(t *testing.T) {
 }
 
 func TestTrafficModeDefaultsToProxy(t *testing.T) {
-	if got := normalizeTrafficMode(""); got != TrafficModeProxy {
-		t.Fatalf("expected traffic mode to default to proxy, got %q", got)
-	}
+	t.Run("defaults", func(t *testing.T) {
+		if got := normalizeTrafficMode(""); got != TrafficModeProxy {
+			t.Fatalf("expected traffic mode to default to proxy, got %q", got)
+		}
+	})
+
+	t.Run("normalizes", func(t *testing.T) {
+		if got := normalizeTrafficMode("  ProXy "); got != TrafficModeProxy {
+			t.Fatalf("expected proxy normalization, got %q", got)
+		}
+		if got := normalizeTrafficMode("  TRANSPARENT "); got != TrafficModeTransparent {
+			t.Fatalf("expected transparent normalization, got %q", got)
+		}
+	})
+
+	t.Run("runEnvRejectsInvalid", func(t *testing.T) {
+		defer func() {
+			if recovered := recover(); recovered == nil {
+				t.Fatal("expected runEnvForTrafficMode to panic on invalid mode")
+			}
+		}()
+		_ = runEnvForTrafficMode(TrafficMode("unknown"), "127.0.0.1:40123", nil)
+	})
 }
 
 func TestValidateSandboxOptionsRejectsUnknownTrafficMode(t *testing.T) {

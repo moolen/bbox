@@ -305,7 +305,8 @@ func normalizeTrafficMode(mode TrafficMode) TrafficMode {
 }
 
 func runEnvForTrafficMode(mode TrafficMode, proxyAddr string, extraEnv []string) []string {
-	switch normalizeTrafficMode(mode) {
+	normalized := normalizeTrafficMode(mode)
+	switch normalized {
 	case TrafficModeTransparent:
 		return mergeEnv(
 			filterReservedEnv(extraEnv),
@@ -313,8 +314,10 @@ func runEnvForTrafficMode(mode TrafficMode, proxyAddr string, extraEnv []string)
 				"PATH=/usr/bin",
 			},
 		)
-	default:
+	case TrafficModeProxy:
 		return runEnvForProxyAddr(proxyAddr, extraEnv)
+	default:
+		panic(fmt.Sprintf("unhandled traffic mode %q", normalized))
 	}
 }
 
