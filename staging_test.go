@@ -164,12 +164,39 @@ func TestWriteSandboxConfigWritesTransparentResolvConf(t *testing.T) {
 	if string(content) != want {
 		t.Fatalf("unexpected resolv.conf content: got %q want %q", string(content), want)
 	}
+
+	nsswitchPath := filepath.Join(root, "etc", "nsswitch.conf")
+	nsswitchContent, err := os.ReadFile(nsswitchPath)
+	if err != nil {
+		t.Fatalf("expected nsswitch.conf at %q: %v", nsswitchPath, err)
+	}
+	if string(nsswitchContent) != "hosts: files dns\n" {
+		t.Fatalf("unexpected nsswitch.conf content: got %q", string(nsswitchContent))
+	}
 }
 
 func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
 	args := buildBwrapArgs("/tmp/root", "/app/bbox-helper", "127.0.0.1:31111", MITMOptions{}, nil, TrafficModeTransparent)
 	if !containsArgSequence(args, []string{"--traffic-mode", "transparent"}) {
 		t.Fatalf("expected args to include --traffic-mode transparent, got %v", args)
+	}
+}
+
+func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
+	libPath := "/usr/lib/libnss_dns.so.2"
+	if _, err := os.Stat(libPath); err != nil {
+		t.Skipf("skip: %s not available", libPath)
+	}
+
+	root, err := stageSandboxRoot(SandboxOptions{}, "/bin/sh", nil, TrafficModeTransparent)
+	if err != nil {
+		t.Fatalf("stageSandboxRoot failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	expected := filepath.Join(root, strings.TrimPrefix(libPath, string(filepath.Separator)))
+	if _, err := os.Stat(expected); err != nil {
+		t.Fatalf("expected staged libnss_dns at %q: %v", expected, err)
 	}
 }
 

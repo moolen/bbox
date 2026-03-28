@@ -118,10 +118,14 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 	}
 	files = append(files, helperRuntimeFiles...)
 
-	for _, extra := range []string{
+	extras := []string{
 		"/lib64/ld-linux-x86-64.so.2",
 		"/usr/lib/libnss_files.so.2",
-	} {
+	}
+	if normalizeTrafficMode(mode) == TrafficModeTransparent {
+		extras = append(extras, "/usr/lib/libnss_dns.so.2")
+	}
+	for _, extra := range extras {
 		if _, err := os.Stat(extra); err == nil {
 			files = append(files, extra)
 		}
@@ -146,9 +150,13 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 }
 
 func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
+	nsswitchContent := "hosts: files\n"
+	if normalizeTrafficMode(mode) == TrafficModeTransparent {
+		nsswitchContent = "hosts: files dns\n"
+	}
 	files := map[string]string{
 		"/etc/hosts":         "127.0.0.1 localhost\n::1 localhost\n",
-		"/etc/nsswitch.conf": "hosts: files\n",
+		"/etc/nsswitch.conf": nsswitchContent,
 	}
 	if normalizeTrafficMode(mode) == TrafficModeTransparent {
 		files["/etc/resolv.conf"] = "nameserver 127.0.0.1\noptions ndots:1\n"
