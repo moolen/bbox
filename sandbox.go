@@ -181,7 +181,7 @@ func (s *Sandbox) ProxyURL() string {
 	return proxyURL(s.proxyAddr)
 }
 
-// AccessedDomains returns an audit snapshot of accessed domains.
+// AccessedDomains returns the sandbox audit snapshot when available.
 func (s *Sandbox) AccessedDomains() []AccessedDomain {
 	if s == nil || s.manager == nil {
 		return []AccessedDomain{}

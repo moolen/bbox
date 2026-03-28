@@ -16,6 +16,8 @@ type stdoutJSONAccessLogger struct {
 	enc *json.Encoder
 }
 
+var sharedStdoutAccessLogger = newStdoutJSONAccessLogger()
+
 func newStdoutJSONAccessLogger() *stdoutJSONAccessLogger {
 	return &stdoutJSONAccessLogger{enc: json.NewEncoder(os.Stdout)}
 }
@@ -52,7 +54,7 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	manager.listenAddr = listenAddr
 	manager.mitm = opts.MITM
 	if opts.AccessLogger == nil {
-		manager.accessLogger = newStdoutJSONAccessLogger()
+		manager.accessLogger = sharedStdoutAccessLogger
 	} else {
 		manager.accessLogger = opts.AccessLogger
 	}

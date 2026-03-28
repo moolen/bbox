@@ -37,6 +37,24 @@ func TestNewProxyManagerPreservesInjectedAccessLogger(t *testing.T) {
 	}
 }
 
+func TestNewProxyManagerSharesDefaultAccessLogger(t *testing.T) {
+	managerA, err := NewProxyManager(ProxyOptions{})
+	if err != nil {
+		t.Fatalf("create manager A: %v", err)
+	}
+	defer managerA.Close()
+
+	managerB, err := NewProxyManager(ProxyOptions{})
+	if err != nil {
+		t.Fatalf("create manager B: %v", err)
+	}
+	defer managerB.Close()
+
+	if managerA.accessLogger != managerB.accessLogger {
+		t.Fatal("expected default access logger to be shared across managers")
+	}
+}
+
 func TestNilSandboxAccessedDomains(t *testing.T) {
 	var sandbox Sandbox
 
