@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -60,30 +58,16 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 type bridge struct {
-	conn                io.ReadWriteCloser
-	enc                 *gob.Encoder
-	dec                 *gob.Decoder
+	runtimeBridge       *bridgepkg.RuntimeBridge
 	logger              *log.Logger
-	proxyAddr           string
 	dnsAddr             string
 	httpAddr            string
 	httpsAddr           string
 	mitmEnabled         bool
 	maxRequestBodyBytes int64
-	sendMu              sync.Mutex
-	pending             map[uint64]chan helperproto.Envelope
-	pendMu              sync.Mutex
-	tunnels             map[uint64]*tunnelDelivery
-	tunnelMu            sync.Mutex
-	nextID              atomic.Uint64
 	execMu              sync.Mutex
 	execStateMu         sync.Mutex
 	currentExec         *execSession
-}
-
-type tunnelDelivery struct {
-	ch     chan helperproto.Envelope
-	closed chan struct{}
 }
 
 type execSession struct {
@@ -94,59 +78,15 @@ type execSession struct {
 
 func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
 	return &bridge{
-		conn:      conn,
-		enc:       gob.NewEncoder(conn),
-		dec:       gob.NewDecoder(conn),
-		logger:    logger,
-		proxyAddr: proxyAddr,
-		pending:   make(map[uint64]chan helperproto.Envelope),
-		tunnels:   make(map[uint64]*tunnelDelivery),
+		runtimeBridge: bridgepkg.New(conn, logger, proxyAddr),
+		logger:        logger,
 	}
 }
 
 func (b *bridge) readLoop(ctx context.Context) error {
-	for {
-		var env helperproto.Envelope
-		if err := b.dec.Decode(&env); err != nil {
-			return err
-		}
-
-		switch {
-		case env.Hello != nil:
-			if err := b.handleHello(env); err != nil {
-				return err
-			}
-		case env.ProxyResponse != nil, env.MITMResponse != nil, env.LeafCertResponse != nil:
-			b.deliver(env)
-		case env.ConnectResponse != nil:
-			b.deliver(env)
-		case env.TunnelFrame != nil, env.TunnelClose != nil:
-			b.deliverTunnel(env)
-		case env.ExecRequest != nil:
-			go b.handleExec(ctx, env.ID, *env.ExecRequest)
-		case env.ExecInput != nil:
-			b.handleExecInput(*env.ExecInput)
-		default:
-			b.logger.Printf("ignoring unsupported helper envelope kind %q", env.Kind())
-		}
-	}
-}
-
-func (b *bridge) handleHello(env helperproto.Envelope) error {
-	if env.Hello.ProtocolVersion != helperproto.ProtocolVersion {
-		return fmt.Errorf("unsupported protocol version %d", env.Hello.ProtocolVersion)
-	}
-
-	return b.send(helperproto.Envelope{
-		ID: env.ID,
-		Ready: &helperproto.Ready{
-			ProtocolVersion: helperproto.ProtocolVersion,
-			ProxyAddr:       b.proxyAddr,
-			DNSAddr:         b.dnsAddr,
-			HTTPAddr:        b.httpAddr,
-			HTTPSAddr:       b.httpsAddr,
-		},
-	})
+	b.runtimeBridge.SetReadyAddrs(b.dnsAddr, b.httpAddr, b.httpsAddr)
+	b.runtimeBridge.SetExecHandlers(b.handleExec, b.handleExecInput)
+	return b.runtimeBridge.ReadLoop(ctx)
 }
 
 func (b *bridge) proxyHandler() http.Handler {
@@ -457,294 +397,43 @@ func (b *bridge) handleConnect(w http.ResponseWriter, req *http.Request) {
 }
 
 func (b *bridge) proxyRoundTrip(ctx context.Context, req helperproto.ProxyRequest) (*helperproto.ProxyResponse, error) {
-	id := b.nextID.Add(1)
-	ch := make(chan helperproto.Envelope, 1)
-
-	b.pendMu.Lock()
-	b.pending[id] = ch
-	b.pendMu.Unlock()
-
-	defer func() {
-		b.pendMu.Lock()
-		delete(b.pending, id)
-		b.pendMu.Unlock()
-	}()
-
-	if err := b.send(helperproto.Envelope{
-		ID:           id,
-		ProxyRequest: &req,
-	}); err != nil {
-		return nil, err
-	}
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case env := <-ch:
-		if env.ProxyResponse == nil {
-			return nil, fmt.Errorf("bridge response %d did not contain a proxy response", id)
-		}
-		if env.ProxyResponse.Error != "" {
-			return nil, errors.New(env.ProxyResponse.Error)
-		}
-		return env.ProxyResponse, nil
-	}
+	return b.runtimeBridge.ProxyRoundTrip(ctx, req)
 }
 
 func (b *bridge) connect(ctx context.Context, host string, port int) (uint64, chan helperproto.Envelope, *helperproto.ConnectResponse, error) {
-	id := b.nextID.Add(1)
-	ch := make(chan helperproto.Envelope, 1)
-	tunnelCh := b.registerTunnel(id)
-
-	b.pendMu.Lock()
-	b.pending[id] = ch
-	b.pendMu.Unlock()
-
-	defer func() {
-		b.pendMu.Lock()
-		delete(b.pending, id)
-		b.pendMu.Unlock()
-	}()
-
-	if err := b.send(helperproto.Envelope{
-		ID: id,
-		ConnectRequest: &helperproto.ConnectRequest{
-			Host: host,
-			Port: port,
-		},
-	}); err != nil {
-		b.unregisterTunnel(id)
-		return id, nil, nil, err
-	}
-
-	select {
-	case <-ctx.Done():
-		b.unregisterTunnel(id)
-		return id, nil, nil, ctx.Err()
-	case env := <-ch:
-		if env.ConnectResponse == nil {
-			b.unregisterTunnel(id)
-			return id, nil, nil, fmt.Errorf("bridge response %d did not contain a connect response", id)
-		}
-		return id, tunnelCh, env.ConnectResponse, nil
-	}
+	return b.runtimeBridge.Connect(ctx, host, port)
 }
 
 func (b *bridge) authorizeConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
-	id := b.nextID.Add(1)
-	ch := make(chan helperproto.Envelope, 1)
-
-	b.pendMu.Lock()
-	b.pending[id] = ch
-	b.pendMu.Unlock()
-
-	defer func() {
-		b.pendMu.Lock()
-		delete(b.pending, id)
-		b.pendMu.Unlock()
-	}()
-
-	if err := b.send(helperproto.Envelope{
-		ID: id,
-		ConnectRequest: &helperproto.ConnectRequest{
-			Host: host,
-			Port: port,
-		},
-	}); err != nil {
-		return nil, err
-	}
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case env := <-ch:
-		if env.ConnectResponse == nil {
-			return nil, fmt.Errorf("bridge response %d did not contain a connect response", id)
-		}
-		return env.ConnectResponse, nil
-	}
+	return b.runtimeBridge.AuthorizeConnect(ctx, host, port)
 }
 
 func (b *bridge) requestLeafCert(ctx context.Context, host string) (tls.Certificate, error) {
-	id := b.nextID.Add(1)
-	ch := make(chan helperproto.Envelope, 1)
-
-	b.pendMu.Lock()
-	b.pending[id] = ch
-	b.pendMu.Unlock()
-
-	defer func() {
-		b.pendMu.Lock()
-		delete(b.pending, id)
-		b.pendMu.Unlock()
-	}()
-
-	if err := b.send(helperproto.Envelope{
-		ID: id,
-		LeafCertRequest: &helperproto.LeafCertRequest{
-			Host: host,
-		},
-	}); err != nil {
-		return tls.Certificate{}, err
-	}
-
-	select {
-	case <-ctx.Done():
-		return tls.Certificate{}, ctx.Err()
-	case env := <-ch:
-		if env.LeafCertResponse == nil {
-			return tls.Certificate{}, fmt.Errorf("bridge response %d did not contain a leaf cert response", id)
-		}
-		if env.LeafCertResponse.Error != "" {
-			return tls.Certificate{}, errors.New(env.LeafCertResponse.Error)
-		}
-		cert, err := tls.X509KeyPair(env.LeafCertResponse.CertPEM, env.LeafCertResponse.KeyPEM)
-		if err != nil {
-			return tls.Certificate{}, fmt.Errorf("parse leaf certificate key pair: %w", err)
-		}
-		return cert, nil
-	}
+	return b.runtimeBridge.RequestLeafCert(ctx, host)
 }
 
 func (b *bridge) mitmRoundTrip(ctx context.Context, req helperproto.MITMRequest) (*helperproto.MITMResponse, error) {
-	id := b.nextID.Add(1)
-	ch := make(chan helperproto.Envelope, 1)
-
-	b.pendMu.Lock()
-	b.pending[id] = ch
-	b.pendMu.Unlock()
-
-	defer func() {
-		b.pendMu.Lock()
-		delete(b.pending, id)
-		b.pendMu.Unlock()
-	}()
-
-	if err := b.send(helperproto.Envelope{
-		ID:          id,
-		MITMRequest: &req,
-	}); err != nil {
-		return nil, err
-	}
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case env := <-ch:
-		if env.MITMResponse == nil {
-			return nil, fmt.Errorf("bridge response %d did not contain a MITM response", id)
-		}
-		if env.MITMResponse.Error != "" && env.MITMResponse.StatusCode == 0 {
-			return nil, errors.New(env.MITMResponse.Error)
-		}
-		return env.MITMResponse, nil
-	}
-}
-
-func (b *bridge) deliver(env helperproto.Envelope) {
-	b.pendMu.Lock()
-	ch := b.pending[env.ID]
-	b.pendMu.Unlock()
-	if ch == nil {
-		b.logger.Printf("dropping bridge response for unknown request %d", env.ID)
-		return
-	}
-
-	select {
-	case ch <- env:
-	default:
-		b.logger.Printf("dropping duplicate bridge response for request %d", env.ID)
-	}
+	return b.runtimeBridge.MITMRoundTrip(ctx, req)
 }
 
 func (b *bridge) registerTunnel(id uint64) chan helperproto.Envelope {
-	delivery := &tunnelDelivery{
-		ch:     make(chan helperproto.Envelope, 32),
-		closed: make(chan struct{}),
-	}
-	b.tunnelMu.Lock()
-	b.tunnels[id] = delivery
-	b.tunnelMu.Unlock()
-	return delivery.ch
+	return b.runtimeBridge.RegisterTunnel(id)
 }
 
 func (b *bridge) unregisterTunnel(id uint64) {
-	b.tunnelMu.Lock()
-	delivery := b.tunnels[id]
-	delete(b.tunnels, id)
-	b.tunnelMu.Unlock()
-	if delivery != nil {
-		close(delivery.closed)
-	}
+	b.runtimeBridge.UnregisterTunnel(id)
 }
 
 func (b *bridge) deliverTunnel(env helperproto.Envelope) {
-	b.tunnelMu.Lock()
-	delivery := b.tunnels[env.ID]
-	b.tunnelMu.Unlock()
-	if delivery == nil {
-		b.logger.Printf("dropping tunnel message for unknown request %d", env.ID)
-		return
-	}
-
-	select {
-	case delivery.ch <- env:
-	case <-delivery.closed:
-		b.logger.Printf("dropping tunnel message for closed request %d", env.ID)
-	}
+	b.runtimeBridge.DeliverTunnel(env)
 }
 
 func (b *bridge) sendTunnelClose(id uint64, write bool, tunnelErr error) error {
-	closeErr := ""
-	if tunnelErr != nil && !errors.Is(tunnelErr, io.EOF) && !errors.Is(tunnelErr, net.ErrClosed) {
-		closeErr = tunnelErr.Error()
-	}
-	return b.send(helperproto.Envelope{
-		ID: id,
-		TunnelClose: &helperproto.TunnelClose{
-			Write: write,
-			Error: closeErr,
-		},
-	})
+	return b.runtimeBridge.SendTunnelClose(id, write, tunnelErr)
 }
 
 func (b *bridge) relayPayloadToTunnel(conn net.Conn, id uint64, bufferedPayload []byte) tunnelRelayResult {
-	if len(bufferedPayload) > 0 {
-		if sendErr := b.send(helperproto.Envelope{
-			ID: id,
-			TunnelFrame: &helperproto.TunnelFrame{
-				Data: append([]byte(nil), bufferedPayload...),
-			},
-		}); sendErr != nil {
-			return tunnelRelayResult{sendClose: true, err: sendErr, terminal: true}
-		}
-	}
-
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := conn.Read(buf)
-		if n > 0 {
-			if sendErr := b.send(helperproto.Envelope{
-				ID: id,
-				TunnelFrame: &helperproto.TunnelFrame{
-					Data: append([]byte(nil), buf[:n]...),
-				},
-			}); sendErr != nil {
-				return tunnelRelayResult{sendClose: true, err: sendErr, terminal: true}
-			}
-		}
-
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, io.EOF) {
-			return tunnelRelayResult{sendClose: true, write: true}
-		}
-		if errors.Is(err, net.ErrClosed) {
-			return tunnelRelayResult{}
-		}
-		return tunnelRelayResult{sendClose: true, err: err, terminal: true}
-	}
+	return tunnelRelayResultFromBridge(b.runtimeBridge.RelayPayloadToTunnel(conn, id, bufferedPayload))
 }
 
 func drainHijackBufferedBytes(rw *bufio.ReadWriter) ([]byte, error) {
@@ -764,46 +453,16 @@ func drainHijackBufferedBytes(rw *bufio.ReadWriter) ([]byte, error) {
 }
 
 func (b *bridge) relayTunnelToPayload(ctx context.Context, conn net.Conn, tunnelCh <-chan helperproto.Envelope) tunnelRelayResult {
-	for {
-		select {
-		case <-ctx.Done():
-			return tunnelRelayResult{}
-		case env := <-tunnelCh:
-			switch {
-			case env.TunnelFrame != nil:
-				if len(env.TunnelFrame.Data) == 0 {
-					continue
-				}
-				if err := writeAll(conn, env.TunnelFrame.Data); err != nil {
-					return tunnelRelayResult{sendClose: true, err: err, terminal: true}
-				}
-			case env.TunnelClose != nil:
-				if env.TunnelClose.Write {
-					if err := closePayloadWrite(conn); err != nil {
-						return tunnelRelayResult{sendClose: true, err: err, terminal: true}
-					}
-					return tunnelRelayResult{}
-				}
-				return tunnelRelayResult{terminal: true}
-			default:
-				b.logger.Printf("ignoring unexpected tunnel envelope kind %q", env.Kind())
-			}
-		}
-	}
+	return tunnelRelayResultFromBridge(b.runtimeBridge.RelayTunnelToPayload(ctx, conn, tunnelCh))
 }
 
-func writeAll(dst net.Conn, data []byte) error {
-	for len(data) > 0 {
-		n, err := dst.Write(data)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-		data = data[n:]
+func tunnelRelayResultFromBridge(result bridgepkg.TunnelRelayResult) tunnelRelayResult {
+	return tunnelRelayResult{
+		sendClose: result.SendClose,
+		write:     result.Write,
+		err:       result.Err,
+		terminal:  result.Terminal,
 	}
-	return nil
 }
 
 func (b *bridge) writeConnectError(conn net.Conn, statusCode int, message string) {
@@ -885,16 +544,6 @@ func (b *bridge) serveMITMConn(conn net.Conn, connectHost string, connectPort in
 	if serveErr != nil && !errors.Is(serveErr, io.EOF) && !errors.Is(serveErr, net.ErrClosed) {
 		b.logger.Printf("serve MITM connection: %v", serveErr)
 	}
-}
-
-func closePayloadWrite(conn net.Conn) error {
-	type closeWriter interface {
-		CloseWrite() error
-	}
-	if cw, ok := conn.(closeWriter); ok {
-		return cw.CloseWrite()
-	}
-	return conn.Close()
 }
 
 type preloadedConn struct {
@@ -1169,9 +818,7 @@ func maxUint16(value, fallback uint16) uint16 {
 }
 
 func (b *bridge) send(env helperproto.Envelope) error {
-	b.sendMu.Lock()
-	defer b.sendMu.Unlock()
-	return b.enc.Encode(&env)
+	return b.runtimeBridge.Send(env)
 }
 
 func rewriteProxyRequest(req *http.Request) (*http.Request, error) {

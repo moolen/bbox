@@ -1784,16 +1784,11 @@ func TestProxyHandlerConnectRelaysHijackerBufferedPayload(t *testing.T) {
 }
 
 func TestDeliverTunnelBackpressureDoesNotDropFrames(t *testing.T) {
-	bridgeSide, peerSide := net.Pipe()
-	defer bridgeSide.Close()
-	defer peerSide.Close()
-
-	bridge := newBridge(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111")
-	tunnelCh := bridge.registerTunnel(42)
-	defer bridge.unregisterTunnel(42)
+	bridge := newTestBridgeRuntime(t)
+	tunnelCh := bridge.RegisterTunnel(42)
 
 	for i := 0; i < cap(tunnelCh); i++ {
-		bridge.deliverTunnel(helperproto.Envelope{
+		bridge.DeliverTunnel(helperproto.Envelope{
 			ID: 42,
 			TunnelFrame: &helperproto.TunnelFrame{
 				Data: []byte{byte(i)},
@@ -1803,7 +1798,7 @@ func TestDeliverTunnelBackpressureDoesNotDropFrames(t *testing.T) {
 
 	blockedSendDone := make(chan struct{})
 	go func() {
-		bridge.deliverTunnel(helperproto.Envelope{
+		bridge.DeliverTunnel(helperproto.Envelope{
 			ID: 42,
 			TunnelFrame: &helperproto.TunnelFrame{
 				Data: []byte{0xff},
@@ -1835,6 +1830,27 @@ func TestDeliverTunnelBackpressureDoesNotDropFrames(t *testing.T) {
 	}
 	if !foundBlockedFrame {
 		t.Fatal("expected blocked frame to be delivered eventually, but it was lost")
+	}
+}
+
+func TestBridgeDeliversTunnelFramesToRegisteredChannel(t *testing.T) {
+	bridge := newTestBridgeRuntime(t)
+	ch := bridge.RegisterTunnel(42)
+
+	bridge.DeliverTunnel(helperproto.Envelope{
+		ID: 42,
+		TunnelFrame: &helperproto.TunnelFrame{
+			Data: []byte("ping"),
+		},
+	})
+
+	select {
+	case env := <-ch:
+		if string(env.TunnelFrame.Data) != "ping" {
+			t.Fatalf("got %q", string(env.TunnelFrame.Data))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for tunnel frame")
 	}
 }
 
@@ -1909,9 +1925,7 @@ func TestHandleConnectCleansUpTunnelWhenConnectEstablishedWriteFails(t *testing.
 		t.Fatal("timed out waiting for tunnel close after failed 200 write")
 	}
 
-	bridge.tunnelMu.Lock()
-	remaining := len(bridge.tunnels)
-	bridge.tunnelMu.Unlock()
+	remaining := bridge.runtimeBridge.TunnelCount()
 	if remaining != 0 {
 		t.Fatalf("expected tunnel registry cleanup after failed 200 write, still have %d tunnel(s)", remaining)
 	}
@@ -2059,18 +2073,14 @@ func TestProxyHandlerTunnelDualHalfCloseCleansUp(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		bridge.tunnelMu.Lock()
-		n := len(bridge.tunnels)
-		bridge.tunnelMu.Unlock()
+		n := bridge.runtimeBridge.TunnelCount()
 		if n == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	bridge.tunnelMu.Lock()
-	remaining := len(bridge.tunnels)
-	bridge.tunnelMu.Unlock()
+	remaining := bridge.runtimeBridge.TunnelCount()
 	if remaining != 0 {
 		t.Fatalf("expected tunnel registry cleanup after dual half-close, still have %d tunnel(s)", remaining)
 	}
@@ -2107,6 +2117,18 @@ func startReadLoop(t *testing.T, proxyAddr string) (net.Conn, net.Conn, <-chan e
 	}()
 
 	return bridgeSide, peerSide, errCh
+}
+
+func newTestBridgeRuntime(t *testing.T) *bridgepkg.RuntimeBridge {
+	t.Helper()
+
+	bridgeSide, peerSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = bridgeSide.Close()
+		_ = peerSide.Close()
+	})
+
+	return bridgepkg.New(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111")
 }
 
 func startTransparentRuntime(t *testing.T) (string, func()) {
