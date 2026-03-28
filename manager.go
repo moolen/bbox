@@ -339,7 +339,7 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 	if path == "" {
 		path = "/"
 	}
-	host, port := mitmHostPort(authority, scheme)
+	host, port := mitmHostPort(req.Host, authority, scheme)
 	if req.BodyTooLarge {
 		m.recordAccessEvent(accessEvent{
 			SandboxID:  sandboxID,
@@ -510,12 +510,16 @@ func authorityPort(authority string) string {
 	return port
 }
 
-func mitmHostPort(authority, scheme string) (string, int) {
-	if authority == "" {
-		return normalizeHostPort(authority, 0)
+func mitmHostPort(requestHost, authority, scheme string) (string, int) {
+	base := strings.TrimSpace(requestHost)
+	if base == "" {
+		base = authority
+	}
+	if base == "" {
+		return normalizeHostPort(base, 0)
 	}
 	port := 0
-	if rawPort := authorityPort(authority); rawPort != "" {
+	if rawPort := authorityPort(base); rawPort != "" {
 		if parsed, err := strconv.Atoi(rawPort); err == nil {
 			port = parsed
 		}
@@ -527,7 +531,7 @@ func mitmHostPort(authority, scheme string) (string, int) {
 			port = 80
 		}
 	}
-	return normalizeHostPort(authority, port)
+	return normalizeHostPort(base, port)
 }
 
 func (m *ProxyManager) handleLeafCertRequest(host string) *helperproto.LeafCertResponse {
