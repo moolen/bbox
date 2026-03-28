@@ -2,7 +2,7 @@ package helperproto
 
 import "net/http"
 
-const ProtocolVersion = 2
+const ProtocolVersion = 3
 
 type Envelope struct {
 	ID              uint64
@@ -12,6 +12,8 @@ type Envelope struct {
 	ProxyResponse   *ProxyResponse
 	ConnectRequest  *ConnectRequest
 	ConnectResponse *ConnectResponse
+	MITMRequest     *MITMRequest
+	MITMResponse    *MITMResponse
 	TunnelFrame     *TunnelFrame
 	TunnelClose     *TunnelClose
 	ExecRequest     *ExecRequest
@@ -33,6 +35,10 @@ func (e Envelope) Kind() string {
 		return "connect_request"
 	case e.ConnectResponse != nil:
 		return "connect_response"
+	case e.MITMRequest != nil:
+		return "mitm_request"
+	case e.MITMResponse != nil:
+		return "mitm_response"
 	case e.TunnelFrame != nil:
 		return "tunnel_frame"
 	case e.TunnelClose != nil:
@@ -80,6 +86,26 @@ type ConnectRequest struct {
 type ConnectResponse struct {
 	StatusCode int
 	Message    string
+	Error      string
+}
+
+type MITMRequest struct {
+	Scheme       string
+	Authority    string
+	Host         string
+	Method       string
+	Path         string
+	RawQuery     string
+	Header       http.Header
+	Body         []byte
+	Proto        string
+	BodyTooLarge bool
+}
+
+type MITMResponse struct {
+	StatusCode int
+	Header     http.Header
+	Body       []byte
 	Error      string
 }
 

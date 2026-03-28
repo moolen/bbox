@@ -208,6 +208,9 @@ func (c *helperClient) readLoop() error {
 		case env.ConnectRequest != nil:
 			req := *env.ConnectRequest
 			go c.handleConnectRequest(env.ID, req)
+		case env.MITMRequest != nil:
+			req := *env.MITMRequest
+			go c.handleMITMRequest(env.ID, req)
 		case env.TunnelFrame != nil:
 			c.handleTunnelFrame(env.ID, *env.TunnelFrame)
 		case env.TunnelClose != nil:
@@ -284,6 +287,20 @@ func (c *helperClient) handleConnectRequest(id uint64, req helperproto.ConnectRe
 		return
 	}
 	tunnel.start()
+}
+
+func (c *helperClient) handleMITMRequest(id uint64, req helperproto.MITMRequest) {
+	_ = req
+
+	if err := c.send(helperproto.Envelope{
+		ID: id,
+		MITMResponse: &helperproto.MITMResponse{
+			StatusCode: http.StatusNotImplemented,
+			Error:      "MITM request handling is not implemented",
+		},
+	}); err != nil {
+		c.failCurrentRun(err)
+	}
 }
 
 func (c *helperClient) registerPendingTunnel(id uint64, tunnel *hostTunnel) {
