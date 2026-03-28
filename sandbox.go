@@ -187,7 +187,7 @@ func (s *Sandbox) AccessedDomains() []AccessedDomain {
 	if s == nil || s.manager == nil {
 		return []AccessedDomain{}
 	}
-	return []AccessedDomain{}
+	return s.manager.accessedDomainsSnapshot(s.id)
 }
 
 // Close stops the sandbox helper, unregisters the sandbox, and removes the

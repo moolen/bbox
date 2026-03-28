@@ -55,6 +55,7 @@ func (m *ProxyManager) registerSandbox(sandboxID string, policy *compiledPolicy)
 
 	m.sandboxes[sandboxID] = nil
 	m.sandboxPolicies[sandboxID] = policy
+	initAuditStateLocked(m, sandboxID)
 	return nil
 }
 
@@ -74,6 +75,7 @@ func (m *ProxyManager) unregisterSandbox(sandboxID string) {
 	defer m.mu.Unlock()
 	delete(m.sandboxes, sandboxID)
 	delete(m.sandboxPolicies, sandboxID)
+	removeAuditStateLocked(m, sandboxID)
 }
 
 func (m *ProxyManager) policyForSandbox(sandboxID string) (*compiledPolicy, bool) {
@@ -391,4 +393,45 @@ func (m *ProxyManager) Close() error {
 	})
 
 	return closeErr
+}
+
+func (m *ProxyManager) recordAccessEvent(event accessEvent) {
+	if m == nil {
+		return
+	}
+	if event.Time.IsZero() {
+		event.Time = time.Now()
+	}
+	entry := event.toAccessLogEntry()
+
+	m.mu.Lock()
+	updateAuditStateLocked(auditStateLocked(m), event)
+	logger := m.accessLogger
+	m.mu.Unlock()
+
+	if logger != nil {
+		logger.LogAccess(entry)
+	}
+}
+
+func (m *ProxyManager) accessedDomainsSnapshot(sandboxID string) []AccessedDomain {
+	if m == nil || sandboxID == "" {
+		return []AccessedDomain{}
+	}
+
+	m.mu.RLock()
+	stateValue, ok := auditStateByManager.Load(m)
+	if !ok {
+		m.mu.RUnlock()
+		return []AccessedDomain{}
+	}
+	state := stateValue.(*managerAuditState)
+	sandboxState, ok := state.sandboxes[sandboxID]
+	if !ok {
+		m.mu.RUnlock()
+		return []AccessedDomain{}
+	}
+	snapshot := snapshotAccessedDomains(sandboxState)
+	m.mu.RUnlock()
+	return snapshot
 }
