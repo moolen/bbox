@@ -62,7 +62,7 @@ func targetsOverlap(a, b string) bool {
 	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
-func buildBwrapArgs(root string, helperPath string, proxyListenAddr string, mounts []Mount) []string {
+func buildBwrapArgs(root string, helperPath string, proxyListenAddr string, mitm MITMOptions, mounts []Mount) []string {
 	args := []string{
 		"--unshare-user",
 		"--unshare-pid",
@@ -96,6 +96,8 @@ func buildBwrapArgs(root string, helperPath string, proxyListenAddr string, moun
 		"--",
 		helperPath,
 		"--proxy-addr", proxyListenAddr,
+		"--mitm-enabled="+fmt.Sprintf("%t", mitm.Enabled),
+		"--max-request-body-bytes", fmt.Sprintf("%d", mitm.MaxRequestBodyBytes),
 		"child-proxy",
 	)
 

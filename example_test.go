@@ -31,17 +31,25 @@ func ExampleNewProxyManager() {
 func ExampleProxyOptions() {
 	opts := bbox.ProxyOptions{
 		ListenAddr: "127.0.0.1:0",
+		MITM: bbox.MITMOptions{
+			Enabled:             true,
+			MaxRequestBodyBytes: 64 << 10,
+		},
 		NetworkPolicy: bbox.NetworkPolicy{
 			AllowHostPatterns: []string{`^api[.]github[.]com$`, `^github[.]com$`},
+			AllowHTTPMethods:  []string{"GET"},
 			AllowConnect:      true,
 			AllowConnectPorts: []string{"443"},
+			AllowPathPatterns: []string{`^/repos/`},
 		},
 	}
 
 	fmt.Println(opts.ListenAddr)
+	fmt.Println(opts.MITM.Enabled)
 	fmt.Println(opts.NetworkPolicy.AllowConnect)
 	// Output:
 	// 127.0.0.1:0
+	// true
 	// true
 }
 
