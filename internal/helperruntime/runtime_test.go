@@ -171,6 +171,169 @@ func TestTransparentDNSHandlesTCPAndUDP(t *testing.T) {
 	}
 }
 
+func TestTransparentHTTPRejectsMissingHost(t *testing.T) {
+	ready, shutdown := startTransparentRuntimeReady(t)
+	defer shutdown()
+
+	conn, err := net.Dial("tcp", ready.HTTPAddr)
+	if err != nil {
+		t.Fatalf("dial transparent HTTP listener: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := io.WriteString(conn, "GET /missing-host HTTP/1.0\r\n\r\n"); err != nil {
+		t.Fatalf("write transparent HTTP request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read transparent HTTP response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status: got %d want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if !strings.Contains(string(body), "host is required") {
+		t.Fatalf("unexpected response body: %q", string(body))
+	}
+}
+
+func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
+	bridgeSide, peerSide := net.Pipe()
+	defer peerSide.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Config{
+			Bridge:      bridgeSide,
+			TrafficMode: TrafficModeTransparent,
+			DNSAddr:     "127.0.0.1:0",
+			HTTPAddr:    "127.0.0.1:0",
+			HTTPSAddr:   "127.0.0.1:0",
+			Logger:      log.New(io.Discard, "", 0),
+		})
+	}()
+
+	enc := gob.NewEncoder(peerSide)
+	dec := gob.NewDecoder(peerSide)
+	if err := enc.Encode(&helperproto.Envelope{
+		ID: 1,
+		Hello: &helperproto.Hello{
+			ProtocolVersion: helperproto.ProtocolVersion,
+			SandboxID:       "transparent-http-test",
+		},
+	}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	var ready helperproto.Envelope
+	if err := dec.Decode(&ready); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if ready.Ready == nil {
+		t.Fatalf("expected ready response, got %#v", ready)
+	}
+	if ready.Ready.HTTPAddr == "" {
+		t.Fatal("expected transparent runtime to report an HTTP address")
+	}
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		var req helperproto.Envelope
+		if err := dec.Decode(&req); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if req.ProxyRequest == nil {
+			peerErrCh <- fmt.Errorf("expected proxy request, got %#v", req)
+			return
+		}
+		if req.ProxyRequest.Method != http.MethodGet {
+			peerErrCh <- fmt.Errorf("unexpected method: got %q", req.ProxyRequest.Method)
+			return
+		}
+		if req.ProxyRequest.URL != "http://example.com/normalized/path?hello=world" {
+			peerErrCh <- fmt.Errorf("unexpected normalized URL: got %q", req.ProxyRequest.URL)
+			return
+		}
+		if got := req.ProxyRequest.Header.Get("Proxy-Connection"); got != "" {
+			peerErrCh <- fmt.Errorf("expected Proxy-Connection header to be stripped, got %q", got)
+			return
+		}
+		if got := req.ProxyRequest.Header.Get("X-Test"); got != "present" {
+			peerErrCh <- fmt.Errorf("expected X-Test header to survive, got %q", got)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: req.ID,
+			ProxyResponse: &helperproto.ProxyResponse{
+				StatusCode: http.StatusNoContent,
+				Header:     make(http.Header),
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+		peerErrCh <- nil
+	}()
+
+	conn, err := net.Dial("tcp", ready.Ready.HTTPAddr)
+	if err != nil {
+		t.Fatalf("dial transparent HTTP listener: %v", err)
+	}
+	defer conn.Close()
+
+	request := strings.Join([]string{
+		"GET /normalized/path?hello=world HTTP/1.1",
+		"Host: example.com",
+		"Proxy-Connection: keep-alive",
+		"X-Test: present",
+		"",
+		"",
+	}, "\r\n")
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatalf("write transparent HTTP request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read transparent HTTP response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected status: got %d want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for proxy request")
+	}
+
+	cancel()
+	_ = peerSide.Close()
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent runtime to exit")
+	}
+}
+
 func TestProxyHandlerMITMHTTP1ForwardsInterceptedRequest(t *testing.T) {
 	bridgeSide, peerSide := net.Pipe()
 	defer bridgeSide.Close()
@@ -1540,6 +1703,13 @@ func startReadLoop(t *testing.T, proxyAddr string) (net.Conn, net.Conn, <-chan e
 func startTransparentRuntime(t *testing.T) (string, func()) {
 	t.Helper()
 
+	ready, shutdown := startTransparentRuntimeReady(t)
+	return ready.DNSAddr, shutdown
+}
+
+func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
+	t.Helper()
+
 	bridgeSide, peerSide := net.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -1577,6 +1747,9 @@ func startTransparentRuntime(t *testing.T) (string, func()) {
 	if ready.Ready.DNSAddr == "" {
 		t.Fatal("expected transparent runtime to report a DNS address")
 	}
+	if ready.Ready.HTTPAddr == "" {
+		t.Fatal("expected transparent runtime to report an HTTP address")
+	}
 
 	shutdown := func() {
 		cancel()
@@ -1591,7 +1764,7 @@ func startTransparentRuntime(t *testing.T) (string, func()) {
 		}
 	}
 
-	return ready.Ready.DNSAddr, shutdown
+	return ready.Ready, shutdown
 }
 
 func exchangeTransparentDNS(t *testing.T, network, addr string, queryType dnsmessage.Type) dnsmessage.Message {

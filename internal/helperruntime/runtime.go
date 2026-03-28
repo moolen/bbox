@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -177,12 +178,17 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	bridge.httpAddr = httpListener.Addr().String()
 	bridge.httpsAddr = httpsListener.Addr().String()
 
+	httpServer := &http.Server{
+		Handler: bridge.proxyHandler(),
+	}
+
 	errCh := make(chan error, 4)
 
 	go func() {
 		<-ctx.Done()
 
 		_ = dnsServer.Close()
+		_ = httpServer.Shutdown(context.Background())
 		_ = httpListener.Close()
 		_ = httpsListener.Close()
 		_ = cfg.Bridge.Close()
@@ -192,7 +198,9 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 		errCh <- dnsServer.Serve()
 	}()
 	go func() {
-		errCh <- serveTransparentListener(httpListener)
+		if err := httpServer.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("serve transparent HTTP listener: %w", err)
+		}
 	}()
 	go func() {
 		errCh <- serveTransparentListener(httpsListener)
@@ -1362,12 +1370,28 @@ func (b *bridge) send(env helperproto.Envelope) error {
 }
 
 func rewriteProxyRequest(req *http.Request) (*http.Request, error) {
-	if req.URL == nil || req.URL.Scheme == "" || req.URL.Host == "" {
-		return nil, errors.New("proxy request must use an absolute URL")
+	if req.URL == nil {
+		return nil, errors.New("proxy request URL is required")
+	}
+
+	targetURL := req.URL
+	if targetURL.Scheme == "" || targetURL.Host == "" {
+		host := strings.TrimSpace(req.Host)
+		if host == "" {
+			return nil, errors.New("proxy request host is required")
+		}
+
+		targetURL = &url.URL{
+			Scheme:   "http",
+			Host:     host,
+			Path:     req.URL.Path,
+			RawPath:  req.URL.RawPath,
+			RawQuery: req.URL.RawQuery,
+		}
 	}
 
 	out := req.Clone(req.Context())
-	urlCopy := *req.URL
+	urlCopy := *targetURL
 	out.URL = &urlCopy
 	out.RequestURI = ""
 	out.Host = out.URL.Host
