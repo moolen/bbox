@@ -28,6 +28,7 @@ import (
 
 	"github.com/moolen/bbox/internal/helperproto"
 	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
+	"github.com/moolen/bbox/internal/helperruntime/ingress"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
@@ -225,6 +226,20 @@ func TestTransparentHTTPRejectsMissingHost(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "host is required") {
 		t.Fatalf("unexpected response body: %q", string(body))
+	}
+}
+
+func TestRewriteTransparentHTTPRequestBuildsAbsoluteURL(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/path?q=1", nil)
+	req.Host = "example.com"
+
+	rewritten, err := ingress.RewriteTransparentHTTPRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rewritten.URL.String() != "http://example.com/path?q=1" {
+		t.Fatalf("got %q", rewritten.URL.String())
 	}
 }
 
