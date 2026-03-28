@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -25,35 +24,9 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/moolen/bbox/internal/helperproto"
-	"golang.org/x/net/dns/dnsmessage"
+	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
 	"golang.org/x/net/http2"
 )
-
-const DefaultProxyAddr = "127.0.0.1:31111"
-const DefaultTransparentDNSAddr = "127.0.0.1:53"
-const DefaultTransparentHTTPAddr = "127.0.0.1:80"
-const DefaultTransparentHTTPSAddr = "127.0.0.1:443"
-
-const connectHandshakeTimeout = 5 * time.Second
-
-type TrafficMode string
-
-const (
-	TrafficModeProxy       TrafficMode = "proxy"
-	TrafficModeTransparent TrafficMode = "transparent"
-)
-
-type Config struct {
-	Bridge              io.ReadWriteCloser
-	TrafficMode         TrafficMode
-	ProxyAddr           string
-	DNSAddr             string
-	HTTPAddr            string
-	HTTPSAddr           string
-	Logger              *log.Logger
-	MITMEnabled         bool
-	MaxRequestBodyBytes int64
-}
 
 func OpenBridgeFromFD(fd int) (io.ReadWriteCloser, error) {
 	if fd < 0 {
@@ -74,12 +47,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Bridge == nil {
 		return fmt.Errorf("bridge is required")
 	}
-	if cfg.Logger == nil {
-		cfg.Logger = log.New(io.Discard, "", 0)
-	}
-	if cfg.TrafficMode == "" {
-		cfg.TrafficMode = TrafficModeProxy
-	}
+	cfg = withDefaults(cfg)
 
 	switch cfg.TrafficMode {
 	case TrafficModeProxy:
@@ -89,332 +57,6 @@ func Run(ctx context.Context, cfg Config) error {
 	default:
 		return fmt.Errorf("unsupported traffic mode %q", cfg.TrafficMode)
 	}
-}
-
-func runProxyMode(ctx context.Context, cfg Config) error {
-	if cfg.ProxyAddr == "" {
-		cfg.ProxyAddr = DefaultProxyAddr
-	}
-
-	listener, err := net.Listen("tcp", cfg.ProxyAddr)
-	if err != nil {
-		return fmt.Errorf("listen on proxy address %q: %w", cfg.ProxyAddr, err)
-	}
-	defer listener.Close()
-
-	bridge := newBridge(cfg.Bridge, cfg.Logger, listener.Addr().String())
-	bridge.mitmEnabled = cfg.MITMEnabled
-	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
-
-	server := &http.Server{
-		Handler: bridge.proxyHandler(),
-	}
-
-	errCh := make(chan error, 2)
-
-	go func() {
-		<-ctx.Done()
-
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		_ = server.Shutdown(shutdownCtx)
-		_ = cfg.Bridge.Close()
-	}()
-
-	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("serve proxy listener: %w", err)
-		}
-	}()
-
-	go func() {
-		errCh <- bridge.readLoop(ctx)
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil
-	case err := <-errCh:
-		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-			return nil
-		}
-		return err
-	}
-}
-
-func runTransparentMode(ctx context.Context, cfg Config) error {
-	if cfg.DNSAddr == "" {
-		cfg.DNSAddr = DefaultTransparentDNSAddr
-	}
-	if cfg.HTTPAddr == "" {
-		cfg.HTTPAddr = DefaultTransparentHTTPAddr
-	}
-	if cfg.HTTPSAddr == "" {
-		cfg.HTTPSAddr = DefaultTransparentHTTPSAddr
-	}
-
-	dnsServer, err := newTransparentDNSServer(cfg.DNSAddr)
-	if err != nil {
-		return fmt.Errorf("listen on DNS address %q: %w", cfg.DNSAddr, err)
-	}
-	defer dnsServer.Close()
-
-	httpListener, err := net.Listen("tcp", cfg.HTTPAddr)
-	if err != nil {
-		return fmt.Errorf("listen on HTTP address %q: %w", cfg.HTTPAddr, err)
-	}
-	defer httpListener.Close()
-
-	httpsListener, err := net.Listen("tcp", cfg.HTTPSAddr)
-	if err != nil {
-		return fmt.Errorf("listen on HTTPS address %q: %w", cfg.HTTPSAddr, err)
-	}
-	defer httpsListener.Close()
-
-	bridge := newBridge(cfg.Bridge, cfg.Logger, "")
-	bridge.mitmEnabled = cfg.MITMEnabled
-	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
-	bridge.dnsAddr = dnsServer.Addr()
-	bridge.httpAddr = httpListener.Addr().String()
-	bridge.httpsAddr = httpsListener.Addr().String()
-
-	httpServer := &http.Server{
-		Handler: bridge.transparentHTTPHandler(),
-	}
-
-	errCh := make(chan error, 4)
-
-	go func() {
-		<-ctx.Done()
-
-		_ = dnsServer.Close()
-		_ = httpServer.Shutdown(context.Background())
-		_ = httpListener.Close()
-		_ = httpsListener.Close()
-		_ = cfg.Bridge.Close()
-	}()
-
-	go func() {
-		errCh <- dnsServer.Serve()
-	}()
-	go func() {
-		if err := httpServer.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("serve transparent HTTP listener: %w", err)
-		}
-	}()
-	go func() {
-		errCh <- serveTransparentListener(httpsListener, bridge)
-	}()
-	go func() {
-		errCh <- bridge.readLoop(ctx)
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil
-	case err := <-errCh:
-		if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
-			return nil
-		}
-		return err
-	}
-}
-
-func serveTransparentListener(listener net.Listener, bridge *bridge) error {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return err
-		}
-		go bridge.handleTransparentHTTPSConn(conn)
-	}
-}
-
-type transparentDNSServer struct {
-	tcpListener net.Listener
-	udpConn     net.PacketConn
-}
-
-func newTransparentDNSServer(addr string) (*transparentDNSServer, error) {
-	tcpListener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-
-	udpAddr, err := transparentDNSUDPAddr(tcpListener.Addr())
-	if err != nil {
-		_ = tcpListener.Close()
-		return nil, err
-	}
-
-	udpConn, err := net.ListenPacket("udp", udpAddr)
-	if err != nil {
-		_ = tcpListener.Close()
-		return nil, err
-	}
-
-	return &transparentDNSServer{
-		tcpListener: tcpListener,
-		udpConn:     udpConn,
-	}, nil
-}
-
-func transparentDNSUDPAddr(addr net.Addr) (string, error) {
-	host, port, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return "", fmt.Errorf("split DNS listener address %q: %w", addr.String(), err)
-	}
-
-	return net.JoinHostPort(host, port), nil
-}
-
-func (s *transparentDNSServer) Addr() string {
-	return s.tcpListener.Addr().String()
-}
-
-func (s *transparentDNSServer) Close() error {
-	var errs []error
-	if s.udpConn != nil {
-		if err := s.udpConn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			errs = append(errs, err)
-		}
-	}
-	if s.tcpListener != nil {
-		if err := s.tcpListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			errs = append(errs, err)
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-func (s *transparentDNSServer) Serve() error {
-	errCh := make(chan error, 2)
-
-	go func() {
-		errCh <- serveTransparentDNSUDP(s.udpConn)
-	}()
-	go func() {
-		errCh <- serveTransparentDNSTCP(s.tcpListener)
-	}()
-
-	err := <-errCh
-	if err != nil {
-		_ = s.Close()
-	}
-
-	return err
-}
-
-func serveTransparentDNSUDP(conn net.PacketConn) error {
-	buf := make([]byte, 1500)
-	for {
-		n, addr, err := conn.ReadFrom(buf)
-		if err != nil {
-			return err
-		}
-
-		response, ok := handleTransparentDNSQuery(buf[:n])
-		if !ok {
-			continue
-		}
-		if _, err := conn.WriteTo(response, addr); err != nil {
-			return err
-		}
-	}
-}
-
-func serveTransparentDNSTCP(listener net.Listener) error {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return err
-		}
-
-		go func() {
-			_ = serveTransparentDNSTCPConn(conn)
-		}()
-	}
-}
-
-func serveTransparentDNSTCPConn(conn net.Conn) error {
-	defer conn.Close()
-
-	var lengthBuf [2]byte
-	if _, err := io.ReadFull(conn, lengthBuf[:]); err != nil {
-		return err
-	}
-
-	queryLen := int(binary.BigEndian.Uint16(lengthBuf[:]))
-	query := make([]byte, queryLen)
-	if _, err := io.ReadFull(conn, query); err != nil {
-		return err
-	}
-
-	response, ok := handleTransparentDNSQuery(query)
-	if !ok {
-		return nil
-	}
-
-	frame := make([]byte, 2+len(response))
-	binary.BigEndian.PutUint16(frame[:2], uint16(len(response)))
-	copy(frame[2:], response)
-	_, err := conn.Write(frame)
-	return err
-}
-
-func handleTransparentDNSQuery(payload []byte) ([]byte, bool) {
-	var parser dnsmessage.Parser
-	header, err := parser.Start(payload)
-	if err != nil {
-		return nil, false
-	}
-
-	questions, err := parser.AllQuestions()
-	if err != nil || len(questions) != 1 {
-		return nil, false
-	}
-
-	response := dnsmessage.Message{
-		Header: dnsmessage.Header{
-			ID:                 header.ID,
-			Response:           true,
-			OpCode:             header.OpCode,
-			Authoritative:      true,
-			RecursionDesired:   header.RecursionDesired,
-			RecursionAvailable: false,
-		},
-		Questions: questions,
-	}
-
-	question := questions[0]
-	if question.Class != dnsmessage.ClassINET {
-		response.Header.RCode = dnsmessage.RCodeRefused
-	} else {
-		switch question.Type {
-		case dnsmessage.TypeA:
-			response.Answers = []dnsmessage.Resource{{
-				Header: dnsmessage.ResourceHeader{
-					Name:  question.Name,
-					Type:  dnsmessage.TypeA,
-					Class: dnsmessage.ClassINET,
-					TTL:   60,
-				},
-				Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}},
-			}}
-		case dnsmessage.TypeAAAA:
-		default:
-			response.Header.RCode = dnsmessage.RCodeRefused
-		}
-	}
-
-	packed, err := response.Pack()
-	if err != nil {
-		return nil, false
-	}
-
-	return packed, true
 }
 
 type bridge struct {
@@ -591,7 +233,7 @@ func (b *bridge) serveHTTPForward(w http.ResponseWriter, req *http.Request, rewr
 	var body []byte
 	if outReq.Body != nil {
 		var tooLarge bool
-		body, tooLarge, err = readBoundedBody(outReq.Body, b.maxRequestBodyBytes)
+		body, tooLarge, err = bridgepkg.ReadBoundedBody(outReq.Body, b.maxRequestBodyBytes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1194,7 +836,7 @@ func connectErrorStatus(err error) int {
 
 func (b *bridge) mitmHandler(connectHost string, connectPort int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		body, tooLarge, err := readBoundedBody(req.Body, b.maxRequestBodyBytes)
+		body, tooLarge, err := bridgepkg.ReadBoundedBody(req.Body, b.maxRequestBodyBytes)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1253,27 +895,6 @@ func closePayloadWrite(conn net.Conn) error {
 		return cw.CloseWrite()
 	}
 	return conn.Close()
-}
-
-func readBoundedBody(body io.ReadCloser, maxBytes int64) ([]byte, bool, error) {
-	if body == nil {
-		return nil, false, nil
-	}
-	defer body.Close()
-
-	if maxBytes <= 0 {
-		data, err := io.ReadAll(body)
-		return data, false, err
-	}
-
-	limited, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
-	if err != nil {
-		return nil, false, err
-	}
-	if int64(len(limited)) > maxBytes {
-		return limited[:maxBytes], true, nil
-	}
-	return limited, false, nil
 }
 
 type preloadedConn struct {

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
@@ -94,6 +95,20 @@ func TestRunTransparentRequiresAllListeners(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected transparent startup to fail when a listener cannot bind")
+	}
+}
+
+func TestReadBoundedBodyFlagsOversize(t *testing.T) {
+	t.Parallel()
+
+	body := io.NopCloser(strings.NewReader("abcdef"))
+
+	got, tooLarge, err := bridgepkg.ReadBoundedBody(body, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abc" || !tooLarge {
+		t.Fatalf("got %q tooLarge=%v", string(got), tooLarge)
 	}
 }
 
