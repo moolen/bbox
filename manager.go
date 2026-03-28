@@ -9,10 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -23,11 +19,10 @@ import (
 
 func newProxyManager(policy *compiledPolicy) *ProxyManager {
 	return &ProxyManager{
-		policy:          policy,
-		sandboxes:       make(map[string]*Sandbox),
-		sandboxPolicies: make(map[string]*compiledPolicy),
-		transport:       cloneDefaultTransport(),
-		listenAddr:      helperruntime.DefaultProxyAddr,
+		registry:   newSandboxRegistry(policy),
+		resolver:   newHelperBinaryResolver(),
+		transport:  cloneDefaultTransport(),
+		listenAddr: helperruntime.DefaultProxyAddr,
 	}
 }
 
@@ -60,22 +55,12 @@ func readBoundedResponse(body io.ReadCloser, maxBytes int64) ([]byte, bool, erro
 }
 
 func (m *ProxyManager) registerSandbox(sandboxID string, policy *compiledPolicy) error {
-	if sandboxID == "" {
-		return fmt.Errorf("sandbox ID is required")
-	}
-	if policy == nil {
-		policy = m.policy
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.sandboxes[sandboxID]; exists {
-		return fmt.Errorf("sandbox %q is already registered", sandboxID)
+	if err := m.registry.Register(sandboxID, policy); err != nil {
+		return err
 	}
-
-	m.sandboxes[sandboxID] = nil
-	m.sandboxPolicies[sandboxID] = policy
 	initAuditStateLocked(m, sandboxID)
 	return nil
 }
@@ -83,32 +68,21 @@ func (m *ProxyManager) registerSandbox(sandboxID string, policy *compiledPolicy)
 func (m *ProxyManager) attachSandbox(sandboxID string, sandbox *Sandbox) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	if _, exists := m.sandboxes[sandboxID]; !exists {
-		return fmt.Errorf("sandbox %q is not registered", sandboxID)
-	}
-	m.sandboxes[sandboxID] = sandbox
-	return nil
+	return m.registry.Attach(sandboxID, sandbox)
 }
 
 func (m *ProxyManager) unregisterSandbox(sandboxID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.sandboxes, sandboxID)
-	delete(m.sandboxPolicies, sandboxID)
+	m.registry.Unregister(sandboxID)
 	removeAuditStateLocked(m, sandboxID)
 }
 
 func (m *ProxyManager) policyForSandbox(sandboxID string) (*compiledPolicy, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	policy, ok := m.sandboxPolicies[sandboxID]
-	return policy, ok
+	return m.registry.Policy(sandboxID)
 }
 
 func (m *ProxyManager) outboundTransport() *http.Transport {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 	return m.transport
 }
 
@@ -120,59 +94,7 @@ func (m *ProxyManager) nextSandboxName(requested string) string {
 }
 
 func (m *ProxyManager) helperBinary() (string, error) {
-	m.helperBinaryOnce.Do(func() {
-		moduleRoot, err := packageRoot()
-		if err != nil {
-			m.helperBinaryErr = err
-			return
-		}
-
-		buildDir, err := os.MkdirTemp("", "bbox-helper-build-")
-		if err != nil {
-			m.helperBinaryErr = fmt.Errorf("create helper build dir: %w", err)
-			return
-		}
-
-		helperPath := filepath.Join(buildDir, "bbox-helper")
-		cmd := exec.Command("go", "build", "-o", helperPath, "./cmd/bbox-helper")
-		cmd.Dir = moduleRoot
-
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			_ = os.RemoveAll(buildDir)
-			msg := strings.TrimSpace(string(output))
-			if msg != "" {
-				m.helperBinaryErr = fmt.Errorf("build helper binary: %w: %s", err, msg)
-				return
-			}
-			m.helperBinaryErr = fmt.Errorf("build helper binary: %w", err)
-			return
-		}
-
-		m.helperBinaryDir = buildDir
-		m.helperBinaryPath = helperPath
-	})
-
-	if m.helperBinaryErr != nil {
-		return "", m.helperBinaryErr
-	}
-	if m.helperBinaryPath == "" {
-		return "", fmt.Errorf("helper binary path is empty")
-	}
-	return m.helperBinaryPath, nil
-}
-
-func packageRoot() (string, error) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return "", fmt.Errorf("determine package root: runtime caller unavailable")
-	}
-
-	root := filepath.Dir(file)
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		return "", fmt.Errorf("locate package root from %q: %w", root, err)
-	}
-	return root, nil
+	return m.resolver.HelperBinary()
 }
 
 func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string, req helperproto.ProxyRequest) *helperproto.ProxyResponse {
@@ -770,14 +692,7 @@ func (m *ProxyManager) Close() error {
 	var closeErr error
 
 	m.closeOnce.Do(func() {
-		m.mu.RLock()
-		sandboxes := make([]*Sandbox, 0, len(m.sandboxes))
-		for _, sandbox := range m.sandboxes {
-			if sandbox != nil {
-				sandboxes = append(sandboxes, sandbox)
-			}
-		}
-		m.mu.RUnlock()
+		sandboxes := m.registry.AttachedSandboxes()
 
 		for _, sandbox := range sandboxes {
 			closeErr = errors.Join(closeErr, sandbox.Close())
@@ -786,9 +701,7 @@ func (m *ProxyManager) Close() error {
 		if transport := m.outboundTransport(); transport != nil {
 			transport.CloseIdleConnections()
 		}
-		if m.helperBinaryDir != "" {
-			closeErr = errors.Join(closeErr, os.RemoveAll(m.helperBinaryDir))
-		}
+		closeErr = errors.Join(closeErr, m.resolver.Cleanup())
 
 		m.mu.Lock()
 		auditStateByManager.Delete(m)
@@ -809,7 +722,7 @@ func (m *ProxyManager) recordAccessEvent(event accessEvent) {
 	entry := event.toAccessLogEntry()
 
 	m.mu.Lock()
-	if _, ok := m.sandboxes[event.SandboxID]; !ok {
+	if !m.registry.Has(event.SandboxID) {
 		m.mu.Unlock()
 		return
 	}
@@ -832,10 +745,8 @@ func (m *ProxyManager) trafficModeForSandbox(sandboxID string) TrafficMode {
 		return TrafficModeProxy
 	}
 
-	m.mu.RLock()
-	sandbox := m.sandboxes[sandboxID]
-	m.mu.RUnlock()
-	if sandbox == nil {
+	sandbox, ok := m.registry.Sandbox(sandboxID)
+	if !ok || sandbox == nil {
 		return TrafficModeProxy
 	}
 

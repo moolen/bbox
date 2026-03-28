@@ -46,9 +46,11 @@ func TestSandboxCloseDoesNotUnregisterExistingSandboxOnDuplicateStartupFailure(t
 		t.Fatal("expected original sandbox policy to remain registered")
 	}
 
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	if manager.sandboxes["dup"] != original {
+	attached, ok := manager.registry.Sandbox("dup")
+	if !ok {
+		t.Fatal("expected sandbox entry to remain registered")
+	}
+	if attached != original {
 		t.Fatal("expected original sandbox entry to remain attached")
 	}
 }

@@ -192,9 +192,8 @@ type NetworkPolicy struct {
 // route traffic through it.
 type ProxyManager struct {
 	mu                     sync.RWMutex
-	policy                 *compiledPolicy
-	sandboxes              map[string]*Sandbox
-	sandboxPolicies        map[string]*compiledPolicy
+	registry               *sandboxRegistry
+	resolver               *helperBinaryResolver
 	transport              *http.Transport
 	accessLogger           AccessLogger
 	listenAddr             string
@@ -204,11 +203,6 @@ type ProxyManager struct {
 	mitmCA                 *mitmCA
 	caCertPEM              []byte
 	nextSandboxID          atomic.Uint64
-
-	helperBinaryOnce sync.Once
-	helperBinaryPath string
-	helperBinaryDir  string
-	helperBinaryErr  error
 
 	closeOnce sync.Once
 }
