@@ -3,7 +3,6 @@ package integration_test
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +18,7 @@ func TestSandboxMITMHTTPSWithCurl(t *testing.T) {
 		t.Skip(err.Error())
 	}
 
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := startTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/allowed":
 			w.Header().Set("Content-Type", "text/plain")
@@ -198,7 +197,7 @@ func TestMITMSharedManagerServesMultipleSandboxes(t *testing.T) {
 		t.Skip(err.Error())
 	}
 
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := startTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/shared" {
 			http.NotFound(w, r)
 			return

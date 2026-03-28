@@ -17,8 +17,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
+)
+
+var (
+	sharedTLSTestCertOnce sync.Once
+	sharedTLSTestCert     tls.Certificate
+	sharedTLSTestCertErr  error
 )
 
 func requireSandboxPrereqs(t *testing.T) {
@@ -92,11 +99,23 @@ func startTransparentHTTPTestServer(t *testing.T, handler http.Handler) *httptes
 
 func startTransparentTLSTestServer(t *testing.T, host string, handler http.Handler) *httptest.Server {
 	t.Helper()
+	_ = host
 
 	server := httptest.NewUnstartedServer(handler)
 	server.Listener = mustListenLoopbackPort(t, 443)
 	server.TLS = &tls.Config{
-		Certificates: []tls.Certificate{mustSelfSignedServerCert(t, host)},
+		Certificates: []tls.Certificate{sharedTLSTestCertificate(t)},
+	}
+	server.StartTLS()
+	return server
+}
+
+func startTrustedTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewUnstartedServer(handler)
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{sharedTLSTestCertificate(t)},
 	}
 	server.StartTLS()
 	return server
@@ -122,53 +141,56 @@ func requireTransparentRuntimePorts(t *testing.T) {
 	}
 }
 
-func mustSelfSignedServerCert(t *testing.T, host string) tls.Certificate {
+func sharedTLSTestCertificate(t *testing.T) tls.Certificate {
 	t.Helper()
 
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate test TLS key: %v", err)
-	}
+	sharedTLSTestCertOnce.Do(func() {
+		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			sharedTLSTestCertErr = err
+			return
+		}
 
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		t.Fatalf("generate test TLS serial number: %v", err)
-	}
+		serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		if err != nil {
+			sharedTLSTestCertErr = err
+			return
+		}
 
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: host,
-		},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		template.IPAddresses = []net.IP{ip}
-	} else {
-		template.DNSNames = []string{host}
-	}
+		template := &x509.Certificate{
+			SerialNumber: serialNumber,
+			Subject: pkix.Name{
+				CommonName: "bbox-integration-test",
+			},
+			DNSNames:              []string{"localhost", "secure.localhost"},
+			IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().Add(24 * time.Hour),
+			KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+			ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			BasicConstraintsValid: true,
+		}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
-	if err != nil {
-		t.Fatalf("create test TLS certificate: %v", err)
-	}
+		certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+		if err != nil {
+			sharedTLSTestCertErr = err
+			return
+		}
 
-	certPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: certDER,
+		certPEM := pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: certDER,
+		})
+		keyPEM := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+		})
+
+		sharedTLSTestCert, sharedTLSTestCertErr = tls.X509KeyPair(certPEM, keyPEM)
 	})
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-	})
 
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatalf("parse test TLS key pair: %v", err)
+	if sharedTLSTestCertErr != nil {
+		t.Fatalf("generate shared test TLS certificate: %v", sharedTLSTestCertErr)
 	}
-	return cert
+	return sharedTLSTestCert
 }

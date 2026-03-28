@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -167,7 +166,7 @@ type h2ClientResult struct {
 func TestSandboxMITMHTTP2ConcurrentStreams(t *testing.T) {
 	requireSandboxPrereqs(t)
 
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := startTrustedTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/warmup":
 			_, _ = w.Write([]byte("warmup"))
