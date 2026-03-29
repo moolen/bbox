@@ -59,15 +59,18 @@ make lint
 go test ./...
 ```
 
-To actually launch nested `bwrap` sandboxes from inside Docker, a plain container is not enough on this host. A verified, known-good invocation is `--privileged`:
+To actually launch nested `bwrap` sandboxes from inside Docker, a plain container is not enough on this host. The narrowest verified working invocation on this machine was:
 
 ```bash
 docker run --rm -it \
-  --privileged \
+  --security-opt seccomp=unconfined \
+  --security-opt systempaths=unconfined \
   -v "$PWD":/workspace \
   -w /workspace \
   bbox-agent:dev
 ```
+
+`seccomp=unconfined` was required to allow the nested namespace setup, and `systempaths=unconfined` was required to let `bwrap` mount `/proc` inside the nested PID namespace. `--privileged` also works as a broader fallback if your Docker version does not support `systempaths=unconfined` or your local policy still blocks nested `bwrap`.
 
 Proxy-mode example inside that container:
 
@@ -77,7 +80,7 @@ bbox \
   -- /usr/bin/curl -fsS http://example.com
 ```
 
-Transparent mode binds `127.0.0.1:53`, `127.0.0.1:80`, and `127.0.0.1:443` inside the nested sandbox namespace, and it requires `--mitm`. The verified Docker setup above uses `--privileged`, which already covers the low-port bind requirement; adding `--cap-add=NET_BIND_SERVICE` on top is redundant.
+Transparent mode binds `127.0.0.1:53`, `127.0.0.1:80`, and `127.0.0.1:443` inside the nested sandbox namespace, and it requires `--mitm`. The verified Docker setup above was sufficient for transparent mode on this host; adding `--cap-add=NET_BIND_SERVICE` was not required in testing.
 
 Transparent-mode example inside that container:
 
