@@ -58,10 +58,6 @@ func (m *ProxyManager) policyForSandbox(sandboxID string) (*compiledPolicy, bool
 	return m.registry.Policy(sandboxID)
 }
 
-func (m *ProxyManager) outboundTransport() *http.Transport {
-	return m.transport
-}
-
 func (m *ProxyManager) nextSandboxName(requested string) string {
 	if trimmed := strings.TrimSpace(requested); trimmed != "" {
 		return trimmed
@@ -79,7 +75,7 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("sandbox %q is not registered", sandboxID)}
 	}
 	return newManagerProxyService(managerProxyConfig{
-		transport:            m.outboundTransport(),
+		transport:            m.transport,
 		maxRequestBodyBytes:  m.requestBodyLimitBytes,
 		maxResponseBodyBytes: m.responseBodyLimitBytes,
 		record:               m.recordAccessEvent,
@@ -106,7 +102,7 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 		}
 	}
 	return newManagerProxyService(managerProxyConfig{
-		transport:            m.outboundTransport(),
+		transport:            m.transport,
 		maxRequestBodyBytes:  m.requestBodyLimitBytes,
 		maxResponseBodyBytes: m.responseBodyLimitBytes,
 		record:               m.recordAccessEvent,
@@ -169,7 +165,7 @@ func (m *ProxyManager) Close() error {
 			closeErr = errors.Join(closeErr, sandbox.Close())
 		}
 
-		newManagerProxyService(managerProxyConfig{transport: m.outboundTransport()}).CloseIdleConnections()
+		newManagerProxyService(managerProxyConfig{transport: m.transport}).CloseIdleConnections()
 		closeErr = errors.Join(closeErr, m.resolver.Cleanup())
 
 		m.mu.Lock()

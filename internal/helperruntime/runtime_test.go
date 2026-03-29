@@ -1980,11 +1980,11 @@ func TestRelayTunnelToPayloadHandlesShortWrites(t *testing.T) {
 		TunnelClose: &helperproto.TunnelClose{},
 	}
 
-	result := bridge.relayTunnelToPayload(context.Background(), conn, tunnelCh)
-	if result.err != nil {
-		t.Fatalf("expected relay to succeed, got %v", result.err)
+	result := bridge.RelayTunnelToPayload(context.Background(), conn, tunnelCh)
+	if result.Err != nil {
+		t.Fatalf("expected relay to succeed, got %v", result.Err)
 	}
-	if !result.terminal {
+	if !result.Terminal {
 		t.Fatalf("expected terminal tunnel close result, got %#v", result)
 	}
 	if got := conn.writes.String(); got != "hello" {

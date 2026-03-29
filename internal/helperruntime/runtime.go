@@ -64,13 +64,6 @@ type bridge struct {
 	currentExec         *hrexec.Session
 }
 
-type tunnelRelayResult struct {
-	sendClose bool
-	write     bool
-	err       error
-	terminal  bool
-}
-
 func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
 	return &bridge{
 		runtimeBridge: bridgepkg.New(conn, logger, proxyAddr),
@@ -268,28 +261,8 @@ func (b *bridge) RelayPayloadToTunnel(conn net.Conn, id uint64, bufferedPayload 
 	return tunnelRelayResultFromBridge(b.runtimeBridge.RelayPayloadToTunnel(conn, id, bufferedPayload))
 }
 
-func (b *bridge) relayPayloadToTunnel(conn net.Conn, id uint64, bufferedPayload []byte) tunnelRelayResult {
-	result := b.RelayPayloadToTunnel(conn, id, bufferedPayload)
-	return tunnelRelayResult{
-		sendClose: result.SendClose,
-		write:     result.Write,
-		err:       result.Err,
-		terminal:  result.Terminal,
-	}
-}
-
 func (b *bridge) RelayTunnelToPayload(ctx context.Context, conn net.Conn, tunnelCh <-chan helperproto.Envelope) ingress.TunnelRelayResult {
 	return tunnelRelayResultFromBridge(b.runtimeBridge.RelayTunnelToPayload(ctx, conn, tunnelCh))
-}
-
-func (b *bridge) relayTunnelToPayload(ctx context.Context, conn net.Conn, tunnelCh <-chan helperproto.Envelope) tunnelRelayResult {
-	result := b.RelayTunnelToPayload(ctx, conn, tunnelCh)
-	return tunnelRelayResult{
-		sendClose: result.SendClose,
-		write:     result.Write,
-		err:       result.Err,
-		terminal:  result.Terminal,
-	}
 }
 
 func tunnelRelayResultFromBridge(result bridgepkg.TunnelRelayResult) ingress.TunnelRelayResult {
