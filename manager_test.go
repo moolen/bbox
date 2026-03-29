@@ -48,10 +48,8 @@ func TestProxyManagerRegistryLifecycle(t *testing.T) {
 
 func TestProxyManagerCACertPEMReturnsParseableCertificateWhenMITMEnabled(t *testing.T) {
 	manager, err := NewProxyManager(ProxyOptions{
-		MITM: MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 65536,
-		},
+		MaxRequestBodyBytes: 65536,
+		MITM:                MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatalf("create manager: %v", err)

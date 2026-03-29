@@ -37,10 +37,8 @@ func TestSandboxMITMHTTPSWithCurl(t *testing.T) {
 	defer cancel()
 
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-		MITM: bbox.MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 8,
-		},
+		MaxRequestBodyBytes: 8,
+		MITM:                bbox.MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +209,8 @@ func TestMITMSharedManagerServesMultipleSandboxes(t *testing.T) {
 	defer cancel()
 
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-		MITM: bbox.MITMOptions{Enabled: true, MaxRequestBodyBytes: 1024},
+		MaxRequestBodyBytes: 1024,
+		MITM:                bbox.MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -63,9 +63,6 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	if opts.MaxResponseBodyBytes < 0 {
 		return nil, fmt.Errorf("max response body bytes must be non-negative")
 	}
-	if opts.MITM.MaxRequestBodyBytes < 0 {
-		return nil, fmt.Errorf("MITM max request body bytes must be non-negative")
-	}
 
 	listenAddr := strings.TrimSpace(opts.ListenAddr)
 	if listenAddr == "" {
@@ -98,9 +95,6 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 func effectiveRequestBodyLimit(opts ProxyOptions) int64 {
 	if opts.MaxRequestBodyBytes > 0 {
 		return opts.MaxRequestBodyBytes
-	}
-	if opts.MITM.MaxRequestBodyBytes > 0 {
-		return opts.MITM.MaxRequestBodyBytes
 	}
 	return defaultMaxRequestBodyBytes
 }

@@ -67,9 +67,6 @@ type ProxyOptions struct {
 type MITMOptions struct {
 	// Enabled enables MITM handling for HTTP CONNECT traffic.
 	Enabled bool
-	// MaxRequestBodyBytes caps buffered MITM request bodies. Zero falls back to
-	// ProxyOptions.MaxRequestBodyBytes, then the secure default.
-	MaxRequestBodyBytes int64
 }
 
 // Mount binds a host path into the sandbox.

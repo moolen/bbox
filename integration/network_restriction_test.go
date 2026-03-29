@@ -194,7 +194,8 @@ func TestNetworkRestrictionsTransparentMode(t *testing.T) {
 	trustHTTPSServer(t, httpsServer)
 
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-		MITM: bbox.MITMOptions{Enabled: true, MaxRequestBodyBytes: 1024},
+		MaxRequestBodyBytes: 1024,
+		MITM:                bbox.MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatal(err)

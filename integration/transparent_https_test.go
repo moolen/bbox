@@ -39,10 +39,8 @@ func TestTransparentHTTPSWithCurl(t *testing.T) {
 	defer cancel()
 
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-		MITM: bbox.MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 1024,
-		},
+		MaxRequestBodyBytes: 1024,
+		MITM:                bbox.MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -128,10 +126,8 @@ func TestTransparentModeRejectsIPLiteralAndNonDefaultPorts(t *testing.T) {
 	defer cancel()
 
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-		MITM: bbox.MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 1024,
-		},
+		MaxRequestBodyBytes: 1024,
+		MITM:                bbox.MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -224,10 +220,8 @@ func TestProxyAndTransparentSandboxesCanRunConcurrently(t *testing.T) {
 	defer cancel()
 
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-		MITM: bbox.MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 1024,
-		},
+		MaxRequestBodyBytes: 1024,
+		MITM:                bbox.MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatal(err)
