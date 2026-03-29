@@ -1,18 +1,11 @@
 package bbox
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -21,16 +14,12 @@ import (
 	"github.com/moolen/bbox/internal/helperruntime"
 )
 
-var packageRootRuntimeCaller = runtime.Caller
-var packageRootGetwd = os.Getwd
-
 func newProxyManager(policy *compiledPolicy) *ProxyManager {
 	return &ProxyManager{
-		policy:          policy,
-		sandboxes:       make(map[string]*Sandbox),
-		sandboxPolicies: make(map[string]*compiledPolicy),
-		transport:       cloneDefaultTransport(),
-		listenAddr:      helperruntime.DefaultProxyAddr,
+		registry:   newSandboxRegistry(policy),
+		resolver:   newHelperBinaryResolver(),
+		transport:  cloneDefaultTransport(),
+		listenAddr: helperruntime.DefaultProxyAddr,
 	}
 }
 
@@ -41,44 +30,13 @@ func cloneDefaultTransport() *http.Transport {
 	return &http.Transport{}
 }
 
-func readBoundedResponse(body io.ReadCloser, maxBytes int64) ([]byte, bool, error) {
-	if body == nil {
-		return nil, false, nil
-	}
-	defer body.Close()
-
-	if maxBytes <= 0 {
-		data, err := io.ReadAll(body)
-		return data, false, err
-	}
-
-	limited, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
-	if err != nil {
-		return nil, false, err
-	}
-	if int64(len(limited)) > maxBytes {
-		return limited[:maxBytes], true, nil
-	}
-	return limited, false, nil
-}
-
 func (m *ProxyManager) registerSandbox(sandboxID string, policy *compiledPolicy) error {
-	if sandboxID == "" {
-		return fmt.Errorf("sandbox ID is required")
-	}
-	if policy == nil {
-		policy = m.policy
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.sandboxes[sandboxID]; exists {
-		return fmt.Errorf("sandbox %q is already registered", sandboxID)
+	if err := m.registry.Register(sandboxID, policy); err != nil {
+		return err
 	}
-
-	m.sandboxes[sandboxID] = nil
-	m.sandboxPolicies[sandboxID] = policy
 	initAuditStateLocked(m, sandboxID)
 	return nil
 }
@@ -86,33 +44,18 @@ func (m *ProxyManager) registerSandbox(sandboxID string, policy *compiledPolicy)
 func (m *ProxyManager) attachSandbox(sandboxID string, sandbox *Sandbox) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	if _, exists := m.sandboxes[sandboxID]; !exists {
-		return fmt.Errorf("sandbox %q is not registered", sandboxID)
-	}
-	m.sandboxes[sandboxID] = sandbox
-	return nil
+	return m.registry.Attach(sandboxID, sandbox)
 }
 
 func (m *ProxyManager) unregisterSandbox(sandboxID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.sandboxes, sandboxID)
-	delete(m.sandboxPolicies, sandboxID)
+	m.registry.Unregister(sandboxID)
 	removeAuditStateLocked(m, sandboxID)
 }
 
 func (m *ProxyManager) policyForSandbox(sandboxID string) (*compiledPolicy, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	policy, ok := m.sandboxPolicies[sandboxID]
-	return policy, ok
-}
-
-func (m *ProxyManager) outboundTransport() *http.Transport {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.transport
+	return m.registry.Policy(sandboxID)
 }
 
 func (m *ProxyManager) nextSandboxName(requested string) string {
@@ -123,96 +66,7 @@ func (m *ProxyManager) nextSandboxName(requested string) string {
 }
 
 func (m *ProxyManager) helperBinary() (string, error) {
-	m.helperBinaryOnce.Do(func() {
-		moduleRoot, err := packageRoot()
-		if err != nil {
-			m.helperBinaryErr = err
-			return
-		}
-
-		buildDir, err := os.MkdirTemp("", "bbox-helper-build-")
-		if err != nil {
-			m.helperBinaryErr = fmt.Errorf("create helper build dir: %w", err)
-			return
-		}
-
-		helperPath := filepath.Join(buildDir, "bbox-helper")
-		cmd := exec.Command("go", "build", "-o", helperPath, "./cmd/bbox-helper")
-		cmd.Dir = moduleRoot
-
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			_ = os.RemoveAll(buildDir)
-			msg := strings.TrimSpace(string(output))
-			if msg != "" {
-				m.helperBinaryErr = fmt.Errorf("build helper binary: %w: %s", err, msg)
-				return
-			}
-			m.helperBinaryErr = fmt.Errorf("build helper binary: %w", err)
-			return
-		}
-
-		m.helperBinaryDir = buildDir
-		m.helperBinaryPath = helperPath
-	})
-
-	if m.helperBinaryErr != nil {
-		return "", m.helperBinaryErr
-	}
-	if m.helperBinaryPath == "" {
-		return "", fmt.Errorf("helper binary path is empty")
-	}
-	return m.helperBinaryPath, nil
-}
-
-func packageRoot() (string, error) {
-	if _, file, _, ok := packageRootRuntimeCaller(0); ok {
-		if root, found := findPackageRoot(filepath.Dir(file)); found {
-			return root, nil
-		}
-	}
-
-	cwd, err := packageRootGetwd()
-	if err != nil {
-		return "", fmt.Errorf("determine package root: %w", err)
-	}
-	if root, found := findPackageRoot(cwd); found {
-		return root, nil
-	}
-
-	return "", fmt.Errorf("locate package root from working directory %q", cwd)
-}
-
-func findPackageRoot(start string) (string, bool) {
-	if start == "" {
-		return "", false
-	}
-
-	dir, err := filepath.Abs(start)
-	if err != nil {
-		return "", false
-	}
-
-	for {
-		if isPackageRoot(dir) {
-			return dir, true
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", false
-		}
-		dir = parent
-	}
-}
-
-func isPackageRoot(dir string) bool {
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
-		return false
-	}
-	if _, err := os.Stat(filepath.Join(dir, "cmd", "bbox-helper", "main.go")); err != nil {
-		return false
-	}
-	return true
+	return m.resolver.HelperBinary()
 }
 
 func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string, req helperproto.ProxyRequest) *helperproto.ProxyResponse {
@@ -220,163 +74,12 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 	if !ok {
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("sandbox %q is not registered", sandboxID)}
 	}
-	trafficMode := m.trafficModeForSandbox(sandboxID)
-
-	targetURL, err := url.Parse(req.URL)
-	if err != nil {
-		return &helperproto.ProxyResponse{Error: fmt.Sprintf("parse request URL %q: %v", req.URL, err)}
-	}
-	path := targetURL.Path
-	if path == "" {
-		path = "/"
-	}
-	port := 0
-	if rawPort := targetURL.Port(); rawPort != "" {
-		if parsed, err := strconv.Atoi(rawPort); err == nil {
-			port = parsed
-		}
-	} else {
-		switch strings.ToLower(targetURL.Scheme) {
-		case "https":
-			port = 443
-		case "http":
-			port = 80
-		}
-	}
-	host, port := normalizeHostPort(targetURL.Host, port)
-	if m.requestBodyLimitBytes > 0 && int64(len(req.Body)) > m.requestBodyLimitBytes {
-		err := "request body exceeds inspection limit"
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "http",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     false,
-			StatusCode:  http.StatusRequestEntityTooLarge,
-			Result:      "denied",
-			Error:       err,
-		})
-		return &helperproto.ProxyResponse{
-			StatusCode: http.StatusRequestEntityTooLarge,
-			Header: http.Header{
-				"Content-Type": []string{"text/plain; charset=utf-8"},
-			},
-			Body: []byte("proxy request denied: " + err + "\n"),
-		}
-	}
-	if err := policy.Check(req.Method, targetURL.Host, req.Method == http.MethodConnect); err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "http",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     false,
-			StatusCode:  http.StatusForbidden,
-			Result:      "denied",
-			Error:       err.Error(),
-		})
-		return &helperproto.ProxyResponse{
-			StatusCode: http.StatusForbidden,
-			Header: http.Header{
-				"Content-Type": []string{"text/plain; charset=utf-8"},
-			},
-			Body: []byte("proxy request denied: " + err.Error() + "\n"),
-		}
-	}
-
-	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL.String(), bytes.NewReader(req.Body))
-	if err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "http",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     true,
-			Result:      "upstream_error",
-			Error:       err.Error(),
-		})
-		return &helperproto.ProxyResponse{Error: fmt.Sprintf("build outbound request: %v", err)}
-	}
-	outReq.Header = req.Header.Clone()
-	outReq.Host = targetURL.Host
-
-	resp, err := m.outboundTransport().RoundTrip(outReq)
-	if err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "http",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     true,
-			Result:      "upstream_error",
-			Error:       err.Error(),
-		})
-		return &helperproto.ProxyResponse{Error: err.Error()}
-	}
-	body, tooLarge, err := readBoundedResponse(resp.Body, m.responseBodyLimitBytes)
-	if err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "http",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     true,
-			StatusCode:  resp.StatusCode,
-			Result:      "upstream_error",
-			Error:       err.Error(),
-		})
-		return &helperproto.ProxyResponse{Error: fmt.Sprintf("read outbound response body: %v", err)}
-	}
-	if tooLarge {
-		err := "upstream response body exceeds configured limit"
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "http",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     true,
-			StatusCode:  resp.StatusCode,
-			Result:      "upstream_error",
-			Error:       err,
-		})
-		return &helperproto.ProxyResponse{Error: err}
-	}
-
-	m.recordAccessEvent(accessEvent{
-		SandboxID:   sandboxID,
-		TrafficMode: trafficMode,
-		Kind:        "http",
-		Host:        host,
-		Port:        port,
-		Method:      req.Method,
-		Path:        path,
-		Allowed:     true,
-		StatusCode:  resp.StatusCode,
-		Result:      "allowed",
-	})
-	return &helperproto.ProxyResponse{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header.Clone(),
-		Body:       body,
-	}
+	return newManagerProxyService(managerProxyConfig{
+		transport:            m.transport,
+		maxRequestBodyBytes:  m.requestBodyLimitBytes,
+		maxResponseBodyBytes: m.responseBodyLimitBytes,
+		record:               m.recordAccessEvent,
+	}).HandleProxyRequest(ctx, policy, sandboxID, req)
 }
 
 func (m *ProxyManager) handleConnectRequest(ctx context.Context, sandboxID string, req helperproto.ConnectRequest) *helperproto.ConnectResponse {
@@ -387,44 +90,7 @@ func (m *ProxyManager) handleConnectRequest(ctx context.Context, sandboxID strin
 			Error:      fmt.Sprintf("sandbox %q is not registered", sandboxID),
 		}
 	}
-	trafficMode := m.trafficModeForSandbox(sandboxID)
-
-	host, port := normalizeHostPort(req.Host, req.Port)
-	hostport := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
-	if err := policy.Check(http.MethodConnect, hostport, true); err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "connect",
-			Host:        host,
-			Port:        port,
-			Method:      http.MethodConnect,
-			Allowed:     false,
-			StatusCode:  http.StatusForbidden,
-			Result:      "denied",
-			Error:       err.Error(),
-		})
-		return &helperproto.ConnectResponse{
-			StatusCode: http.StatusForbidden,
-			Message:    "connect request denied",
-			Error:      err.Error(),
-		}
-	}
-
-	m.recordAccessEvent(accessEvent{
-		SandboxID:   sandboxID,
-		TrafficMode: trafficMode,
-		Kind:        "connect",
-		Host:        host,
-		Port:        port,
-		Method:      http.MethodConnect,
-		Allowed:     true,
-		StatusCode:  http.StatusOK,
-		Result:      "allowed",
-	})
-	return &helperproto.ConnectResponse{
-		StatusCode: http.StatusOK,
-	}
+	return newManagerConnectService(m.recordAccessEvent).HandleConnectRequest(ctx, policy, sandboxID, req)
 }
 
 func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, req helperproto.MITMRequest) *helperproto.MITMResponse {
@@ -435,329 +101,12 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 			Error:      fmt.Sprintf("sandbox %q is not registered", sandboxID),
 		}
 	}
-	trafficMode := m.trafficModeForSandbox(sandboxID)
-	scheme := req.Scheme
-	if scheme == "" {
-		scheme = "https"
-	}
-	authority := req.Authority
-	if authority == "" {
-		authority = req.Host
-	}
-	policyHost := req.Host
-	if policyHost == "" {
-		policyHost = authority
-	}
-	path := req.Path
-	if path == "" {
-		path = "/"
-	}
-	host, port := mitmHostPort(req.Host, authority, scheme)
-	if req.BodyTooLarge {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     false,
-			StatusCode:  http.StatusRequestEntityTooLarge,
-			Result:      "denied",
-			Error:       "request body exceeds inspection limit",
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusRequestEntityTooLarge,
-			Header: http.Header{
-				"Content-Type": []string{"text/plain; charset=utf-8"},
-			},
-			Body: []byte("proxy request denied: request body exceeds inspection limit\n"),
-		}
-	}
-
-	if err := validateMITMHostAuthority(policyHost, authority); err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     false,
-			StatusCode:  http.StatusForbidden,
-			Result:      "denied",
-			Error:       err.Error(),
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusForbidden,
-			Header: http.Header{
-				"Content-Type": []string{"text/plain; charset=utf-8"},
-			},
-			Body: []byte("proxy request denied: " + err.Error() + "\n"),
-		}
-	}
-
-	if m.requestBodyLimitBytes > 0 && int64(len(req.Body)) > m.requestBodyLimitBytes {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     false,
-			StatusCode:  http.StatusRequestEntityTooLarge,
-			Result:      "denied",
-			Error:       "request body exceeds inspection limit",
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusRequestEntityTooLarge,
-			Header: http.Header{
-				"Content-Type": []string{"text/plain; charset=utf-8"},
-			},
-			Body: []byte("proxy request denied: request body exceeds inspection limit\n"),
-		}
-	}
-
-	if err := policy.CheckRequest(PolicyRequest{
-		Method:       req.Method,
-		Host:         policyHost,
-		Path:         req.Path,
-		Header:       req.Header,
-		Body:         req.Body,
-		BodyTooLarge: req.BodyTooLarge,
-	}); err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     false,
-			StatusCode:  http.StatusForbidden,
-			Result:      "denied",
-			Error:       err.Error(),
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusForbidden,
-			Header: http.Header{
-				"Content-Type": []string{"text/plain; charset=utf-8"},
-			},
-			Body: []byte("proxy request denied: " + err.Error() + "\n"),
-		}
-	}
-	if authority == "" {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     false,
-			StatusCode:  http.StatusBadRequest,
-			Result:      "denied",
-			Error:       "MITM request authority is required",
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusBadRequest,
-			Error:      "MITM request authority is required",
-		}
-	}
-
-	targetURL := &url.URL{
-		Scheme:   scheme,
-		Host:     authority,
-		Path:     path,
-		RawQuery: req.RawQuery,
-	}
-	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL.String(), bytes.NewReader(req.Body))
-	if err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     true,
-			Result:      "upstream_error",
-			Error:       err.Error(),
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusBadGateway,
-			Error:      fmt.Sprintf("build outbound MITM request: %v", err),
-		}
-	}
-	outReq.Header = req.Header.Clone()
-	if outReq.Header == nil {
-		outReq.Header = make(http.Header)
-	}
-	if req.Host != "" {
-		outReq.Host = req.Host
-	}
-
-	resp, err := m.outboundTransport().RoundTrip(outReq)
-	if err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     true,
-			Result:      "upstream_error",
-			Error:       err.Error(),
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusBadGateway,
-			Error:      err.Error(),
-		}
-	}
-	body, tooLarge, err := readBoundedResponse(resp.Body, m.responseBodyLimitBytes)
-	if err != nil {
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     true,
-			StatusCode:  resp.StatusCode,
-			Result:      "upstream_error",
-			Error:       err.Error(),
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusBadGateway,
-			Error:      fmt.Sprintf("read outbound MITM response body: %v", err),
-		}
-	}
-	if tooLarge {
-		err := "upstream response body exceeds configured limit"
-		m.recordAccessEvent(accessEvent{
-			SandboxID:   sandboxID,
-			TrafficMode: trafficMode,
-			Kind:        "mitm",
-			Host:        host,
-			Port:        port,
-			Method:      req.Method,
-			Path:        path,
-			Allowed:     true,
-			StatusCode:  resp.StatusCode,
-			Result:      "upstream_error",
-			Error:       err,
-		})
-		return &helperproto.MITMResponse{
-			StatusCode: http.StatusBadGateway,
-			Error:      err,
-		}
-	}
-
-	m.recordAccessEvent(accessEvent{
-		SandboxID:   sandboxID,
-		TrafficMode: trafficMode,
-		Kind:        "mitm",
-		Host:        host,
-		Port:        port,
-		Method:      req.Method,
-		Path:        path,
-		Allowed:     true,
-		StatusCode:  resp.StatusCode,
-		Result:      "allowed",
-	})
-	return &helperproto.MITMResponse{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header.Clone(),
-		Body:       body,
-	}
-}
-
-func validateMITMHostAuthority(requestHost, authority string) error {
-	if strings.TrimSpace(authority) == "" || strings.TrimSpace(requestHost) == "" {
-		return nil
-	}
-
-	normalizedRequestHost, err := normalizePolicyHostname(requestHost)
-	if err != nil {
-		return err
-	}
-	normalizedAuthorityHost, err := normalizePolicyHostname(authority)
-	if err != nil {
-		return err
-	}
-	if normalizedRequestHost != normalizedAuthorityHost {
-		return fmt.Errorf("request host %q does not match upstream authority %q", normalizedRequestHost, normalizedAuthorityHost)
-	}
-	return nil
-}
-
-func authorityPort(authority string) string {
-	if authority == "" {
-		return ""
-	}
-	_, port, err := net.SplitHostPort(authority)
-	if err != nil {
-		return ""
-	}
-	return port
-}
-
-func mitmHostPort(requestHost, authority, scheme string) (string, int) {
-	requestHost = strings.TrimSpace(requestHost)
-	base := requestHost
-	if base == "" {
-		base = authority
-	}
-	if base == "" {
-		return normalizeHostPort(base, 0)
-	}
-	if requestHost != "" {
-		if rawPort := authorityPort(base); rawPort != "" {
-			if parsed, err := strconv.Atoi(rawPort); err == nil {
-				return normalizeHostPort(base, parsed)
-			}
-			return normalizeHostPort(base, 0)
-		}
-		if rawPort := authorityPort(authority); rawPort != "" {
-			if parsed, err := strconv.Atoi(rawPort); err == nil {
-				return normalizeHostPort(base, parsed)
-			}
-		}
-		port := defaultPortForScheme(scheme)
-		return normalizeHostPort(base, port)
-	}
-
-	port := 0
-	if rawPort := authorityPort(base); rawPort != "" {
-		if parsed, err := strconv.Atoi(rawPort); err == nil {
-			port = parsed
-		}
-	} else {
-		port = defaultPortForScheme(scheme)
-	}
-	return normalizeHostPort(base, port)
-}
-
-func defaultPortForScheme(scheme string) int {
-	switch strings.ToLower(scheme) {
-	case "https":
-		return 443
-	case "http":
-		return 80
-	default:
-		return 0
-	}
+	return newManagerProxyService(managerProxyConfig{
+		transport:            m.transport,
+		maxRequestBodyBytes:  m.requestBodyLimitBytes,
+		maxResponseBodyBytes: m.responseBodyLimitBytes,
+		record:               m.recordAccessEvent,
+	}).HandleMITMRequest(ctx, policy, sandboxID, req)
 }
 
 func (m *ProxyManager) handleLeafCertRequest(host string) *helperproto.LeafCertResponse {
@@ -810,25 +159,14 @@ func (m *ProxyManager) Close() error {
 	var closeErr error
 
 	m.closeOnce.Do(func() {
-		m.mu.RLock()
-		sandboxes := make([]*Sandbox, 0, len(m.sandboxes))
-		for _, sandbox := range m.sandboxes {
-			if sandbox != nil {
-				sandboxes = append(sandboxes, sandbox)
-			}
-		}
-		m.mu.RUnlock()
+		sandboxes := m.registry.AttachedSandboxes()
 
 		for _, sandbox := range sandboxes {
 			closeErr = errors.Join(closeErr, sandbox.Close())
 		}
 
-		if transport := m.outboundTransport(); transport != nil {
-			transport.CloseIdleConnections()
-		}
-		if m.helperBinaryDir != "" {
-			closeErr = errors.Join(closeErr, os.RemoveAll(m.helperBinaryDir))
-		}
+		newManagerProxyService(managerProxyConfig{transport: m.transport}).CloseIdleConnections()
+		closeErr = errors.Join(closeErr, m.resolver.Cleanup())
 
 		m.mu.Lock()
 		auditStateByManager.Delete(m)
@@ -836,70 +174,4 @@ func (m *ProxyManager) Close() error {
 	})
 
 	return closeErr
-}
-
-func (m *ProxyManager) recordAccessEvent(event accessEvent) {
-	if m == nil || event.SandboxID == "" {
-		return
-	}
-	if event.Time.IsZero() {
-		event.Time = time.Now()
-	}
-	event.TrafficMode = normalizeTrafficMode(event.TrafficMode)
-	entry := event.toAccessLogEntry()
-
-	m.mu.Lock()
-	if _, ok := m.sandboxes[event.SandboxID]; !ok {
-		m.mu.Unlock()
-		return
-	}
-	updateAuditStateLocked(auditStateLocked(m), event)
-	logger := m.accessLogger
-	m.mu.Unlock()
-
-	if logger != nil {
-		func() {
-			defer func() {
-				_ = recover()
-			}()
-			logger.LogAccess(entry)
-		}()
-	}
-}
-
-func (m *ProxyManager) trafficModeForSandbox(sandboxID string) TrafficMode {
-	if m == nil || sandboxID == "" {
-		return TrafficModeProxy
-	}
-
-	m.mu.RLock()
-	sandbox := m.sandboxes[sandboxID]
-	m.mu.RUnlock()
-	if sandbox == nil {
-		return TrafficModeProxy
-	}
-
-	return normalizeTrafficMode(sandbox.trafficMode)
-}
-
-func (m *ProxyManager) accessedDomainsSnapshot(sandboxID string) []AccessedDomain {
-	if m == nil || sandboxID == "" {
-		return []AccessedDomain{}
-	}
-
-	m.mu.RLock()
-	stateValue, ok := auditStateByManager.Load(m)
-	if !ok {
-		m.mu.RUnlock()
-		return []AccessedDomain{}
-	}
-	state := stateValue.(*managerAuditState)
-	sandboxState, ok := state.sandboxes[sandboxID]
-	if !ok {
-		m.mu.RUnlock()
-		return []AccessedDomain{}
-	}
-	snapshot := snapshotAccessedDomains(sandboxState)
-	m.mu.RUnlock()
-	return snapshot
 }

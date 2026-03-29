@@ -234,10 +234,8 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 
 	return runConfig{
 		manager: bbox.ProxyOptions{
-			MITM: bbox.MITMOptions{
-				Enabled:             opts.mitm,
-				MaxRequestBodyBytes: opts.maxRequestBodyBytes,
-			},
+			MaxRequestBodyBytes: opts.maxRequestBodyBytes,
+			MITM:                bbox.MITMOptions{Enabled: opts.mitm},
 		},
 		sandbox: bbox.SandboxOptions{
 			Name:        strings.TrimSpace(opts.name),

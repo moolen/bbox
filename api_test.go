@@ -91,10 +91,8 @@ func TestNewProxyManagerAcceptsListenAddr(t *testing.T) {
 
 func TestNewProxyManagerAcceptsMITMOptions(t *testing.T) {
 	manager, err := NewProxyManager(ProxyOptions{
-		MITM: MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 65536,
-		},
+		MaxRequestBodyBytes: 65536,
+		MITM:                MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatalf("expected MITM options to be accepted: %v", err)
@@ -104,15 +102,13 @@ func TestNewProxyManagerAcceptsMITMOptions(t *testing.T) {
 	}
 }
 
-func TestNewProxyManagerRejectsNegativeMITMBodyLimit(t *testing.T) {
+func TestNewProxyManagerRejectsNegativeRequestBodyLimit(t *testing.T) {
 	_, err := NewProxyManager(ProxyOptions{
-		MITM: MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: -1,
-		},
+		MaxRequestBodyBytes: -1,
+		MITM:                MITMOptions{Enabled: true},
 	})
 	if err == nil {
-		t.Fatal("expected invalid MITM body limit to fail")
+		t.Fatal("expected invalid request body limit to fail")
 	}
 }
 

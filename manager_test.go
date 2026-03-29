@@ -86,10 +86,8 @@ func TestProxyManagerRegistryLifecycle(t *testing.T) {
 
 func TestProxyManagerCACertPEMReturnsParseableCertificateWhenMITMEnabled(t *testing.T) {
 	manager, err := NewProxyManager(ProxyOptions{
-		MITM: MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 65536,
-		},
+		MaxRequestBodyBytes: 65536,
+		MITM:                MITMOptions{Enabled: true},
 	})
 	if err != nil {
 		t.Fatalf("create manager: %v", err)
@@ -783,6 +781,29 @@ func TestReadBoundedResponseRejectsOversizedBody(t *testing.T) {
 	}
 	if len(body) != 5 {
 		t.Fatalf("expected truncated body length 5, got %d", len(body))
+	}
+}
+
+// Keep assertions package-local for now; these tests become the safety net
+// while functions move into smaller packages in later tasks.
+func TestReadBoundedResponseFlagsOversize(t *testing.T) {
+	body := io.NopCloser(strings.NewReader("abcdef"))
+	got, tooLarge, err := readBoundedResponse(body, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abc" || !tooLarge {
+		t.Fatalf("got %q tooLarge=%v", string(got), tooLarge)
+	}
+}
+
+func TestValidateMITMHostAuthorityRejectsMismatch(t *testing.T) {
+	err := validateMITMHostAuthority("allowed.example", "127.0.0.1:443")
+	if err == nil {
+		t.Fatal("expected mismatch")
+	}
+	if !strings.Contains(err.Error(), "does not match upstream authority") {
+		t.Fatalf("expected mismatch error contract, got %q", err.Error())
 	}
 }
 

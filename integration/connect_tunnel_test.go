@@ -15,7 +15,7 @@ import (
 	"github.com/moolen/bbox"
 )
 
-func TestTwoSandboxesUseDifferentConnectPolicies(t *testing.T) {
+func TestConnectTunnelUsesDifferentConnectPolicies(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("bubblewrap sandbox integration test requires linux")
 	}

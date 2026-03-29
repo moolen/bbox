@@ -27,10 +27,20 @@ import (
 	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
+	"github.com/moolen/bbox/internal/helperruntime/ingress"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
 
+var (
+	_ func(*bridgepkg.RuntimeBridge, context.Context, string, int) (uint64, <-chan helperproto.Envelope, *helperproto.ConnectResponse, error) = (*bridgepkg.RuntimeBridge).Connect
+	_ func(*bridgepkg.RuntimeBridge, uint64) <-chan helperproto.Envelope                                                                      = (*bridgepkg.RuntimeBridge).RegisterTunnel
+	_ func(*bridgepkg.RuntimeBridge, context.Context, string) (*helperproto.LeafCertResponse, error)                                          = (*bridgepkg.RuntimeBridge).RequestLeafCert
+)
+
+// Keep assertions package-local for now; these tests become the safety net
+// while runtime internals move into smaller packages in later tasks.
 func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
 	bridge, peer, errCh := startReadLoop(t, "127.0.0.1:31111")
 	defer bridge.Close()
@@ -92,6 +102,20 @@ func TestRunTransparentRequiresAllListeners(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected transparent startup to fail when a listener cannot bind")
+	}
+}
+
+func TestReadBoundedBodyFlagsOversize(t *testing.T) {
+	t.Parallel()
+
+	body := io.NopCloser(strings.NewReader("abcdef"))
+
+	got, tooLarge, err := bridgepkg.ReadBoundedBody(body, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abc" || !tooLarge {
+		t.Fatalf("got %q tooLarge=%v", string(got), tooLarge)
 	}
 }
 
@@ -202,6 +226,20 @@ func TestTransparentHTTPRejectsMissingHost(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "host is required") {
 		t.Fatalf("unexpected response body: %q", string(body))
+	}
+}
+
+func TestRewriteTransparentHTTPRequestBuildsAbsoluteURL(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/path?q=1", nil)
+	req.Host = "example.com"
+
+	rewritten, err := ingress.RewriteTransparentHTTPRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rewritten.URL.String() != "http://example.com/path?q=1" {
+		t.Fatalf("got %q", rewritten.URL.String())
 	}
 }
 
@@ -1767,16 +1805,11 @@ func TestProxyHandlerConnectRelaysHijackerBufferedPayload(t *testing.T) {
 }
 
 func TestDeliverTunnelBackpressureDoesNotDropFrames(t *testing.T) {
-	bridgeSide, peerSide := net.Pipe()
-	defer bridgeSide.Close()
-	defer peerSide.Close()
-
-	bridge := newBridge(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111")
-	tunnelCh := bridge.registerTunnel(42)
-	defer bridge.unregisterTunnel(42)
+	bridge := newTestBridgeRuntime(t)
+	tunnelCh := bridge.RegisterTunnel(42)
 
 	for i := 0; i < cap(tunnelCh); i++ {
-		bridge.deliverTunnel(helperproto.Envelope{
+		bridge.DeliverTunnel(helperproto.Envelope{
 			ID: 42,
 			TunnelFrame: &helperproto.TunnelFrame{
 				Data: []byte{byte(i)},
@@ -1786,7 +1819,7 @@ func TestDeliverTunnelBackpressureDoesNotDropFrames(t *testing.T) {
 
 	blockedSendDone := make(chan struct{})
 	go func() {
-		bridge.deliverTunnel(helperproto.Envelope{
+		bridge.DeliverTunnel(helperproto.Envelope{
 			ID: 42,
 			TunnelFrame: &helperproto.TunnelFrame{
 				Data: []byte{0xff},
@@ -1818,6 +1851,27 @@ func TestDeliverTunnelBackpressureDoesNotDropFrames(t *testing.T) {
 	}
 	if !foundBlockedFrame {
 		t.Fatal("expected blocked frame to be delivered eventually, but it was lost")
+	}
+}
+
+func TestBridgeDeliversTunnelFramesToRegisteredChannel(t *testing.T) {
+	bridge := newTestBridgeRuntime(t)
+	ch := bridge.RegisterTunnel(42)
+
+	bridge.DeliverTunnel(helperproto.Envelope{
+		ID: 42,
+		TunnelFrame: &helperproto.TunnelFrame{
+			Data: []byte("ping"),
+		},
+	})
+
+	select {
+	case env := <-ch:
+		if string(env.TunnelFrame.Data) != "ping" {
+			t.Fatalf("got %q", string(env.TunnelFrame.Data))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for tunnel frame")
 	}
 }
 
@@ -1892,9 +1946,7 @@ func TestHandleConnectCleansUpTunnelWhenConnectEstablishedWriteFails(t *testing.
 		t.Fatal("timed out waiting for tunnel close after failed 200 write")
 	}
 
-	bridge.tunnelMu.Lock()
-	remaining := len(bridge.tunnels)
-	bridge.tunnelMu.Unlock()
+	remaining := bridge.runtimeBridge.TunnelCount()
 	if remaining != 0 {
 		t.Fatalf("expected tunnel registry cleanup after failed 200 write, still have %d tunnel(s)", remaining)
 	}
@@ -1928,11 +1980,11 @@ func TestRelayTunnelToPayloadHandlesShortWrites(t *testing.T) {
 		TunnelClose: &helperproto.TunnelClose{},
 	}
 
-	result := bridge.relayTunnelToPayload(context.Background(), conn, tunnelCh)
-	if result.err != nil {
-		t.Fatalf("expected relay to succeed, got %v", result.err)
+	result := bridge.RelayTunnelToPayload(context.Background(), conn, tunnelCh)
+	if result.Err != nil {
+		t.Fatalf("expected relay to succeed, got %v", result.Err)
 	}
-	if !result.terminal {
+	if !result.Terminal {
 		t.Fatalf("expected terminal tunnel close result, got %#v", result)
 	}
 	if got := conn.writes.String(); got != "hello" {
@@ -2042,18 +2094,14 @@ func TestProxyHandlerTunnelDualHalfCloseCleansUp(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		bridge.tunnelMu.Lock()
-		n := len(bridge.tunnels)
-		bridge.tunnelMu.Unlock()
+		n := bridge.runtimeBridge.TunnelCount()
 		if n == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	bridge.tunnelMu.Lock()
-	remaining := len(bridge.tunnels)
-	bridge.tunnelMu.Unlock()
+	remaining := bridge.runtimeBridge.TunnelCount()
 	if remaining != 0 {
 		t.Fatalf("expected tunnel registry cleanup after dual half-close, still have %d tunnel(s)", remaining)
 	}
@@ -2090,6 +2138,18 @@ func startReadLoop(t *testing.T, proxyAddr string) (net.Conn, net.Conn, <-chan e
 	}()
 
 	return bridgeSide, peerSide, errCh
+}
+
+func newTestBridgeRuntime(t *testing.T) *bridgepkg.RuntimeBridge {
+	t.Helper()
+
+	bridgeSide, peerSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = bridgeSide.Close()
+		_ = peerSide.Close()
+	})
+
+	return bridgepkg.New(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111")
 }
 
 func startTransparentRuntime(t *testing.T) (string, func()) {

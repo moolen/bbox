@@ -162,10 +162,8 @@ Enable MITM once on the shared manager:
 
 ```go
 manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-	MITM: bbox.MITMOptions{
-		Enabled:             true,
-		MaxRequestBodyBytes: 64 << 10,
-	},
+	MaxRequestBodyBytes: 64 << 10,
+	MITM:                bbox.MITMOptions{Enabled: true},
 	NetworkPolicy: bbox.NetworkPolicy{
 		AllowHostPatterns: []string{`^api[.]github[.]com$`},
 		AllowHTTPMethods:  []string{"GET", "POST"},
@@ -178,7 +176,7 @@ manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
 
 When MITM is enabled, `bbox` generates one ephemeral CA per `ProxyManager`, injects that CA into each staged sandbox root, evaluates decrypted HTTPS requests on the host before dialing upstream, and rejects requests whose decrypted `Host` disagrees with the real upstream authority.
 
-Buffered request and response bodies are capped by default. `ProxyOptions.MaxRequestBodyBytes` defaults to `1 << 20`, `ProxyOptions.MaxResponseBodyBytes` defaults to `4 << 20`, and `MITM.MaxRequestBodyBytes` still overrides the request cap for compatibility. Oversized requests are denied and oversized upstream responses fail deterministically instead of being buffered without bound.
+Buffered request and response bodies are capped by default. `ProxyOptions.MaxRequestBodyBytes` defaults to `1 << 20` and `ProxyOptions.MaxResponseBodyBytes` defaults to `4 << 20`. Oversized requests are denied and oversized upstream responses fail deterministically instead of being buffered without bound.
 
 ## Traffic Modes
 
@@ -206,10 +204,8 @@ Transparent mode is opt-in and requires manager-wide MITM support:
 
 ```go
 manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
-	MITM: bbox.MITMOptions{
-		Enabled:             true,
-		MaxRequestBodyBytes: 64 << 10,
-	},
+	MaxRequestBodyBytes: 64 << 10,
+	MITM:                bbox.MITMOptions{Enabled: true},
 })
 
 sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{

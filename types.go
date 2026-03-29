@@ -67,9 +67,6 @@ type ProxyOptions struct {
 type MITMOptions struct {
 	// Enabled enables MITM handling for HTTP CONNECT traffic.
 	Enabled bool
-	// MaxRequestBodyBytes caps buffered MITM request bodies. Zero falls back to
-	// ProxyOptions.MaxRequestBodyBytes, then the secure default.
-	MaxRequestBodyBytes int64
 }
 
 // Mount binds a host path into the sandbox.
@@ -192,9 +189,8 @@ type NetworkPolicy struct {
 // route traffic through it.
 type ProxyManager struct {
 	mu                     sync.RWMutex
-	policy                 *compiledPolicy
-	sandboxes              map[string]*Sandbox
-	sandboxPolicies        map[string]*compiledPolicy
+	registry               *sandboxRegistry
+	resolver               *helperBinaryResolver
 	transport              *http.Transport
 	accessLogger           AccessLogger
 	listenAddr             string
@@ -204,11 +200,6 @@ type ProxyManager struct {
 	mitmCA                 *mitmCA
 	caCertPEM              []byte
 	nextSandboxID          atomic.Uint64
-
-	helperBinaryOnce sync.Once
-	helperBinaryPath string
-	helperBinaryDir  string
-	helperBinaryErr  error
 
 	closeOnce sync.Once
 }

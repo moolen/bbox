@@ -56,11 +56,9 @@ func ExampleNewProxyManager() {
 
 func ExampleProxyOptions() {
 	opts := bbox.ProxyOptions{
-		ListenAddr: "127.0.0.1:0",
-		MITM: bbox.MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 64 << 10,
-		},
+		ListenAddr:          "127.0.0.1:0",
+		MaxRequestBodyBytes: 64 << 10,
+		MITM:                bbox.MITMOptions{Enabled: true},
 		NetworkPolicy: bbox.NetworkPolicy{
 			AllowHostPatterns: []string{`^api[.]github[.]com$`, `^github[.]com$`},
 			AllowHTTPMethods:  []string{"GET"},
@@ -163,10 +161,8 @@ func ExampleSeccompSandbox() {
 
 func ExampleTransparentModeSandbox() {
 	managerOpts := bbox.ProxyOptions{
-		MITM: bbox.MITMOptions{
-			Enabled:             true,
-			MaxRequestBodyBytes: 64 << 10,
-		},
+		MaxRequestBodyBytes: 64 << 10,
+		MITM:                bbox.MITMOptions{Enabled: true},
 	}
 	sandboxOpts := bbox.SandboxOptions{
 		TrafficMode: bbox.TrafficModeTransparent,
