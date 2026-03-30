@@ -39,6 +39,12 @@ func TestRunParsesHelperFlagsAndCallsRuntime(t *testing.T) {
 	}
 }
 
+func TestValidateArgsRejectsRemovedDNSAddrFlag(t *testing.T) {
+	if err := ValidateArgs([]string{"--dns-addr", "127.0.0.1:53", "child-proxy"}); err == nil {
+		t.Fatal("expected removed --dns-addr flag to be rejected")
+	}
+}
+
 type nopBridge struct{}
 
 func (nopBridge) Read([]byte) (int, error)    { return 0, io.EOF }
