@@ -199,7 +199,6 @@ func TestRunTransparentIgnoresLegacyDNSAddrBinding(t *testing.T) {
 			Bridge:      bridgeSide,
 			TrafficMode: TrafficModeTransparent,
 			MITMEnabled: true,
-			DNSAddr:     blockedTCPListener.Addr().String(),
 			Logger:      log.New(io.Discard, "", 0),
 		})
 	}()
