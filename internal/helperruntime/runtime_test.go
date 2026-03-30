@@ -2509,7 +2509,6 @@ func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
 		errCh <- Run(ctx, Config{
 			Bridge:      bridgeSide,
 			TrafficMode: TrafficModeTransparent,
-			DNSAddr:     "127.0.0.1:0",
 			Logger:      log.New(io.Discard, "", 0),
 		})
 	}()
