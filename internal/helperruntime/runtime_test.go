@@ -162,11 +162,21 @@ func TestHandleExecInputCancelTargetsCurrentRequestID(t *testing.T) {
 func TestRunTransparentIgnoresLegacyDNSAddrBinding(t *testing.T) {
 	t.Parallel()
 
-	blockedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	blockedTCPListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer blockedListener.Close()
+	defer blockedTCPListener.Close()
+
+	blockedUDPAddr, err := net.ResolveUDPAddr("udp", blockedTCPListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedUDPListener, err := net.ListenUDP("udp", blockedUDPAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockedUDPListener.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -189,7 +199,7 @@ func TestRunTransparentIgnoresLegacyDNSAddrBinding(t *testing.T) {
 			Bridge:      bridgeSide,
 			TrafficMode: TrafficModeTransparent,
 			MITMEnabled: true,
-			DNSAddr:     blockedListener.Addr().String(),
+			DNSAddr:     blockedTCPListener.Addr().String(),
 			Logger:      log.New(io.Discard, "", 0),
 		})
 	}()
@@ -332,7 +342,6 @@ func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
 		errCh <- Run(ctx, Config{
 			Bridge:      bridgeSide,
 			TrafficMode: TrafficModeTransparent,
-			DNSAddr:     "127.0.0.1:0",
 			Logger:      log.New(io.Discard, "", 0),
 		})
 	}()
@@ -2585,7 +2594,6 @@ func startTransparentRuntimeBridge(t *testing.T) (*helperproto.Ready, net.Conn, 
 			Bridge:      bridgeSide,
 			TrafficMode: TrafficModeTransparent,
 			MITMEnabled: true,
-			DNSAddr:     "127.0.0.1:0",
 			Logger:      log.New(io.Discard, "", 0),
 		})
 	}()
