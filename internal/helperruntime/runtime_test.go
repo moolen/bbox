@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/binary"
 	"encoding/gob"
 	"encoding/pem"
 	"errors"
@@ -31,7 +30,6 @@ import (
 	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
 	"github.com/moolen/bbox/internal/helperruntime/ingress"
 	"github.com/moolen/bbox/internal/helperruntime/seccompnotify"
-	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
 
@@ -173,6 +171,18 @@ func TestRunTransparentIgnoresLegacyDNSAddrBinding(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	bridgeSide, peerSide := net.Pipe()
+	t.Cleanup(func() {
+		cancel()
+		_ = peerSide.Close()
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+				t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for transparent runtime to exit")
+		}
+	})
 
 	go func() {
 		errCh <- Run(ctx, Config{
@@ -235,17 +245,6 @@ func TestRunTransparentIgnoresLegacyDNSAddrBinding(t *testing.T) {
 	if ready.Ready.TCPAddr == "" {
 		t.Fatal("expected transparent runtime to report a TCP ingress address")
 	}
-
-	cancel()
-	_ = peerSide.Close()
-	select {
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
-			t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for transparent runtime to exit")
-	}
 }
 
 func TestTransparentRuntimeReadyOmitsDNSAddr(t *testing.T) {
@@ -271,83 +270,6 @@ func TestReadBoundedBodyFlagsOversize(t *testing.T) {
 	}
 	if string(got) != "abc" || !tooLarge {
 		t.Fatalf("got %q tooLarge=%v", string(got), tooLarge)
-	}
-}
-
-func TestTransparentDNSReturnsLoopbackForAQuery(t *testing.T) {
-	dnsAddr, shutdown := startTransparentRuntime(t)
-	defer shutdown()
-
-	response := exchangeTransparentDNS(t, "udp", dnsAddr, dnsmessage.TypeA)
-
-	if got := response.Header.RCode; got != dnsmessage.RCodeSuccess {
-		t.Fatalf("unexpected DNS rcode: got %v want %v", got, dnsmessage.RCodeSuccess)
-	}
-	if len(response.Answers) != 1 {
-		t.Fatalf("unexpected number of answers: got %d want 1", len(response.Answers))
-	}
-
-	answer, ok := response.Answers[0].Body.(*dnsmessage.AResource)
-	if !ok {
-		t.Fatalf("unexpected answer type: got %T", response.Answers[0].Body)
-	}
-	if got := net.IP(answer.A[:]).String(); got != "127.0.0.1" {
-		t.Fatalf("unexpected A record: got %q want %q", got, "127.0.0.1")
-	}
-}
-
-func TestTransparentDNSReturnsEmptySuccessForAAAAQuery(t *testing.T) {
-	dnsAddr, shutdown := startTransparentRuntime(t)
-	defer shutdown()
-
-	response := exchangeTransparentDNS(t, "udp", dnsAddr, dnsmessage.TypeAAAA)
-
-	if got := response.Header.RCode; got != dnsmessage.RCodeSuccess {
-		t.Fatalf("unexpected DNS rcode: got %v want %v", got, dnsmessage.RCodeSuccess)
-	}
-	if len(response.Answers) != 0 {
-		t.Fatalf("unexpected number of answers: got %d want 0", len(response.Answers))
-	}
-}
-
-func TestTransparentDNSRefusesUnsupportedQueryType(t *testing.T) {
-	dnsAddr, shutdown := startTransparentRuntime(t)
-	defer shutdown()
-
-	response := exchangeTransparentDNS(t, "udp", dnsAddr, dnsmessage.TypeMX)
-
-	if got := response.Header.RCode; got != dnsmessage.RCodeRefused {
-		t.Fatalf("unexpected DNS rcode: got %v want %v", got, dnsmessage.RCodeRefused)
-	}
-	if len(response.Answers) != 0 {
-		t.Fatalf("unexpected number of answers: got %d want 0", len(response.Answers))
-	}
-}
-
-func TestTransparentDNSHandlesTCPAndUDP(t *testing.T) {
-	dnsAddr, shutdown := startTransparentRuntime(t)
-	defer shutdown()
-
-	for _, network := range []string{"udp", "tcp"} {
-		network := network
-		t.Run(network, func(t *testing.T) {
-			response := exchangeTransparentDNS(t, network, dnsAddr, dnsmessage.TypeA)
-
-			if got := response.Header.RCode; got != dnsmessage.RCodeSuccess {
-				t.Fatalf("unexpected DNS rcode: got %v want %v", got, dnsmessage.RCodeSuccess)
-			}
-			if len(response.Answers) != 1 {
-				t.Fatalf("unexpected number of answers: got %d want 1", len(response.Answers))
-			}
-
-			answer, ok := response.Answers[0].Body.(*dnsmessage.AResource)
-			if !ok {
-				t.Fatalf("unexpected answer type: got %T", response.Answers[0].Body)
-			}
-			if got := net.IP(answer.A[:]).String(); got != "127.0.0.1" {
-				t.Fatalf("unexpected A record: got %q want %q", got, "127.0.0.1")
-			}
-		})
 	}
 }
 
@@ -2567,13 +2489,6 @@ func newTestBridgeRuntime(t *testing.T) *bridgepkg.RuntimeBridge {
 	return bridgepkg.New(bridgeSide, log.New(io.Discard, "", 0), "127.0.0.1:31111")
 }
 
-func startTransparentRuntime(t *testing.T) (string, func()) {
-	t.Helper()
-
-	ready, shutdown := startTransparentRuntimeReady(t)
-	return ready.DNSAddr, shutdown
-}
-
 func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
 	t.Helper()
 
@@ -2828,121 +2743,6 @@ func startProxyRuntimeBridge(t *testing.T, maxRequestBodyBytes int64) (*helperpr
 	return ready.Ready, peerSide, enc, dec, shutdown
 }
 
-func exchangeTransparentDNS(t *testing.T, network, addr string, queryType dnsmessage.Type) dnsmessage.Message {
-	t.Helper()
-
-	query := packTransparentDNSQuery(t, queryType)
-
-	switch network {
-	case "udp":
-		return exchangeTransparentDNSUDP(t, addr, query)
-	case "tcp":
-		return exchangeTransparentDNSTCP(t, addr, query)
-	default:
-		t.Fatalf("unsupported DNS transport %q", network)
-		return dnsmessage.Message{}
-	}
-}
-
-func packTransparentDNSQuery(t *testing.T, queryType dnsmessage.Type) []byte {
-	t.Helper()
-
-	name, err := dnsmessage.NewName("example.com.")
-	if err != nil {
-		t.Fatalf("construct DNS name: %v", err)
-	}
-
-	query := dnsmessage.Message{
-		Header: dnsmessage.Header{
-			ID:                 7,
-			RecursionDesired:   true,
-			Response:           false,
-			Authoritative:      false,
-			RecursionAvailable: false,
-		},
-		Questions: []dnsmessage.Question{{
-			Name:  name,
-			Type:  queryType,
-			Class: dnsmessage.ClassINET,
-		}},
-	}
-
-	payload, err := query.Pack()
-	if err != nil {
-		t.Fatalf("pack DNS query: %v", err)
-	}
-
-	return payload
-}
-
-func exchangeTransparentDNSUDP(t *testing.T, addr string, query []byte) dnsmessage.Message {
-	t.Helper()
-
-	conn, err := net.DialTimeout("udp", addr, time.Second)
-	if err != nil {
-		t.Fatalf("dial UDP DNS listener: %v", err)
-	}
-	defer conn.Close()
-
-	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatalf("set UDP deadline: %v", err)
-	}
-	if _, err := conn.Write(query); err != nil {
-		t.Fatalf("write UDP DNS query: %v", err)
-	}
-
-	buf := make([]byte, 1500)
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("read UDP DNS response: %v", err)
-	}
-
-	return unpackTransparentDNSResponse(t, buf[:n])
-}
-
-func exchangeTransparentDNSTCP(t *testing.T, addr string, query []byte) dnsmessage.Message {
-	t.Helper()
-
-	conn, err := net.DialTimeout("tcp", addr, time.Second)
-	if err != nil {
-		t.Fatalf("dial TCP DNS listener: %v", err)
-	}
-	defer conn.Close()
-
-	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatalf("set TCP deadline: %v", err)
-	}
-
-	frame := make([]byte, 2+len(query))
-	binary.BigEndian.PutUint16(frame[:2], uint16(len(query)))
-	copy(frame[2:], query)
-	if _, err := conn.Write(frame); err != nil {
-		t.Fatalf("write TCP DNS query: %v", err)
-	}
-
-	var lengthBuf [2]byte
-	if _, err := io.ReadFull(conn, lengthBuf[:]); err != nil {
-		t.Fatalf("read TCP DNS response length: %v", err)
-	}
-	responseLen := int(binary.BigEndian.Uint16(lengthBuf[:]))
-	response := make([]byte, responseLen)
-	if _, err := io.ReadFull(conn, response); err != nil {
-		t.Fatalf("read TCP DNS response: %v", err)
-	}
-
-	return unpackTransparentDNSResponse(t, response)
-}
-
-func unpackTransparentDNSResponse(t *testing.T, payload []byte) dnsmessage.Message {
-	t.Helper()
-
-	var response dnsmessage.Message
-	if err := response.Unpack(payload); err != nil {
-		t.Fatalf("unpack DNS response: %v", err)
-	}
-
-	return response
-}
 
 func issueTestLeafCertPEM(t *testing.T, host string) (*x509.CertPool, []byte, []byte) {
 	t.Helper()
