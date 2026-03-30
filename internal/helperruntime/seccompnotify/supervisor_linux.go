@@ -1,0 +1,338 @@
+package seccompnotify
+
+import (
+	"fmt"
+	"net"
+	"strconv"
+
+	"golang.org/x/sys/unix"
+)
+
+type tcpRouteKind string
+
+const (
+	routeHTTPIngress   tcpRouteKind = "http"
+	routeHTTPSIngress  tcpRouteKind = "https"
+	routeRawTCPIngress tcpRouteKind = "raw_tcp"
+)
+
+type tcpRoute struct {
+	Kind     tcpRouteKind
+	Addr     string
+	Sockaddr unix.Sockaddr
+}
+
+func (s *Supervisor) handleSyscall(req syscallRequest) error {
+	switch req.Data.Syscall {
+	case unix.SYS_SOCKET:
+		return s.handleSocket(req.Socket)
+	case unix.SYS_CONNECT:
+		return s.handleConnect(req.Connect)
+	case unix.SYS_CLOSE:
+		return s.handleClose(req)
+	case unix.SYS_DUP, unix.SYS_DUP2, unix.SYS_DUP3, unix.SYS_FCNTL:
+		return s.handleDupLike(req)
+	case unix.SYS_GETPEERNAME:
+		return s.handleGetpeername(req)
+	default:
+		return nil
+	}
+}
+
+func (s *Supervisor) handleSocket(req socketRequest) error {
+	if s == nil {
+		return fmt.Errorf("supervisor is required")
+	}
+	if req.ChildFD < 0 {
+		return fmt.Errorf("child fd must be non-negative")
+	}
+
+	// Always clear prior state for reused child fds before any bypass path.
+	s.registry.Close(req.ChildFD)
+
+	if !isManagedSocketFamily(req.Family) {
+		return nil
+	}
+	if !targetsSupportFamilyIngress(s.targets, req.Family) {
+		// Graceful fallback: if helper ingress for this family is unavailable,
+		// leave the socket unmanaged so connect can proceed natively.
+		return nil
+	}
+	if baseSocketType(req.SocketType) != unix.SOCK_STREAM {
+		return nil
+	}
+
+	helperFD, err := unix.Socket(req.Family, req.SocketType, req.Protocol)
+	if err != nil {
+		return err
+	}
+
+	s.registry.Insert(SocketState{
+		Kind:       KindTCP,
+		ChildFD:    req.ChildFD,
+		HelperFD:   helperFD,
+		Family:     req.Family,
+		SocketType: req.SocketType,
+		Protocol:   req.Protocol,
+		Blocking:   req.SocketType&unix.SOCK_NONBLOCK == 0,
+	})
+	return nil
+}
+
+func (s *Supervisor) handleConnect(req connectRequest) error {
+	if s == nil {
+		return fmt.Errorf("supervisor is required")
+	}
+	if req.ChildFD < 0 {
+		return unix.EBADF
+	}
+
+	state, ok := s.registry.Lookup(req.ChildFD)
+	if !ok {
+		// Unmanaged socket: allow native connect path.
+		return nil
+	}
+	if state.HelperFD < 0 {
+		return nil
+	}
+	if state.Kind != KindTCP {
+		return nil
+	}
+
+	route, err := routeTCPDestination(s.targets, state.Family, req.Destination.Host, req.Destination.Port)
+	if err != nil {
+		return err
+	}
+
+	state.OriginalHost = req.Destination.Host
+	state.OriginalPort = req.Destination.Port
+	state.RedirectAddr = route.Addr
+	if err := unix.Connect(state.HelperFD, route.Sockaddr); err != nil {
+		return err
+	}
+	s.registry.Insert(state)
+
+	if route.Kind == routeRawTCPIngress && s.targets.RecordRawTCPOrigin != nil {
+		localAddr, err := getsocknameString(state.HelperFD)
+		if err == nil && localAddr != "" {
+			s.targets.RecordRawTCPOrigin(localAddr, req.Destination.Host, req.Destination.Port)
+		}
+	}
+	return nil
+}
+
+func (s *Supervisor) handleClose(req syscallRequest) error {
+	if s == nil {
+		return fmt.Errorf("supervisor is required")
+	}
+	if req.Close.ChildFD < 0 {
+		return unix.EBADF
+	}
+
+	s.registry.Close(req.Close.ChildFD)
+	return nil
+}
+
+func (s *Supervisor) handleDupLike(req syscallRequest) error {
+	if s == nil {
+		return fmt.Errorf("supervisor is required")
+	}
+
+	var (
+		oldFD int
+		newFD int
+	)
+	switch req.Data.Syscall {
+	case unix.SYS_DUP, unix.SYS_DUP2, unix.SYS_DUP3:
+		oldFD = req.Dup.OldFD
+		if oldFD < 0 {
+			oldFD = req.Dup.FD
+		}
+		newFD = req.Dup.NewFD
+	case unix.SYS_FCNTL:
+		switch req.Dup.Cmd {
+		case unix.F_DUPFD, unix.F_DUPFD_CLOEXEC:
+			oldFD = req.Dup.FD
+			newFD = req.Dup.NewFD
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
+
+	if oldFD < 0 || newFD < 0 {
+		return unix.EBADF
+	}
+	if oldFD == newFD {
+		return nil
+	}
+	return s.registry.Dup(oldFD, newFD)
+}
+
+func (s *Supervisor) handleGetpeername(req syscallRequest) error {
+	if s == nil {
+		return fmt.Errorf("supervisor is required")
+	}
+	if req.Getpeername.ChildFD < 0 {
+		return unix.EBADF
+	}
+
+	state, ok := s.registry.Lookup(req.Getpeername.ChildFD)
+	if !ok {
+		return nil
+	}
+	if state.RedirectAddr == "" {
+		return nil
+	}
+
+	return writeOriginalPeername(req.Getpeername, state.OriginalHost, state.OriginalPort, state.Family)
+}
+
+func writeOriginalPeername(req getpeernameRequest, host string, port int, fallbackFamily int) error {
+	if req.WritePeername == nil {
+		return nil
+	}
+	if host == "" || port <= 0 {
+		return nil
+	}
+	return req.WritePeername(DecodedSockaddr{
+		Family: peernameFamily(host, fallbackFamily),
+		Host:   host,
+		Port:   port,
+	})
+}
+
+func peernameFamily(host string, fallbackFamily int) int {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fallbackFamily
+	}
+	if ip.To4() != nil {
+		return unix.AF_INET
+	}
+	return unix.AF_INET6
+}
+
+func routeTCPDestination(targets RuntimeTargets, family int, host string, port int) (tcpRoute, error) {
+	_ = host
+
+	var (
+		kind  tcpRouteKind
+		addr4 string
+		addr6 string
+	)
+	switch port {
+	case 80:
+		kind = routeHTTPIngress
+		addr4 = targets.HTTPAddr
+		addr6 = targets.HTTPAddrV6
+	case 443:
+		kind = routeHTTPSIngress
+		addr4 = targets.HTTPSAddr
+		addr6 = targets.HTTPSAddrV6
+	default:
+		kind = routeRawTCPIngress
+		addr4 = targets.RawTCPAddr
+		addr6 = targets.RawTCPAddrV6
+	}
+	addr := selectIngressAddrForFamily(family, addr4, addr6)
+	if addr == "" {
+		return tcpRoute{}, fmt.Errorf("missing ingress address for route %q", kind)
+	}
+	sockaddr, err := parseTCPAddr(addr)
+	if err != nil {
+		return tcpRoute{}, err
+	}
+	if !sockaddrMatchesFamily(sockaddr, family) {
+		return tcpRoute{}, unix.EAFNOSUPPORT
+	}
+	return tcpRoute{
+		Kind:     kind,
+		Addr:     addr,
+		Sockaddr: sockaddr,
+	}, nil
+}
+
+func selectIngressAddrForFamily(family int, addr4, addr6 string) string {
+	if family == unix.AF_INET6 {
+		return addr6
+	}
+	return addr4
+}
+
+func parseTCPAddr(addr string) (unix.Sockaddr, error) {
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("split ingress address %q: %w", addr, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid ingress port %q", portText)
+	}
+
+	ip := net.ParseIP(host)
+	if ip4 := ip.To4(); ip4 != nil {
+		var raw [4]byte
+		copy(raw[:], ip4)
+		return &unix.SockaddrInet4{Port: port, Addr: raw}, nil
+	}
+	if ip16 := ip.To16(); ip16 != nil {
+		var raw [16]byte
+		copy(raw[:], ip16)
+		return &unix.SockaddrInet6{Port: port, Addr: raw}, nil
+	}
+	return nil, fmt.Errorf("ingress host %q is not an IP address", host)
+}
+
+func getsocknameString(fd int) (string, error) {
+	sockaddr, err := unix.Getsockname(fd)
+	if err != nil {
+		return "", err
+	}
+
+	switch addr := sockaddr.(type) {
+	case *unix.SockaddrInet4:
+		return net.JoinHostPort(net.IP(addr.Addr[:]).String(), strconv.Itoa(addr.Port)), nil
+	case *unix.SockaddrInet6:
+		return net.JoinHostPort(net.IP(addr.Addr[:]).String(), strconv.Itoa(addr.Port)), nil
+	default:
+		return "", fmt.Errorf("unsupported getsockname sockaddr %T", sockaddr)
+	}
+}
+
+func isManagedSocketFamily(family int) bool {
+	switch family {
+	case unix.AF_INET, unix.AF_INET6:
+		return true
+	default:
+		return false
+	}
+}
+
+func baseSocketType(socketType int) int {
+	const sockTypeMask = 0xf
+	return socketType & sockTypeMask
+}
+
+func sockaddrMatchesFamily(sockaddr unix.Sockaddr, family int) bool {
+	switch sockaddr.(type) {
+	case *unix.SockaddrInet4:
+		return family == unix.AF_INET
+	case *unix.SockaddrInet6:
+		return family == unix.AF_INET6
+	default:
+		return false
+	}
+}
+
+func targetsSupportFamilyIngress(targets RuntimeTargets, family int) bool {
+	switch family {
+	case unix.AF_INET:
+		return targets.HTTPAddr != "" || targets.HTTPSAddr != "" || targets.RawTCPAddr != ""
+	case unix.AF_INET6:
+		return targets.HTTPAddrV6 != "" || targets.HTTPSAddrV6 != "" || targets.RawTCPAddrV6 != ""
+	default:
+		return false
+	}
+}
