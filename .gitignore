@@ -1,4 +1,8 @@
 .worktrees/
 bin/
+dist/
+.goreleaser-build/
+.goreleaser-sysroot/
 /bbox
 /bbox-helper
+/bbox-seccomp-launcher

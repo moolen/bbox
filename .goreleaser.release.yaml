@@ -1,0 +1,86 @@
+version: 2
+
+project_name: bbox
+
+before:
+  hooks:
+    - ./scripts/setup-libseccomp-cross.sh linux_arm64
+    - sh -c 'mkdir -p .goreleaser-build/linux_amd64 && "${CC:-cc}" -O2 -o .goreleaser-build/linux_amd64/bbox-seccomp-launcher ./cmd/bbox-seccomp-launcher/main.c'
+    - sh -c 'mkdir -p .goreleaser-build/linux_arm64 && "${AARCH64_CC:-aarch64-linux-gnu-gcc}" -O2 -o .goreleaser-build/linux_arm64/bbox-seccomp-launcher ./cmd/bbox-seccomp-launcher/main.c'
+
+builds:
+  - id: bbox-amd64
+    main: ./cmd/bbox
+    binary: bbox
+    env:
+      - CGO_ENABLED=1
+      - CC=cc
+    goos:
+      - linux
+    goarch:
+      - amd64
+  - id: bbox-helper-amd64
+    main: ./cmd/bbox-helper
+    binary: bbox-helper
+    env:
+      - CGO_ENABLED=1
+      - CC=cc
+    goos:
+      - linux
+    goarch:
+      - amd64
+  - id: bbox-arm64
+    main: ./cmd/bbox
+    binary: bbox
+    env:
+      - CGO_ENABLED=1
+      - CC=aarch64-linux-gnu-gcc
+      - PKG_CONFIG_PATH={{ .Env.PWD }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
+      - PKG_CONFIG_LIBDIR={{ .Env.PWD }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
+    goos:
+      - linux
+    goarch:
+      - arm64
+  - id: bbox-helper-arm64
+    main: ./cmd/bbox-helper
+    binary: bbox-helper
+    env:
+      - CGO_ENABLED=1
+      - CC=aarch64-linux-gnu-gcc
+      - PKG_CONFIG_PATH={{ .Env.PWD }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
+      - PKG_CONFIG_LIBDIR={{ .Env.PWD }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
+    goos:
+      - linux
+    goarch:
+      - arm64
+
+archives:
+  - id: bbox-bundle-amd64
+    ids:
+      - bbox-amd64
+      - bbox-helper-amd64
+    name_template: "{{ .ProjectName }}_{{ .Version }}_linux_amd64"
+    formats:
+      - tar.gz
+    files:
+      - src: .goreleaser-build/linux_amd64/bbox-seccomp-launcher
+        dst: bbox-seccomp-launcher
+  - id: bbox-bundle-arm64
+    ids:
+      - bbox-arm64
+      - bbox-helper-arm64
+    name_template: "{{ .ProjectName }}_{{ .Version }}_linux_arm64"
+    formats:
+      - tar.gz
+    files:
+      - src: .goreleaser-build/linux_arm64/bbox-seccomp-launcher
+        dst: bbox-seccomp-launcher
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+release:
+  prerelease: auto

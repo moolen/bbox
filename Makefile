@@ -1,4 +1,5 @@
 GO ?= go
+CC ?= cc
 DOCKER ?= docker
 GOLANGCI_LINT ?= golangci-lint
 BIN_DIR ?= bin
@@ -6,12 +7,16 @@ IMAGE ?= bbox-agent
 TAG ?= latest
 IMAGE_REF := $(IMAGE):$(TAG)
 
-.PHONY: build docker-build lint
+.PHONY: build docker-build lint release-snapshot
 
 build:
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=1 $(GO) build -trimpath -o $(BIN_DIR)/bbox ./cmd/bbox
 	CGO_ENABLED=1 $(GO) build -trimpath -o $(BIN_DIR)/bbox-helper ./cmd/bbox-helper
+	$(CC) -O2 -o $(BIN_DIR)/bbox-seccomp-launcher ./cmd/bbox-seccomp-launcher/main.c
+
+release-snapshot:
+	./scripts/release-snapshot.sh
 
 docker-build:
 	$(DOCKER) build -t $(IMAGE_REF) .

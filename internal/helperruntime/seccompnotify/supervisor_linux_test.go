@@ -480,6 +480,10 @@ func TestProcessNotificationRejectsUnsupportedSocketFamily(t *testing.T) {
 }
 
 func TestSupervisorDupCopiesManagedFDState(t *testing.T) {
+	if optionalDup2Syscall < 0 {
+		t.Skip("dup2 syscall is not available on this architecture")
+	}
+
 	s, err := NewSupervisor(RuntimeTargets{})
 	if err != nil {
 		t.Fatalf("new supervisor: %v", err)
@@ -493,7 +497,7 @@ func TestSupervisorDupCopiesManagedFDState(t *testing.T) {
 	})
 
 	if err := s.handleSyscall(syscallRequest{
-		Data: syscallData{Syscall: unix.SYS_DUP2},
+		Data: syscallData{Syscall: optionalDup2Syscall},
 		Dup: dupRequest{
 			OldFD: 5,
 			NewFD: 9,

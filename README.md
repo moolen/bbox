@@ -20,15 +20,23 @@
 - Linux
 - `bwrap` on the host `PATH`
 - `libseccomp` headers and runtime available to the Go toolchain
-- a Go toolchain on the host `PATH`
+- a Go toolchain on the host `PATH` when running from a source checkout
 - any payload binaries you want to stage, for example `curl`, `wget`, or `go`
+
+## Releases
+
+Release archives are published as `linux/amd64` and `linux/arm64` bundles that place `bbox`, `bbox-helper`, and `bbox-seccomp-launcher` side by side. At runtime `bbox` first looks for those sibling binaries beside its own executable, then falls back to the source-checkout build path for development workflows.
+
+That means extracted release bundles do not need a local Go toolchain just to start sandboxes. Source checkouts still support the existing on-demand helper rebuild behavior.
+
+For a local snapshot build, use `make release-snapshot`. That command picks the matching single-arch local Goreleaser config for the host (`amd64` or `arm64`). CI and tagged releases use the multi-arch config to publish both Linux bundles.
 
 ## Docker
 
 This repository includes an agent-oriented container image with:
 
 - Go and the standard build toolchain
-- `bbox` and `bbox-helper` on `PATH`
+- `bbox`, `bbox-helper`, and `bbox-seccomp-launcher` on `PATH`
 - `bubblewrap`, `libseccomp`, `golangci-lint`, `govulncheck`
 - common shell/debugging tools such as `git`, `rg`, `jq`, `curl`, `wget`, `strace`, and `python3`
 
@@ -36,11 +44,12 @@ Local helper targets:
 
 ```bash
 make build
+make release-snapshot
 make docker-build IMAGE=bbox-agent TAG=dev
 make lint
 ```
 
-The image is meant to be used with a bind-mounted checkout at `/workspace`, because `bbox` rebuilds `cmd/bbox-helper` from the module root when it starts a sandbox.
+The image is still meant to be used with a bind-mounted checkout at `/workspace` for development. Release bundles prefer the packaged sibling binaries, while source checkouts still rebuild helper artifacts from the module root when needed.
 
 Start an interactive agent shell:
 

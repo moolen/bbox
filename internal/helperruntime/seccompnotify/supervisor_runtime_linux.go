@@ -332,15 +332,6 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 			return continueResp(req.ID)
 		}
 		return successResp(req.ID, uint64(n))
-	case unix.SYS_POLL:
-		n, handled, err := s.emulateDNSPoll(pid, req)
-		if err != nil {
-			return errorResp(req.ID, errnoFromError(err))
-		}
-		if !handled {
-			return continueResp(req.ID)
-		}
-		return successResp(req.ID, uint64(n))
 	case unix.SYS_PPOLL:
 		n, handled, err := s.emulateDNSPPoll(pid, req)
 		if err != nil {
@@ -356,7 +347,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 			s.registry.Close(fd)
 		}
 		return continueResp(req.ID)
-	case unix.SYS_DUP, unix.SYS_DUP2, unix.SYS_DUP3, unix.SYS_FCNTL:
+	case unix.SYS_DUP, unix.SYS_DUP3, unix.SYS_FCNTL:
 		fd, handled, err := s.duplicateSocket(req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
@@ -366,6 +357,26 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(fd))
 	default:
+		if isPollSyscall(int(req.Data.Syscall)) {
+			n, handled, err := s.emulateDNSPoll(pid, req)
+			if err != nil {
+				return errorResp(req.ID, errnoFromError(err))
+			}
+			if !handled {
+				return continueResp(req.ID)
+			}
+			return successResp(req.ID, uint64(n))
+		}
+		if isDupLikeSyscall(int(req.Data.Syscall)) {
+			fd, handled, err := s.duplicateSocket(req)
+			if err != nil {
+				return errorResp(req.ID, errnoFromError(err))
+			}
+			if !handled {
+				return continueResp(req.ID)
+			}
+			return successResp(req.ID, uint64(fd))
+		}
 		return continueResp(req.ID)
 	}
 }
@@ -522,7 +533,7 @@ func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, erro
 			return -1, false, err
 		}
 		return childFD, true, nil
-	case unix.SYS_DUP2, unix.SYS_DUP3:
+	case unix.SYS_DUP3:
 		newFD := int(req.Data.Args[1])
 		if newFD < 0 {
 			return -1, false, unix.EBADF
@@ -575,6 +586,30 @@ func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, erro
 			return -1, false, nil
 		}
 	default:
+		if optionalDup2Syscall >= 0 && int(req.Data.Syscall) == optionalDup2Syscall {
+			newFD := int(req.Data.Args[1])
+			if newFD < 0 {
+				return -1, false, unix.EBADF
+			}
+			if oldFD == newFD {
+				return oldFD, true, nil
+			}
+			childFD, err := addFDWithResult(
+				s.notifyFD,
+				req.ID,
+				state.HelperFD,
+				uint32(newFD),
+				unix.SECCOMP_ADDFD_FLAG_SETFD,
+				0,
+			)
+			if err != nil {
+				return -1, false, err
+			}
+			if err := s.registry.Dup(oldFD, childFD); err != nil {
+				return -1, false, err
+			}
+			return childFD, true, nil
+		}
 		return -1, false, nil
 	}
 }

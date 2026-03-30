@@ -31,7 +31,9 @@ static const uint32_t managed_syscalls[] = {
     __NR_recvmsg,
     __NR_sendmmsg,
     __NR_recvmmsg,
+#ifdef __NR_poll
     __NR_poll,
+#endif
     __NR_ppoll,
     __NR_close,
     __NR_dup,
@@ -50,7 +52,9 @@ static const uint32_t managed_syscalls[] = {
     __NR_recvmsg,
     __NR_sendmmsg,
     __NR_recvmmsg,
+#ifdef __NR_poll
     __NR_poll,
+#endif
     __NR_ppoll,
     __NR_close,
     __NR_dup,
@@ -195,8 +199,10 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmmsg, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+#ifdef __NR_poll
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_poll, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+#endif
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ppoll, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 0, 1),
@@ -236,8 +242,10 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmmsg, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+#ifdef __NR_poll
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_poll, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+#endif
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ppoll, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 0, 1),

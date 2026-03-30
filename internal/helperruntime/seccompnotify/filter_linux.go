@@ -27,23 +27,7 @@ func BuildFilter() (*FilterArtifacts, error) {
 		return nil, fmt.Errorf("create seccomp notify filter: %w", err)
 	}
 
-	managedSyscalls := []string{
-		"socket",
-		"connect",
-		"sendto",
-		"recvfrom",
-		"sendmsg",
-		"recvmsg",
-		"sendmmsg",
-		"recvmmsg",
-		"poll",
-		"ppoll",
-		"close",
-		"dup",
-		"dup2",
-		"dup3",
-		"fcntl",
-	}
+	managedSyscalls := managedNotifySyscallNames()
 
 	artifacts := &FilterArtifacts{
 		Filter:          filter,

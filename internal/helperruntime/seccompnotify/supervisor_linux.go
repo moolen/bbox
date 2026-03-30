@@ -31,11 +31,14 @@ func (s *Supervisor) handleSyscall(req syscallRequest) error {
 		return s.handleConnect(req.Connect)
 	case unix.SYS_CLOSE:
 		return s.handleClose(req)
-	case unix.SYS_DUP, unix.SYS_DUP2, unix.SYS_DUP3, unix.SYS_FCNTL:
+	case unix.SYS_DUP, unix.SYS_DUP3, unix.SYS_FCNTL:
 		return s.handleDupLike(req)
 	case unix.SYS_GETPEERNAME:
 		return s.handleGetpeername(req)
 	default:
+		if isDupLikeSyscall(req.Data.Syscall) {
+			return s.handleDupLike(req)
+		}
 		return nil
 	}
 }
@@ -145,7 +148,7 @@ func (s *Supervisor) handleDupLike(req syscallRequest) error {
 		newFD int
 	)
 	switch req.Data.Syscall {
-	case unix.SYS_DUP, unix.SYS_DUP2, unix.SYS_DUP3:
+	case unix.SYS_DUP, unix.SYS_DUP3:
 		oldFD = req.Dup.OldFD
 		if oldFD < 0 {
 			oldFD = req.Dup.FD
@@ -160,6 +163,14 @@ func (s *Supervisor) handleDupLike(req syscallRequest) error {
 			return nil
 		}
 	default:
+		if optionalDup2Syscall >= 0 && req.Data.Syscall == optionalDup2Syscall {
+			oldFD = req.Dup.OldFD
+			if oldFD < 0 {
+				oldFD = req.Dup.FD
+			}
+			newFD = req.Dup.NewFD
+			break
+		}
 		return nil
 	}
 

@@ -1,0 +1,48 @@
+version: 2
+
+project_name: bbox
+
+before:
+  hooks:
+    - sh -c 'mkdir -p .goreleaser-build && "${CC:-cc}" -O2 -o .goreleaser-build/bbox-seccomp-launcher ./cmd/bbox-seccomp-launcher/main.c'
+
+builds:
+  - id: bbox
+    main: ./cmd/bbox
+    binary: bbox
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+  - id: bbox-helper
+    main: ./cmd/bbox-helper
+    binary: bbox-helper
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+
+archives:
+  - id: bbox-bundle
+    ids:
+      - bbox
+      - bbox-helper
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    files:
+      - src: .goreleaser-build/bbox-seccomp-launcher
+        dst: bbox-seccomp-launcher
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+release:
+  prerelease: auto

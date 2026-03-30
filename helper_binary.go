@@ -12,6 +12,7 @@ import (
 
 var packageRootRuntimeCaller = runtime.Caller
 var packageRootGetwd = os.Getwd
+var helperBinaryExecutablePath = os.Executable
 
 const (
 	helperBinaryName          = "bbox-helper"
@@ -21,11 +22,12 @@ const (
 type helperBinaryResolver struct {
 	once sync.Once
 
-	packageRoot   func() (string, error)
-	makeTempDir   func(string, string) (string, error)
-	buildHelper   func(string, string) error
-	buildLauncher func(string, string) error
-	removeAll     func(string) error
+	executablePath func() (string, error)
+	packageRoot    func() (string, error)
+	makeTempDir    func(string, string) (string, error)
+	buildHelper    func(string, string) error
+	buildLauncher  func(string, string) error
+	removeAll      func(string) error
 
 	path string
 	dir  string
@@ -34,11 +36,12 @@ type helperBinaryResolver struct {
 
 func newHelperBinaryResolver() *helperBinaryResolver {
 	return &helperBinaryResolver{
-		packageRoot:   packageRoot,
-		makeTempDir:   os.MkdirTemp,
-		buildHelper:   buildHelperBinary,
-		buildLauncher: buildSeccompLauncherBinary,
-		removeAll:     os.RemoveAll,
+		executablePath: helperBinaryExecutablePath,
+		packageRoot:    packageRoot,
+		makeTempDir:    os.MkdirTemp,
+		buildHelper:    buildHelperBinary,
+		buildLauncher:  buildSeccompLauncherBinary,
+		removeAll:      os.RemoveAll,
 	}
 }
 
@@ -48,6 +51,11 @@ func (r *helperBinaryResolver) HelperBinary() (string, error) {
 	}
 
 	r.once.Do(func() {
+		if helperPath, ok := r.packagedHelperBinary(); ok {
+			r.path = helperPath
+			return
+		}
+
 		moduleRoot, err := r.packageRoot()
 		if err != nil {
 			r.err = err
@@ -91,6 +99,33 @@ func (r *helperBinaryResolver) Cleanup() error {
 		return nil
 	}
 	return r.removeAll(r.dir)
+}
+
+func (r *helperBinaryResolver) packagedHelperBinary() (string, bool) {
+	if r == nil || r.executablePath == nil {
+		return "", false
+	}
+
+	exePath, err := r.executablePath()
+	if err != nil || strings.TrimSpace(exePath) == "" {
+		return "", false
+	}
+
+	exePath = filepath.Clean(exePath)
+	helperPath := filepath.Join(filepath.Dir(exePath), helperBinaryName)
+	launcherPath := filepath.Join(filepath.Dir(exePath), seccompLauncherBinaryName)
+	if !regularFileExists(helperPath) || !regularFileExists(launcherPath) {
+		return "", false
+	}
+	return helperPath, true
+}
+
+func regularFileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular()
 }
 
 func packageRoot() (string, error) {

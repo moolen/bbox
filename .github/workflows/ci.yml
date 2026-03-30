@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap build-essential pkg-config libseccomp-dev gcc-aarch64-linux-gnu
+
+      - name: Run Go tests
+        run: go test ./... -count=1 -timeout=20m
+
+      - name: Run local release smoke build
+        run: make release-snapshot
+
+      - name: Verify local release archive
+        run: ./scripts/verify-release-archives.sh --run-native amd64 linux_amd64
+
+      - name: Run multi-arch release smoke build
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish --config .goreleaser.release.yaml
+
+      - name: Verify multi-arch release archives
+        run: ./scripts/verify-release-archives.sh --run-native amd64 linux_amd64 linux_arm64
