@@ -34,8 +34,6 @@ type runtimeBinaryResolver struct {
 	err  error
 }
 
-type helperBinaryResolver = runtimeBinaryResolver
-
 func newRuntimeBinaryResolver() *runtimeBinaryResolver {
 	return &runtimeBinaryResolver{
 		executablePath: runtimeBinaryExecutablePath,
@@ -45,10 +43,6 @@ func newRuntimeBinaryResolver() *runtimeBinaryResolver {
 		buildLauncher:  buildSeccompLauncherBinary,
 		removeAll:      os.RemoveAll,
 	}
-}
-
-func newHelperBinaryResolver() *helperBinaryResolver {
-	return newRuntimeBinaryResolver()
 }
 
 func (r *runtimeBinaryResolver) RuntimeBinary() (string, error) {
@@ -98,10 +92,6 @@ func (r *runtimeBinaryResolver) RuntimeBinary() (string, error) {
 		return "", fmt.Errorf("runtime binary path is empty")
 	}
 	return r.path, nil
-}
-
-func (r *runtimeBinaryResolver) HelperBinary() (string, error) {
-	return r.RuntimeBinary()
 }
 
 func (r *runtimeBinaryResolver) Cleanup() error {

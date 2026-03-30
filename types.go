@@ -194,7 +194,7 @@ type NetworkPolicy struct {
 type ProxyManager struct {
 	mu                     sync.RWMutex
 	registry               *sandboxRegistry
-	resolver               *helperBinaryResolver
+	resolver               *runtimeBinaryResolver
 	transport              *http.Transport
 	accessLogger           AccessLogger
 	listenAddr             string
