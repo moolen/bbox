@@ -46,6 +46,7 @@ func TestExecInputRoundTrip(t *testing.T) {
 	want := ExecInput{
 		Data:   []byte("hello"),
 		EOF:    true,
+		Cancel: true,
 		Resize: &TerminalSize{Rows: 42, Cols: 120},
 	}
 	if err := enc.Encode(&want); err != nil {
@@ -56,7 +57,7 @@ func TestExecInputRoundTrip(t *testing.T) {
 	if err := dec.Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got.Data, want.Data) || !got.EOF {
+	if !bytes.Equal(got.Data, want.Data) || !got.EOF || !got.Cancel {
 		t.Fatalf("unexpected exec input payload: got=%#v want=%#v", got, want)
 	}
 	if got.Resize == nil || got.Resize.Rows != want.Resize.Rows || got.Resize.Cols != want.Resize.Cols {
@@ -126,6 +127,73 @@ func TestConnectResponseRoundTrip(t *testing.T) {
 		got.ConnectResponse.Message != want.ConnectResponse.Message ||
 		got.ConnectResponse.Error != want.ConnectResponse.Error {
 		t.Fatalf("unexpected connect response payload: got=%#v want=%#v", got.ConnectResponse, want.ConnectResponse)
+	}
+}
+
+func TestDNSRequestRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		ID: 17,
+		DNSRequest: &DNSRequest{
+			Network: "udp",
+			Host:    "8.8.8.8",
+			Port:    53,
+			Payload: []byte{0xde, 0xad},
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("unexpected envelope id: got=%d want=%d", got.ID, want.ID)
+	}
+	if got.DNSRequest == nil {
+		t.Fatalf("unexpected dns request: %#v", got.DNSRequest)
+	}
+	if got.DNSRequest.Network != want.DNSRequest.Network ||
+		got.DNSRequest.Host != want.DNSRequest.Host ||
+		got.DNSRequest.Port != want.DNSRequest.Port ||
+		!bytes.Equal(got.DNSRequest.Payload, want.DNSRequest.Payload) {
+		t.Fatalf("unexpected dns request payload: got=%#v want=%#v", got.DNSRequest, want.DNSRequest)
+	}
+}
+
+func TestDNSResponseRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	dec := gob.NewDecoder(&buf)
+
+	want := Envelope{
+		ID: 18,
+		DNSResponse: &DNSResponse{
+			Payload: []byte{0xca, 0xfe},
+			Error:   "upstream timeout",
+		},
+	}
+	if err := enc.Encode(&want); err != nil {
+		t.Fatal(err)
+	}
+
+	var got Envelope
+	if err := dec.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != want.ID {
+		t.Fatalf("unexpected envelope id: got=%d want=%d", got.ID, want.ID)
+	}
+	if got.DNSResponse == nil {
+		t.Fatalf("unexpected dns response: %#v", got.DNSResponse)
+	}
+	if !bytes.Equal(got.DNSResponse.Payload, want.DNSResponse.Payload) || got.DNSResponse.Error != want.DNSResponse.Error {
+		t.Fatalf("unexpected dns response payload: got=%#v want=%#v", got.DNSResponse, want.DNSResponse)
 	}
 }
 
@@ -362,8 +430,8 @@ func TestReadyRoundTripIncludesTrafficModeAddrs(t *testing.T) {
 }
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 6 {
-		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 6)
+	if ProtocolVersion != 7 {
+		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 7)
 	}
 }
 
@@ -422,6 +490,16 @@ func TestEnvelopeKind(t *testing.T) {
 			name: "connect_response",
 			env:  Envelope{ConnectResponse: &ConnectResponse{}},
 			want: "connect_response",
+		},
+		{
+			name: "dns_request",
+			env:  Envelope{DNSRequest: &DNSRequest{}},
+			want: "dns_request",
+		},
+		{
+			name: "dns_response",
+			env:  Envelope{DNSResponse: &DNSResponse{}},
+			want: "dns_response",
 		},
 		{
 			name: "tunnel_frame",

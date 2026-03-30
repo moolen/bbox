@@ -2,7 +2,7 @@ package helperproto
 
 import "net/http"
 
-const ProtocolVersion = 6
+const ProtocolVersion = 7
 
 type Envelope struct {
 	ID               uint64
@@ -12,6 +12,8 @@ type Envelope struct {
 	ProxyResponse    *ProxyResponse
 	ConnectRequest   *ConnectRequest
 	ConnectResponse  *ConnectResponse
+	DNSRequest       *DNSRequest
+	DNSResponse      *DNSResponse
 	LeafCertRequest  *LeafCertRequest
 	LeafCertResponse *LeafCertResponse
 	MITMRequest      *MITMRequest
@@ -38,6 +40,10 @@ func (e Envelope) Kind() string {
 		return "connect_request"
 	case e.ConnectResponse != nil:
 		return "connect_response"
+	case e.DNSRequest != nil:
+		return "dns_request"
+	case e.DNSResponse != nil:
+		return "dns_response"
 	case e.LeafCertRequest != nil:
 		return "leaf_cert_request"
 	case e.LeafCertResponse != nil:
@@ -101,6 +107,18 @@ type ConnectResponse struct {
 	Error      string
 }
 
+type DNSRequest struct {
+	Network string
+	Host    string
+	Port    int
+	Payload []byte
+}
+
+type DNSResponse struct {
+	Payload []byte
+	Error   string
+}
+
 type LeafCertRequest struct {
 	Host string
 }
@@ -158,6 +176,7 @@ type ExecInput struct {
 	Data   []byte
 	EOF    bool
 	Resize *TerminalSize
+	Cancel bool
 }
 
 type StreamType string

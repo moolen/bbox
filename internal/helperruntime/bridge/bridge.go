@@ -89,7 +89,7 @@ func (b *RuntimeBridge) ReadLoop(ctx context.Context) error {
 			if err := b.handleHello(env); err != nil {
 				return err
 			}
-		case env.ProxyResponse != nil, env.MITMResponse != nil, env.LeafCertResponse != nil:
+		case env.ProxyResponse != nil, env.MITMResponse != nil, env.LeafCertResponse != nil, env.DNSResponse != nil:
 			b.deliver(env)
 		case env.ConnectResponse != nil:
 			b.deliver(env)
@@ -145,6 +145,41 @@ func (b *RuntimeBridge) ProxyRoundTrip(ctx context.Context, req helperproto.Prox
 			return nil, errors.New(env.ProxyResponse.Error)
 		}
 		return env.ProxyResponse, nil
+	}
+}
+
+func (b *RuntimeBridge) DNSRoundTrip(ctx context.Context, req helperproto.DNSRequest) ([]byte, error) {
+	id := b.nextID.Add(1)
+	ch := make(chan helperproto.Envelope, 1)
+
+	b.pendMu.Lock()
+	b.pending[id] = ch
+	b.pendMu.Unlock()
+
+	defer func() {
+		b.pendMu.Lock()
+		delete(b.pending, id)
+		b.pendMu.Unlock()
+	}()
+
+	if err := b.Send(helperproto.Envelope{
+		ID:         id,
+		DNSRequest: &req,
+	}); err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case env := <-ch:
+		if env.DNSResponse == nil {
+			return nil, fmt.Errorf("bridge response %d did not contain a dns response", id)
+		}
+		if env.DNSResponse.Error != "" {
+			return nil, errors.New(env.DNSResponse.Error)
+		}
+		return append([]byte(nil), env.DNSResponse.Payload...), nil
 	}
 }
 
