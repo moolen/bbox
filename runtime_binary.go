@@ -26,6 +26,7 @@ type runtimeBinaryResolver struct {
 	packageRoot    func() (string, error)
 	makeTempDir    func(string, string) (string, error)
 	buildBBox      func(string, string) error
+	buildLauncher  func(string, string) error
 	removeAll      func(string) error
 
 	path string
@@ -41,6 +42,7 @@ func newRuntimeBinaryResolver() *runtimeBinaryResolver {
 		packageRoot:    packageRoot,
 		makeTempDir:    os.MkdirTemp,
 		buildBBox:      buildBBoxBinary,
+		buildLauncher:  buildSeccompLauncherBinary,
 		removeAll:      os.RemoveAll,
 	}
 }
@@ -74,6 +76,12 @@ func (r *runtimeBinaryResolver) RuntimeBinary() (string, error) {
 
 		bboxPath := filepath.Join(buildDir, runtimeBinaryName)
 		if err := r.buildBBox(moduleRoot, bboxPath); err != nil {
+			_ = r.removeAll(buildDir)
+			r.err = err
+			return
+		}
+		launcherPath := filepath.Join(buildDir, seccompLauncherBinaryName)
+		if err := r.buildLauncher(moduleRoot, launcherPath); err != nil {
 			_ = r.removeAll(buildDir)
 			r.err = err
 			return
@@ -206,4 +214,25 @@ func buildBBoxBinary(moduleRoot, bboxPath string) error {
 		return fmt.Errorf("build bbox runtime binary: %w: %s", err, msg)
 	}
 	return fmt.Errorf("build bbox runtime binary: %w", err)
+}
+
+func buildSeccompLauncherBinary(moduleRoot, launcherPath string) error {
+	compiler := strings.TrimSpace(os.Getenv("CC"))
+	if compiler == "" {
+		compiler = "cc"
+	}
+
+	cmd := exec.Command(compiler, "-O2", "-o", launcherPath, "./cmd/bbox-seccomp-launcher/main.c")
+	cmd.Dir = moduleRoot
+
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	msg := strings.TrimSpace(string(output))
+	if msg != "" {
+		return fmt.Errorf("build seccomp launcher binary: %w: %s", err, msg)
+	}
+	return fmt.Errorf("build seccomp launcher binary: %w", err)
 }
