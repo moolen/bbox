@@ -58,9 +58,9 @@ Transparent mode looks better on a slide. No proxy environment variables. Just r
 
 Naturally, it is less simple.
 
-Because the sandbox is in its own network namespace, transparent mode works by making the helper impersonate the network entry points that ordinary clients expect. The helper binds `127.0.0.1:53` for DNS, `127.0.0.1:80` for HTTP, and `127.0.0.1:443` for HTTPS. The staged `resolv.conf` points at `127.0.0.1`, and the local DNS server replies to hostname `A` queries with `127.0.0.1`.
+Because the sandbox is in its own network namespace, transparent mode still makes the helper impersonate the TCP entry points ordinary clients expect. The helper binds `127.0.0.1:80` for HTTP and `127.0.0.1:443` for HTTPS, while DNS no longer runs through a helper-owned daemon.
 
-Yes, every allowed hostname becomes loopback first. The DNS server is lying. On purpose.
+Instead, staging derives `resolv.conf` from the host nameserver configuration and seccomp-notify supervision forwards DNS socket activity through the managed path. DNS behavior remains policy-visible without introducing a separate in-sandbox DNS server lifecycle.
 
 What should happen is simple: the client resolves `example.com`, connects to it, and the system applies policy.
 
