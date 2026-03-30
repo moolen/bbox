@@ -112,6 +112,7 @@ type Supervisor struct {
 	notifyChild   *os.File
 	notifyFD      int
 	launcherError error
+	launcherClose func() error
 }
 
 func NewSupervisor(targets RuntimeTargets) (*Supervisor, error) {

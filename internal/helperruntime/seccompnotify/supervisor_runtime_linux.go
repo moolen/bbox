@@ -9,27 +9,23 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/moolen/bbox/internal/embeddedlauncher"
 	seccomp "github.com/seccomp/libseccomp-golang"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	launcherBinaryName = "bbox-seccomp-launcher"
-	launcherSockFDEnv  = "BBOX_SECCOMP_NOTIFY_SOCK_FD"
-	maxSockaddrBytes   = 128
+	launcherSockFDEnv = "BBOX_SECCOMP_NOTIFY_SOCK_FD"
+	maxSockaddrBytes  = 128
 )
 
 var (
-	launcherCommandOverrideMu sync.Mutex
-	launcherCommandOverride   func() (string, []string, error)
-	launcherExecutablePath    = os.Executable
-	launcherPathExists        = func(path string) bool {
-		_, err := os.Stat(path)
-		return err == nil
+	launcherFactoryMu sync.Mutex
+	launcherFactory   = func() (embeddedlauncher.ExecTarget, error) {
+		return embeddedlauncher.OpenExecTarget()
 	}
 )
 
@@ -58,16 +54,20 @@ func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
 		return fmt.Errorf("wrap launcher socketpair")
 	}
 
-	launcherPath, launcherArgs, err := resolveLauncherCommand()
+	target, err := resolveLauncherTarget()
 	if err != nil {
 		_ = parent.Close()
 		_ = child.Close()
 		return err
 	}
+	closeTarget := func() error {
+		return closeLauncherTarget(target)
+	}
 
 	originalArgs := append([]string(nil), cmd.Args...)
 	targetPath := cmd.Path
 	if targetPath == "" {
+		_ = closeTarget()
 		_ = parent.Close()
 		_ = child.Close()
 		return fmt.Errorf("command path is required")
@@ -81,6 +81,12 @@ func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
 		env = os.Environ()
 	}
 	env = filterLauncherEnv(env)
+
+	launcherPath := target.Path
+	if target.File != nil {
+		launcherPath = target.PathForChildFD(3 + len(cmd.ExtraFiles))
+		cmd.ExtraFiles = append(cmd.ExtraFiles, target.File)
+	}
 	extraFD := 3 + len(cmd.ExtraFiles)
 	env = append(env,
 		fmt.Sprintf("%s=%d", launcherSockFDEnv, extraFD),
@@ -89,7 +95,7 @@ func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
 	cmd.Path = launcherPath
 	cmd.Args = append(
 		append(
-			append([]string{launcherPath}, launcherArgs...),
+			append([]string{launcherPath}, target.Args...),
 			targetPath,
 			"--",
 		),
@@ -101,6 +107,7 @@ func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
 	s.notifySock = parent
 	s.notifyChild = child
 	s.notifyFD = -1
+	s.launcherClose = closeTarget
 	return nil
 }
 
@@ -117,6 +124,10 @@ func (s *Supervisor) Start(ctx context.Context, pid int) error {
 	if s.notifyChild != nil {
 		_ = s.notifyChild.Close()
 		s.notifyChild = nil
+	}
+	if s.launcherClose != nil {
+		_ = s.launcherClose()
+		s.launcherClose = nil
 	}
 
 	notifyFD, err := receiveLauncherNotifyFD(ctx, int(s.notifySock.Fd()))
@@ -148,26 +159,31 @@ func (s *Supervisor) Close() error {
 		err = errors.Join(err, unix.Close(s.notifyFD))
 		s.notifyFD = -1
 	}
+	if s.launcherClose != nil {
+		err = errors.Join(err, s.launcherClose())
+		s.launcherClose = nil
+	}
 	return err
 }
 
-func resolveLauncherCommand() (string, []string, error) {
-	launcherCommandOverrideMu.Lock()
-	override := launcherCommandOverride
-	launcherCommandOverrideMu.Unlock()
-	if override != nil {
-		return override()
+func resolveLauncherTarget() (embeddedlauncher.ExecTarget, error) {
+	launcherFactoryMu.Lock()
+	factory := launcherFactory
+	launcherFactoryMu.Unlock()
+	if factory == nil {
+		return embeddedlauncher.ExecTarget{}, fmt.Errorf("launcher factory is not configured")
 	}
+	return factory()
+}
 
-	path, err := launcherExecutablePath()
-	if err != nil {
-		return "", nil, fmt.Errorf("resolve launcher executable: %w", err)
+func closeLauncherTarget(target embeddedlauncher.ExecTarget) error {
+	if target.Close != nil {
+		return target.Close()
 	}
-	candidate := filepath.Join(filepath.Dir(path), launcherBinaryName)
-	if !launcherPathExists(candidate) {
-		return "", nil, fmt.Errorf("resolve seccomp launcher %q beside helper %q", candidate, path)
+	if target.File != nil {
+		return target.File.Close()
 	}
-	return candidate, nil, nil
+	return nil
 }
 
 func filterLauncherEnv(env []string) []string {

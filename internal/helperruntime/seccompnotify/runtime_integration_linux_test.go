@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/moolen/bbox/internal/embeddedlauncher"
 )
 
 func TestSupervisorStartRedirectsTCPConnectRuntime(t *testing.T) {
@@ -968,46 +970,84 @@ func TestSupervisorStartRedirectsTCPConnectRuntimeWithDNSRoundTripOnly(t *testin
 
 func TestLauncherNoopWithoutEnv(t *testing.T) {}
 
-func TestResolveLauncherCommandUsesSiblingLauncher(t *testing.T) {
-	dir := t.TempDir()
-	helperPath := filepath.Join(dir, "bbox-helper")
-	launcherPath := filepath.Join(dir, "bbox-seccomp-launcher")
-	if err := os.WriteFile(launcherPath, []byte("launcher"), 0o755); err != nil {
-		t.Fatalf("write launcher: %v", err)
+func TestPrepareUsesEmbeddedLauncherFactory(t *testing.T) {
+	launcherRead, launcherWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create launcher pipe: %v", err)
 	}
-
-	prevExecutablePath := launcherExecutablePath
-	prevPathExists := launcherPathExists
-	launcherExecutablePath = func() (string, error) { return helperPath, nil }
-	launcherPathExists = func(path string) bool { return path == launcherPath }
 	t.Cleanup(func() {
-		launcherExecutablePath = prevExecutablePath
-		launcherPathExists = prevPathExists
+		_ = launcherRead.Close()
+		_ = launcherWrite.Close()
 	})
 
-	got, args, err := resolveLauncherCommand()
+	called := false
+	restore := setLauncherFactoryForTest(t, func() (embeddedlauncher.ExecTarget, error) {
+		called = true
+		return embeddedlauncher.ExecTarget{
+			File: launcherRead,
+			Args: []string{"--from-memfd"},
+			Close: func() error {
+				return nil
+			},
+		}, nil
+	})
+	t.Cleanup(restore)
+
+	supervisor, err := NewSupervisor(RuntimeTargets{})
 	if err != nil {
-		t.Fatalf("resolveLauncherCommand() error = %v", err)
+		t.Fatalf("new supervisor: %v", err)
 	}
-	if got != launcherPath {
-		t.Fatalf("resolveLauncherCommand() = %q, want %q", got, launcherPath)
+	defer func() {
+		if closeErr := supervisor.Close(); closeErr != nil {
+			t.Fatalf("close supervisor: %v", closeErr)
+		}
+	}()
+
+	cmd := exec.Command("/bin/true")
+	cmd.Args = []string{"/bin/true", "--payload-arg"}
+	if err := supervisor.Prepare(context.Background(), cmd); err != nil {
+		t.Fatalf("prepare: %v", err)
 	}
-	if len(args) != 0 {
-		t.Fatalf("resolveLauncherCommand() args = %#v, want nil", args)
+	if !called {
+		t.Fatal("expected embedded launcher factory to be used")
+	}
+	if cmd.Path != "/proc/self/fd/3" {
+		t.Fatalf("prepare launcher path = %q, want %q", cmd.Path, "/proc/self/fd/3")
+	}
+	wantArgs := []string{"/proc/self/fd/3", "--from-memfd", "/bin/true", "--", "/bin/true", "--payload-arg"}
+	if fmt.Sprintf("%q", cmd.Args) != fmt.Sprintf("%q", wantArgs) {
+		t.Fatalf("prepare launcher args = %#v, want %#v", cmd.Args, wantArgs)
+	}
+}
+
+func setLauncherFactoryForTest(t *testing.T, fn func() (embeddedlauncher.ExecTarget, error)) func() {
+	t.Helper()
+	launcherFactoryMu.Lock()
+	prev := launcherFactory
+	launcherFactory = fn
+	launcherFactoryMu.Unlock()
+	return func() {
+		launcherFactoryMu.Lock()
+		launcherFactory = prev
+		launcherFactoryMu.Unlock()
 	}
 }
 
 func setLauncherCommandForTest(t *testing.T, fn func() (string, []string, error)) func() {
 	t.Helper()
-	launcherCommandOverrideMu.Lock()
-	prev := launcherCommandOverride
-	launcherCommandOverride = fn
-	launcherCommandOverrideMu.Unlock()
-	return func() {
-		launcherCommandOverrideMu.Lock()
-		launcherCommandOverride = prev
-		launcherCommandOverrideMu.Unlock()
-	}
+	return setLauncherFactoryForTest(t, func() (embeddedlauncher.ExecTarget, error) {
+		path, args, err := fn()
+		if err != nil {
+			return embeddedlauncher.ExecTarget{}, err
+		}
+		return embeddedlauncher.ExecTarget{
+			Path: path,
+			Args: args,
+			Close: func() error {
+				return nil
+			},
+		}, nil
+	})
 }
 
 var (
