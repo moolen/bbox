@@ -3,6 +3,7 @@
 package seccompnotify
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -37,6 +38,26 @@ func TestClassifyManagedSocketBypassesICMPDatagramProtocols(t *testing.T) {
 				t.Fatalf("unexpected socket kind: got %q want %q", kind, KindUnknown)
 			}
 		})
+	}
+}
+
+func TestClassifyManagedSocketRequiresDNSRoundTripForUDP(t *testing.T) {
+	t.Parallel()
+
+	kind, managed, err := classifyManagedSocket(
+		RuntimeTargets{RawTCPAddr: "127.0.0.1:39001"},
+		unix.AF_INET,
+		unix.SOCK_DGRAM,
+		unix.IPPROTO_UDP,
+	)
+	if !errors.Is(err, unix.EHOSTUNREACH) {
+		t.Fatalf("classifyManagedSocket() error = %v, want %v", err, unix.EHOSTUNREACH)
+	}
+	if managed {
+		t.Fatal("expected UDP socket to remain unmanaged without DNSRoundTrip")
+	}
+	if kind != KindUnknown {
+		t.Fatalf("unexpected socket kind: got %q want %q", kind, KindUnknown)
 	}
 }
 

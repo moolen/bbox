@@ -469,7 +469,7 @@ func (s *Supervisor) handleDNSConnect(childFD int, state SocketState, destinatio
 	if s == nil {
 		return unix.EINVAL
 	}
-	if s.targets.DNSRoundTrip == nil && s.targets.DNSAddr == "" {
+	if s.targets.DNSRoundTrip == nil {
 		return unix.EHOSTUNREACH
 	}
 
@@ -500,7 +500,7 @@ func classifyManagedSocket(targets RuntimeTargets, family, socketType, protocol 
 		if protocol != 0 && protocol != unix.IPPROTO_UDP {
 			return KindUnknown, false, nil
 		}
-		if targets.DNSRoundTrip == nil && targets.DNSAddr == "" {
+		if targets.DNSRoundTrip == nil {
 			return KindUnknown, false, unix.EHOSTUNREACH
 		}
 		return KindUDP, true, nil

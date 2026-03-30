@@ -241,7 +241,6 @@ func (b *bridge) sendExecError(id uint64, err error) {
 
 func (b *bridge) transparentRuntime() seccompnotify.RuntimeTargets {
 	return seccompnotify.RuntimeTargets{
-		DNSAddr:            b.dnsAddr,
 		DNSRoundTrip:       b.dnsRoundTrip,
 		RawTCPAddr:         b.rawTCPAddr,
 		RawTCPAddrV6:       b.rawTCPAddrV6,

@@ -47,7 +47,6 @@ type dnsPacketResponse struct {
 // RuntimeTargets describes the helper endpoints and callbacks that seccomp
 // socket emulation can hand traffic to.
 type RuntimeTargets struct {
-	DNSAddr            string
 	DNSRoundTrip       func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error)
 	RawTCPAddr         string
 	RawTCPAddrV6       string
