@@ -1,6 +1,7 @@
 package bbox
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"slices"
@@ -142,6 +143,28 @@ func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
 	}
 }
 
+func TestStageSandboxRootCopiesSeccompLauncher(t *testing.T) {
+	buildDir := t.TempDir()
+	helperPath := filepath.Join(buildDir, "bbox-helper")
+	launcherPath := filepath.Join(buildDir, "bbox-seccomp-launcher")
+	for _, path := range []string{helperPath, launcherPath} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write stub binary %q: %v", path, err)
+		}
+	}
+
+	root, err := stageSandboxRoot(SandboxOptions{}, helperPath, nil, TrafficModeTransparent)
+	if err != nil {
+		t.Fatalf("stageSandboxRoot failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	stagedLauncher := filepath.Join(root, "app", "bbox-seccomp-launcher")
+	if _, err := os.Stat(stagedLauncher); err != nil {
+		t.Fatalf("expected staged launcher at %q: %v", stagedLauncher, err)
+	}
+}
+
 func TestWriteSandboxConfigWritesTransparentResolvConf(t *testing.T) {
 	root := t.TempDir()
 	if err := writeSandboxConfig(root, nil, TrafficModeTransparent); err != nil {
@@ -153,9 +176,8 @@ func TestWriteSandboxConfigWritesTransparentResolvConf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected resolv.conf at %q: %v", path, err)
 	}
-	want := "nameserver 127.0.0.1\noptions ndots:1\n"
-	if string(content) != want {
-		t.Fatalf("unexpected resolv.conf content: got %q want %q", string(content), want)
+	if !strings.Contains(string(content), "nameserver ") {
+		t.Fatalf("expected staged resolv.conf to contain at least one nameserver line, got %q", string(content))
 	}
 
 	nsswitchPath := filepath.Join(root, "etc", "nsswitch.conf")
@@ -165,6 +187,32 @@ func TestWriteSandboxConfigWritesTransparentResolvConf(t *testing.T) {
 	}
 	if string(nsswitchContent) != "hosts: files dns\n" {
 		t.Fatalf("unexpected nsswitch.conf content: got %q", string(nsswitchContent))
+	}
+}
+
+func TestWriteSandboxConfigMirrorsHostResolvConfNameservers(t *testing.T) {
+	hostNameservers := hostResolvConfNameservers(t)
+	if len(hostNameservers) == 0 {
+		t.Skip("host resolv.conf has no nameserver entries")
+	}
+
+	root := t.TempDir()
+	if err := writeSandboxConfig(root, nil, TrafficModeTransparent); err != nil {
+		t.Fatalf("writeSandboxConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(root, "etc", "resolv.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(gotLines) < len(hostNameservers) {
+		t.Fatalf("expected at least %d lines in staged resolv.conf, got %d: %q", len(hostNameservers), len(gotLines), string(content))
+	}
+	for idx, want := range hostNameservers {
+		if gotLines[idx] != want {
+			t.Fatalf("unexpected nameserver line %d: got %q want %q", idx, gotLines[idx], want)
+		}
 	}
 }
 
@@ -344,4 +392,27 @@ func containsArgSequence(haystack []string, needle []string) bool {
 		}
 	}
 	return false
+}
+
+func hostResolvConfNameservers(t *testing.T) []string {
+	t.Helper()
+
+	file, err := os.Open("/etc/resolv.conf")
+	if err != nil {
+		t.Fatalf("open host resolv.conf: %v", err)
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "nameserver ") {
+			lines = append(lines, line)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan host resolv.conf: %v", err)
+	}
+	return lines
 }

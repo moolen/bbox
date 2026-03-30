@@ -13,13 +13,19 @@ import (
 var packageRootRuntimeCaller = runtime.Caller
 var packageRootGetwd = os.Getwd
 
+const (
+	helperBinaryName          = "bbox-helper"
+	seccompLauncherBinaryName = "bbox-seccomp-launcher"
+)
+
 type helperBinaryResolver struct {
 	once sync.Once
 
-	packageRoot func() (string, error)
-	makeTempDir func(string, string) (string, error)
-	buildHelper func(string, string) error
-	removeAll   func(string) error
+	packageRoot   func() (string, error)
+	makeTempDir   func(string, string) (string, error)
+	buildHelper   func(string, string) error
+	buildLauncher func(string, string) error
+	removeAll     func(string) error
 
 	path string
 	dir  string
@@ -28,10 +34,11 @@ type helperBinaryResolver struct {
 
 func newHelperBinaryResolver() *helperBinaryResolver {
 	return &helperBinaryResolver{
-		packageRoot: packageRoot,
-		makeTempDir: os.MkdirTemp,
-		buildHelper: buildHelperBinary,
-		removeAll:   os.RemoveAll,
+		packageRoot:   packageRoot,
+		makeTempDir:   os.MkdirTemp,
+		buildHelper:   buildHelperBinary,
+		buildLauncher: buildSeccompLauncherBinary,
+		removeAll:     os.RemoveAll,
 	}
 }
 
@@ -53,8 +60,14 @@ func (r *helperBinaryResolver) HelperBinary() (string, error) {
 			return
 		}
 
-		helperPath := filepath.Join(buildDir, "bbox-helper")
+		helperPath := filepath.Join(buildDir, helperBinaryName)
 		if err := r.buildHelper(moduleRoot, helperPath); err != nil {
+			_ = r.removeAll(buildDir)
+			r.err = err
+			return
+		}
+		launcherPath := filepath.Join(buildDir, seccompLauncherBinaryName)
+		if err := r.buildLauncher(moduleRoot, launcherPath); err != nil {
 			_ = r.removeAll(buildDir)
 			r.err = err
 			return
@@ -127,6 +140,9 @@ func isPackageRoot(dir string) bool {
 	if _, err := os.Stat(filepath.Join(dir, "cmd", "bbox-helper", "main.go")); err != nil {
 		return false
 	}
+	if _, err := os.Stat(filepath.Join(dir, "cmd", "bbox-seccomp-launcher", "main.c")); err != nil {
+		return false
+	}
 	return true
 }
 
@@ -144,4 +160,25 @@ func buildHelperBinary(moduleRoot, helperPath string) error {
 		return fmt.Errorf("build helper binary: %w: %s", err, msg)
 	}
 	return fmt.Errorf("build helper binary: %w", err)
+}
+
+func buildSeccompLauncherBinary(moduleRoot, launcherPath string) error {
+	compiler := strings.TrimSpace(os.Getenv("CC"))
+	if compiler == "" {
+		compiler = "cc"
+	}
+
+	cmd := exec.Command(compiler, "-O2", "-o", launcherPath, "./cmd/bbox-seccomp-launcher/main.c")
+	cmd.Dir = moduleRoot
+
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	msg := strings.TrimSpace(string(output))
+	if msg != "" {
+		return fmt.Errorf("build seccomp launcher binary: %w: %s", err, msg)
+	}
+	return fmt.Errorf("build seccomp launcher binary: %w", err)
 }

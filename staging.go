@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	defaultSandboxHelperPath = "/app/bbox-helper"
+	defaultSandboxHelperPath   = "/app/bbox-helper"
+	defaultSandboxLauncherPath = "/app/bbox-seccomp-launcher"
 )
 
 var mitmTrustBundlePaths = []string{
@@ -180,6 +181,10 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 	if err != nil {
 		return "", err
 	}
+	launcherHostPath := filepath.Join(filepath.Dir(helperHostPath), seccompLauncherBinaryName)
+	if _, err := os.Stat(launcherHostPath); err != nil {
+		return "", fmt.Errorf("resolve seccomp launcher beside helper %q: %w", helperHostPath, err)
+	}
 
 	var files []string
 	for _, requested := range opts.Binaries {
@@ -199,6 +204,11 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 		return "", err
 	}
 	files = append(files, helperRuntimeFiles...)
+	launcherRuntimeFiles, err := filesForCommand(launcherHostPath)
+	if err != nil {
+		return "", err
+	}
+	files = append(files, launcherRuntimeFiles...)
 
 	extras := []string{
 		"/lib64/ld-linux-x86-64.so.2",
@@ -237,6 +247,9 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 	if err := copyFileToPath(root, helperHostPath, defaultSandboxHelperPath); err != nil {
 		return "", err
 	}
+	if err := copyFileToPath(root, launcherHostPath, defaultSandboxLauncherPath); err != nil {
+		return "", err
+	}
 
 	if err := writeSandboxConfig(root, mitmCAPEM, mode); err != nil {
 		return "", err
@@ -255,7 +268,11 @@ func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
 		"/etc/nsswitch.conf": nsswitchContent,
 	}
 	if normalizeTrafficMode(mode) == TrafficModeTransparent {
-		files["/etc/resolv.conf"] = "nameserver 127.0.0.1\noptions ndots:1\n"
+		content, err := transparentResolvConfContent()
+		if err != nil {
+			return err
+		}
+		files["/etc/resolv.conf"] = content
 	}
 	if len(mitmCAPEM) > 0 {
 		for _, path := range mitmTrustBundlePaths {
@@ -275,6 +292,26 @@ func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
 		}
 	}
 	return nil
+}
+
+func transparentResolvConfContent() (string, error) {
+	content, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return "", fmt.Errorf("read host resolv.conf: %w", err)
+	}
+
+	var nameservers []string
+	for _, line := range strings.Split(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "nameserver ") {
+			nameservers = append(nameservers, trimmed)
+		}
+	}
+	if len(nameservers) == 0 {
+		return "", fmt.Errorf("host resolv.conf does not contain nameserver entries")
+	}
+
+	return strings.Join(nameservers, "\n") + "\n", nil
 }
 
 func copyFileIntoRoot(root, hostPath string) error {
