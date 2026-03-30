@@ -138,6 +138,23 @@ func TestBuildConfigClearEnvSkipsInheritedEnv(t *testing.T) {
 	}
 }
 
+func TestDispatchRunsInternalHelperWithoutCobra(t *testing.T) {
+	helperCalled := false
+	err := dispatch([]string{"internal-helper", "--bridge-fd", "3"}, commandDeps{}, func(args []string) error {
+		helperCalled = true
+		if len(args) == 0 || args[0] != "--bridge-fd" {
+			t.Fatalf("args = %v", args)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !helperCalled {
+		t.Fatal("expected internal helper dispatch")
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

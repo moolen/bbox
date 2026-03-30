@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/moolen/bbox"
+	"github.com/moolen/bbox/internal/helperentrypoint"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -63,14 +64,14 @@ func (e exitCodeError) Error() string {
 }
 
 func main() {
-	cmd := newRootCommand(commandDeps{
+	err := dispatch(os.Args[1:], commandDeps{
 		stdout:  os.Stdout,
 		stderr:  os.Stderr,
 		getwd:   os.Getwd,
 		environ: os.Environ,
 		run:     runSandbox,
-	})
-	if err := cmd.Execute(); err != nil {
+	}, helperentrypoint.Run)
+	if err != nil {
 		var exitErr exitCodeError
 		if errors.As(err, &exitErr) {
 			os.Exit(exitErr.code)
@@ -78,6 +79,16 @@ func main() {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func dispatch(args []string, deps commandDeps, runHelper func([]string) error) error {
+	if runHelper != nil && len(args) > 0 && args[0] == "internal-helper" {
+		return runHelper(args[1:])
+	}
+
+	cmd := newRootCommand(deps)
+	cmd.SetArgs(args)
+	return cmd.Execute()
 }
 
 func newRootCommand(deps commandDeps) *cobra.Command {
