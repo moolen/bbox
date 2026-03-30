@@ -161,7 +161,7 @@ func TestHandleExecInputCancelTargetsCurrentRequestID(t *testing.T) {
 	}
 }
 
-func TestRunTransparentRequiresDNSListener(t *testing.T) {
+func TestRunTransparentIgnoresLegacyDNSAddrBinding(t *testing.T) {
 	t.Parallel()
 
 	blockedListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -171,16 +171,92 @@ func TestRunTransparentRequiresDNSListener(t *testing.T) {
 	defer blockedListener.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	errCh := make(chan error, 1)
+	bridgeSide, peerSide := net.Pipe()
 
-	err = Run(ctx, Config{
-		Bridge:      newTestBridge(),
-		TrafficMode: TrafficModeTransparent,
-		MITMEnabled: true,
-		DNSAddr:     blockedListener.Addr().String(),
-	})
-	if err == nil {
-		t.Fatal("expected transparent startup to fail when the DNS listener cannot bind")
+	go func() {
+		errCh <- Run(ctx, Config{
+			Bridge:      bridgeSide,
+			TrafficMode: TrafficModeTransparent,
+			MITMEnabled: true,
+			DNSAddr:     blockedListener.Addr().String(),
+			Logger:      log.New(io.Discard, "", 0),
+		})
+	}()
+
+	enc := gob.NewEncoder(peerSide)
+	dec := gob.NewDecoder(peerSide)
+	sendErrCh := make(chan error, 1)
+	go func() {
+		sendErrCh <- enc.Encode(&helperproto.Envelope{
+			ID: 1,
+			Hello: &helperproto.Hello{
+				ProtocolVersion: helperproto.ProtocolVersion,
+				SandboxID:       "transparent-dns-compat",
+			},
+		})
+	}()
+
+	select {
+	case err := <-sendErrCh:
+		if err != nil {
+			t.Fatalf("send hello: %v", err)
+		}
+	case err := <-errCh:
+		t.Fatalf("transparent runtime exited before hello handshake: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out sending hello to transparent runtime")
+	}
+
+	readyCh := make(chan helperproto.Envelope, 1)
+	readyErrCh := make(chan error, 1)
+	go func() {
+		var ready helperproto.Envelope
+		if err := dec.Decode(&ready); err != nil {
+			readyErrCh <- err
+			return
+		}
+		readyCh <- ready
+	}()
+
+	var ready helperproto.Envelope
+	select {
+	case ready = <-readyCh:
+	case err := <-readyErrCh:
+		t.Fatalf("read ready: %v", err)
+	case err := <-errCh:
+		t.Fatalf("transparent runtime exited before ready: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent runtime ready")
+	}
+	if ready.Ready == nil {
+		t.Fatalf("expected ready response, got %#v", ready)
+	}
+	if ready.Ready.TCPAddr == "" {
+		t.Fatal("expected transparent runtime to report a TCP ingress address")
+	}
+
+	cancel()
+	_ = peerSide.Close()
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent runtime to exit")
+	}
+}
+
+func TestTransparentRuntimeReadyOmitsDNSAddr(t *testing.T) {
+	ready, shutdown := startTransparentRuntimeReady(t)
+	defer shutdown()
+
+	if ready.DNSAddr != "" {
+		t.Fatalf("expected transparent runtime to omit DNS address, got %q", ready.DNSAddr)
+	}
+	if ready.TCPAddr == "" {
+		t.Fatal("expected transparent runtime to report a TCP ingress address")
 	}
 }
 
@@ -2561,9 +2637,6 @@ func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
 	}
 	if ready.Ready == nil {
 		t.Fatalf("expected ready response, got %#v", ready)
-	}
-	if ready.Ready.DNSAddr == "" {
-		t.Fatal("expected transparent runtime to report a DNS address")
 	}
 	if ready.Ready.TCPAddr == "" {
 		t.Fatal("expected transparent runtime to report a TCP ingress address")
