@@ -7,13 +7,16 @@ IMAGE ?= bbox-agent
 TAG ?= latest
 IMAGE_REF := $(IMAGE):$(TAG)
 
-.PHONY: build docker-build lint release-snapshot release-snapshot-multiarch
+.PHONY: build docker-build lint release-snapshot release-snapshot-multiarch generate-embedded-launchers
 
 build:
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=1 $(GO) build -trimpath -o $(BIN_DIR)/bbox ./cmd/bbox
 	CGO_ENABLED=1 $(GO) build -trimpath -o $(BIN_DIR)/bbox-helper ./cmd/bbox-helper
 	$(CC) -O2 -o $(BIN_DIR)/bbox-seccomp-launcher ./cmd/bbox-seccomp-launcher/main.c
+
+generate-embedded-launchers:
+	./scripts/generate-embedded-launchers.sh
 
 release-snapshot:
 	./scripts/release-snapshot.sh
