@@ -1,4 +1,6 @@
 #!/bin/sh
 set -eu
 
-exec env PROJECT_ROOT="${PWD}" go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean --skip=publish --config .goreleaser.release.yaml "$@"
+goreleaser_version="${GORELEASER_VERSION:-v2.12.0}"
+
+exec env PROJECT_ROOT="${PWD}" go run github.com/goreleaser/goreleaser/v2@"$goreleaser_version" release --snapshot --clean --skip=publish --config .goreleaser.release.yaml "$@"

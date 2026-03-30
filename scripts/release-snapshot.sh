@@ -3,6 +3,7 @@ set -eu
 
 goarch="${GOARCH:-$(go env GOARCH)}"
 config=".goreleaser.yaml"
+goreleaser_version="${GORELEASER_VERSION:-v2.12.0}"
 
 case "$goarch" in
   amd64)
@@ -17,5 +18,4 @@ case "$goarch" in
     ;;
 esac
 
-exec go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean --skip=publish --config "$config" "$@"
-
+exec go run github.com/goreleaser/goreleaser/v2@"$goreleaser_version" release --snapshot --clean --skip=publish --config "$config" "$@"
