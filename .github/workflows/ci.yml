@@ -27,7 +27,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap build-essential pkg-config libseccomp-dev gcc-aarch64-linux-gnu
+          sudo apt-get install -y bubblewrap build-essential gperf pkg-config libseccomp-dev gcc-aarch64-linux-gnu
 
       - name: Run Go tests
         run: |
