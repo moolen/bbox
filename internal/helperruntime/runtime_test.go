@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"github.com/moolen/bbox/internal/helperproto"
 	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
 	"github.com/moolen/bbox/internal/helperruntime/ingress"
+	"github.com/moolen/bbox/internal/helperruntime/seccompnotify"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
@@ -78,6 +80,85 @@ func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
 	}
 
 	closeReadLoop(t, peer, errCh)
+}
+
+func TestRunSupervisedExecStartsSupervisor(t *testing.T) {
+	t.Parallel()
+
+	prevNewSupervisor := newSupervisorForExec
+	prevPrepareSupervisor := prepareSupervisorExec
+	prevStartSupervisor := startSupervisorExec
+	t.Cleanup(func() {
+		newSupervisorForExec = prevNewSupervisor
+		prepareSupervisorExec = prevPrepareSupervisor
+		startSupervisorExec = prevStartSupervisor
+	})
+
+	supervisor, err := seccompnotify.NewSupervisor(seccompnotify.RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("NewSupervisor() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = supervisor.Close()
+	})
+
+	newSupervisorForExec = func(seccompnotify.RuntimeTargets) (*seccompnotify.Supervisor, error) {
+		return supervisor, nil
+	}
+	prepareSupervisorExec = func(_ context.Context, _ *seccompnotify.Supervisor, _ *exec.Cmd) error {
+		return nil
+	}
+
+	started := false
+	startSupervisorExec = func(_ context.Context, _ *seccompnotify.Supervisor, pid int) error {
+		if pid <= 0 {
+			return errors.New("pid must be positive")
+		}
+		started = true
+		return nil
+	}
+
+	cmd := exec.Command("sh", "-c", "exit 0")
+	session, streams, _, err := runSupervisedExec(context.Background(), cmd, helperproto.ExecRequest{}, seccompnotify.RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("runSupervisedExec() error = %v", err)
+	}
+	if !started {
+		t.Fatal("runSupervisedExec() did not start the supervisor")
+	}
+	if session != nil {
+		_ = session.Close()
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if len(streams) != 2 {
+		t.Fatalf("streams = %d, want 2", len(streams))
+	}
+}
+
+func TestHandleExecInputCancelTargetsCurrentRequestID(t *testing.T) {
+	t.Parallel()
+
+	cancelled := false
+	bridge := &bridge{
+		currentExec: &execState{
+			id: 41,
+			cancel: func() {
+				cancelled = true
+			},
+		},
+	}
+
+	bridge.handleExecInput(7, helperproto.ExecInput{Cancel: true})
+	if cancelled {
+		t.Fatal("unexpected cancel for wrong request id")
+	}
+
+	bridge.handleExecInput(41, helperproto.ExecInput{Cancel: true})
+	if !cancelled {
+		t.Fatal("expected cancel for matching request id")
+	}
 }
 
 func TestRunTransparentRequiresAllListeners(t *testing.T) {

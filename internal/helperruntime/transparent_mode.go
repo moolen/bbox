@@ -41,6 +41,7 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	defer httpsListener.Close()
 
 	bridge := newBridge(cfg.Bridge, cfg.Logger, "")
+	bridge.trafficMode = TrafficModeTransparent
 	bridge.mitmEnabled = cfg.MITMEnabled
 	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
 	bridge.dnsAddr = dnsServer.Addr()

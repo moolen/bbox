@@ -22,6 +22,7 @@ func runProxyMode(ctx context.Context, cfg Config) error {
 	defer listener.Close()
 
 	bridge := newBridge(cfg.Bridge, cfg.Logger, listener.Addr().String())
+	bridge.trafficMode = TrafficModeProxy
 	bridge.mitmEnabled = cfg.MITMEnabled
 	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
 

@@ -32,7 +32,7 @@ type RuntimeBridge struct {
 	nextID   atomic.Uint64
 
 	onExecRequest func(context.Context, uint64, helperproto.ExecRequest)
-	onExecInput   func(helperproto.ExecInput)
+	onExecInput   func(uint64, helperproto.ExecInput)
 }
 
 type tunnelDelivery struct {
@@ -71,7 +71,7 @@ func (b *RuntimeBridge) SetReadyAddrs(dnsAddr, httpAddr, httpsAddr string) {
 
 func (b *RuntimeBridge) SetExecHandlers(
 	onExecRequest func(context.Context, uint64, helperproto.ExecRequest),
-	onExecInput func(helperproto.ExecInput),
+	onExecInput func(uint64, helperproto.ExecInput),
 ) {
 	b.onExecRequest = onExecRequest
 	b.onExecInput = onExecInput
@@ -106,7 +106,7 @@ func (b *RuntimeBridge) ReadLoop(ctx context.Context) error {
 				b.logger.Printf("ignoring unsupported helper envelope kind %q", env.Kind())
 				continue
 			}
-			b.onExecInput(*env.ExecInput)
+			b.onExecInput(env.ID, *env.ExecInput)
 		default:
 			b.logger.Printf("ignoring unsupported helper envelope kind %q", env.Kind())
 		}

@@ -18,6 +18,17 @@ import (
 	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
 	hrexec "github.com/moolen/bbox/internal/helperruntime/exec"
 	"github.com/moolen/bbox/internal/helperruntime/ingress"
+	"github.com/moolen/bbox/internal/helperruntime/seccompnotify"
+)
+
+var (
+	newSupervisorForExec  = seccompnotify.NewSupervisor
+	prepareSupervisorExec = func(ctx context.Context, supervisor *seccompnotify.Supervisor, cmd *exec.Cmd) error {
+		return supervisor.Prepare(ctx, cmd)
+	}
+	startSupervisorExec = func(ctx context.Context, supervisor *seccompnotify.Supervisor, pid int) error {
+		return supervisor.Start(ctx, pid)
+	}
 )
 
 func OpenBridgeFromFD(fd int) (io.ReadWriteCloser, error) {
@@ -54,6 +65,7 @@ func Run(ctx context.Context, cfg Config) error {
 type bridge struct {
 	runtimeBridge       *bridgepkg.RuntimeBridge
 	logger              *log.Logger
+	trafficMode         TrafficMode
 	dnsAddr             string
 	httpAddr            string
 	httpsAddr           string
@@ -61,7 +73,7 @@ type bridge struct {
 	maxRequestBodyBytes int64
 	execMu              sync.Mutex
 	execStateMu         sync.Mutex
-	currentExec         *hrexec.Session
+	currentExec         *execState
 }
 
 func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
@@ -69,6 +81,12 @@ func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *b
 		runtimeBridge: bridgepkg.New(conn, logger, proxyAddr),
 		logger:        logger,
 	}
+}
+
+type execState struct {
+	id      uint64
+	session *hrexec.Session
+	cancel  context.CancelFunc
 }
 
 func (b *bridge) readLoop(ctx context.Context) error {
@@ -113,22 +131,42 @@ func (b *bridge) handleExec(ctx context.Context, id uint64, req helperproto.Exec
 		return
 	}
 
-	cmd := exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, req.Argv[0], req.Argv[1:]...)
 	cmd.Env = append([]string(nil), req.Env...)
 	cmd.Dir = req.WorkDir
 
-	session, streams, err := hrexec.StartSession(cmd, req)
+	var (
+		session    *hrexec.Session
+		streams    []hrexec.OutputStream
+		supervisor *seccompnotify.Supervisor
+		err        error
+	)
+	if b.trafficMode == TrafficModeTransparent {
+		session, streams, supervisor, err = runSupervisedExec(runCtx, cmd, req, b.transparentRuntime())
+	} else {
+		session, streams, err = hrexec.StartSession(cmd, req)
+	}
 	if err != nil {
 		b.sendExecError(id, err)
 		return
 	}
-	b.setCurrentExec(session)
-	defer b.clearCurrentExec()
+	b.setCurrentExec(&execState{id: id, session: session, cancel: cancel})
+	defer b.clearCurrentExec(id)
 	defer func() {
 		if err := session.Close(); err != nil {
 			b.logger.Printf("close exec session: %v", err)
 		}
 	}()
+	if supervisor != nil {
+		defer func() {
+			if err := supervisor.Close(); err != nil {
+				b.logger.Printf("close exec supervisor: %v", err)
+			}
+		}()
+	}
 
 	var wg sync.WaitGroup
 	for _, stream := range streams {
@@ -177,23 +215,72 @@ func (b *bridge) sendExecError(id uint64, err error) {
 	}
 }
 
-func (b *bridge) handleExecInput(input helperproto.ExecInput) {
+func (b *bridge) transparentRuntime() seccompnotify.RuntimeTargets {
+	return seccompnotify.RuntimeTargets{
+		DNSAddr:   b.dnsAddr,
+		HTTPAddr:  b.httpAddr,
+		HTTPSAddr: b.httpsAddr,
+	}
+}
+
+func runSupervisedExec(runCtx context.Context, cmd *exec.Cmd, req helperproto.ExecRequest, runtimeTargets seccompnotify.RuntimeTargets) (*hrexec.Session, []hrexec.OutputStream, *seccompnotify.Supervisor, error) {
+	supervisor, err := newSupervisorForExec(runtimeTargets)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := prepareSupervisorExec(runCtx, supervisor, cmd); err != nil {
+		_ = supervisor.Close()
+		return nil, nil, nil, err
+	}
+
+	session, streams, err := hrexec.StartSession(cmd, req)
+	if err != nil {
+		_ = supervisor.Close()
+		return nil, nil, nil, err
+	}
+	if cmd.Process == nil {
+		_ = session.Close()
+		_ = supervisor.Close()
+		return nil, nil, nil, fmt.Errorf("supervised exec started without child process")
+	}
+	if err := startSupervisorExec(runCtx, supervisor, cmd.Process.Pid); err != nil {
+		_ = session.Close()
+		_ = supervisor.Close()
+		return nil, nil, nil, err
+	}
+	return session, streams, supervisor, nil
+}
+
+func (b *bridge) handleExecInput(id uint64, input helperproto.ExecInput) {
 	b.execStateMu.Lock()
-	session := b.currentExec
+	state := b.currentExec
 	b.execStateMu.Unlock()
 
-	hrexec.HandleInput(session, input)
+	if state == nil || state.id != id {
+		return
+	}
+	if input.Cancel {
+		state.cancel()
+		if state.session != nil {
+			_ = state.session.Close()
+		}
+		return
+	}
+	hrexec.HandleInput(state.session, input)
 }
 
-func (b *bridge) setCurrentExec(session *hrexec.Session) {
+func (b *bridge) setCurrentExec(state *execState) {
 	b.execStateMu.Lock()
 	defer b.execStateMu.Unlock()
-	b.currentExec = session
+	b.currentExec = state
 }
 
-func (b *bridge) clearCurrentExec() {
+func (b *bridge) clearCurrentExec(id uint64) {
 	b.execStateMu.Lock()
 	defer b.execStateMu.Unlock()
+	if b.currentExec == nil || b.currentExec.id != id {
+		return
+	}
 	b.currentExec = nil
 }
 
