@@ -113,7 +113,7 @@ func TestTransparentHTTPSWithCurl(t *testing.T) {
 	}
 }
 
-func TestTransparentModeRejectsIPLiteralAndNonDefaultPorts(t *testing.T) {
+func TestTransparentModeSupportsNonDefaultHTTPSPorts(t *testing.T) {
 	requireSandboxPrereqs(t)
 	requireTransparentRuntimePortsStrict(t)
 
@@ -121,6 +121,19 @@ func TestTransparentModeRejectsIPLiteralAndNonDefaultPorts(t *testing.T) {
 	if err != nil {
 		t.Skip(err.Error())
 	}
+
+	server := startTransparentTLSTestServerOnPort(t, "secure.localhost", 8443, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "secure.localhost:8443" {
+			t.Fatalf("unexpected host: %q", r.Host)
+		}
+		if r.URL.Path != "/allowed" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte("transparent https 8443 ok"))
+	}))
+	defer server.Close()
+	trustHTTPSServer(t, server)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -139,7 +152,7 @@ func TestTransparentModeRejectsIPLiteralAndNonDefaultPorts(t *testing.T) {
 	}()
 
 	sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
-		Name:        "transparent-unsupported",
+		Name:        "transparent-https-8443",
 		Binaries:    []string{curlPath},
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
@@ -157,32 +170,170 @@ func TestTransparentModeRejectsIPLiteralAndNonDefaultPorts(t *testing.T) {
 		}
 	}()
 
-	ipLiteralResult, err := sandbox.Run(ctx, []string{
+	result, err := sandbox.Run(ctx, []string{
 		curlPath,
 		"-sS",
-		"--connect-timeout", "5",
-		"--max-time", "10",
-		"https://127.0.0.1/allowed",
-	}, bbox.RunOptions{})
-	if err != nil {
-		t.Fatalf("run IP-literal transparent curl: %v", err)
-	}
-	if ipLiteralResult.ExitCode == 0 {
-		t.Fatalf("expected IP-literal transparent HTTPS request to fail, stdout=%q stderr=%q", string(ipLiteralResult.Stdout), string(ipLiteralResult.Stderr))
-	}
-
-	nonDefaultPortResult, err := sandbox.Run(ctx, []string{
-		curlPath,
-		"-sS",
-		"--connect-timeout", "5",
-		"--max-time", "10",
+		"-o", "-",
+		"-w", "\n%{http_code}\n",
 		"https://secure.localhost:8443/allowed",
 	}, bbox.RunOptions{})
 	if err != nil {
 		t.Fatalf("run non-default-port transparent curl: %v", err)
 	}
-	if nonDefaultPortResult.ExitCode == 0 {
-		t.Fatalf("expected non-default-port transparent HTTPS request to fail, stdout=%q stderr=%q", string(nonDefaultPortResult.Stdout), string(nonDefaultPortResult.Stderr))
+	if result.ExitCode != 0 {
+		t.Fatalf("expected non-default-port transparent HTTPS request to succeed, exit=%d stderr=%q", result.ExitCode, string(result.Stderr))
+	}
+	if got := strings.TrimSpace(string(result.Stdout)); got != "transparent https 8443 ok\n200" {
+		t.Fatalf("unexpected non-default-port transparent HTTPS output: %q", got)
+	}
+}
+
+func TestTransparentModeRejectsIPLiteralWithoutCIDRPolicy(t *testing.T) {
+	requireSandboxPrereqs(t)
+	requireTransparentRuntimePortsStrict(t)
+
+	curlPath, err := requireTool("curl")
+	if err != nil {
+		t.Skip(err.Error())
+	}
+
+	server := startTransparentTLSTestServerOnPort(t, "127.0.0.1", 8443, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ip literal should not reach upstream"))
+	}))
+	defer server.Close()
+	trustHTTPSServer(t, server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
+		MaxRequestBodyBytes: 1024,
+		MITM:                bbox.MITMOptions{Enabled: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
+		Name:        "transparent-ip-literal-denied",
+		Binaries:    []string{curlPath},
+		TrafficMode: bbox.TrafficModeTransparent,
+		Policy: bbox.NetworkPolicy{
+			AllowHostPatterns: []string{`^secure[.]localhost$`},
+			AllowHTTPMethods:  []string{"GET"},
+			AllowPathPatterns: []string{`^/allowed$`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create transparent limitation sandbox: %v", err)
+	}
+	defer func() {
+		if err := sandbox.Close(); err != nil {
+			t.Fatalf("close transparent limitation sandbox: %v", err)
+		}
+	}()
+
+	result, err := sandbox.Run(ctx, []string{
+		curlPath,
+		"-sS",
+		"-o", "-",
+		"-w", "\n%{http_code}\n",
+		"--connect-timeout", "5",
+		"--max-time", "10",
+		"https://127.0.0.1:8443/allowed",
+	}, bbox.RunOptions{})
+	if err != nil {
+		t.Fatalf("run IP-literal transparent curl: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected denied IP-literal transparent HTTPS request to return an HTTP response, exit=%d stderr=%q", result.ExitCode, string(result.Stderr))
+	}
+	output := strings.TrimSpace(string(result.Stdout))
+	if !strings.Contains(output, "proxy request denied: hostname 127.0.0.1 is not allowed by policy") {
+		t.Fatalf("unexpected denied IP-literal transparent HTTPS output: %q", output)
+	}
+	if !strings.HasSuffix(output, "403") {
+		t.Fatalf("expected denied IP-literal transparent HTTPS request to receive HTTP 403, got %q", output)
+	}
+}
+
+func TestTransparentModeAllowsIPLiteralWithinCIDRPolicy(t *testing.T) {
+	requireSandboxPrereqs(t)
+	requireTransparentRuntimePortsStrict(t)
+
+	curlPath, err := requireTool("curl")
+	if err != nil {
+		t.Skip(err.Error())
+	}
+
+	server := startTransparentTLSTestServerOnPort(t, "127.0.0.1", 8443, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "127.0.0.1:8443" {
+			t.Fatalf("unexpected host: %q", r.Host)
+		}
+		if r.URL.Path != "/allowed" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte("ip literal https ok"))
+	}))
+	defer server.Close()
+	trustHTTPSServer(t, server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
+		MaxRequestBodyBytes: 1024,
+		MITM:                bbox.MITMOptions{Enabled: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
+		Name:        "transparent-ip-literal-allowed",
+		Binaries:    []string{curlPath},
+		TrafficMode: bbox.TrafficModeTransparent,
+		Policy: bbox.NetworkPolicy{
+			AllowIPCIDRs:      []string{"127.0.0.0/8"},
+			AllowHTTPMethods:  []string{"GET"},
+			AllowPathPatterns: []string{`^/allowed$`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create transparent ip literal sandbox: %v", err)
+	}
+	defer func() {
+		if err := sandbox.Close(); err != nil {
+			t.Fatalf("close transparent ip literal sandbox: %v", err)
+		}
+	}()
+
+	result, err := sandbox.Run(ctx, []string{
+		curlPath,
+		"-sS",
+		"-o", "-",
+		"-w", "\n%{http_code}\n",
+		"https://127.0.0.1:8443/allowed",
+	}, bbox.RunOptions{})
+	if err != nil {
+		t.Fatalf("run allowed IP-literal transparent curl: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected IP-literal transparent HTTPS request to succeed, exit=%d stderr=%q", result.ExitCode, string(result.Stderr))
+	}
+	if got := strings.TrimSpace(string(result.Stdout)); got != "ip literal https ok\n200" {
+		t.Fatalf("unexpected IP-literal transparent HTTPS output: %q", got)
 	}
 }
 

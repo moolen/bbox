@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -24,6 +25,14 @@ extern char **environ;
 static const uint32_t managed_syscalls[] = {
     __NR_socket,
     __NR_connect,
+    __NR_sendto,
+    __NR_recvfrom,
+    __NR_sendmsg,
+    __NR_recvmsg,
+    __NR_sendmmsg,
+    __NR_recvmmsg,
+    __NR_poll,
+    __NR_ppoll,
     __NR_close,
     __NR_dup,
     __NR_dup2,
@@ -35,6 +44,14 @@ static const uint32_t managed_syscalls[] = {
 static const uint32_t managed_syscalls[] = {
     __NR_socket,
     __NR_connect,
+    __NR_sendto,
+    __NR_recvfrom,
+    __NR_sendmsg,
+    __NR_recvmsg,
+    __NR_sendmmsg,
+    __NR_recvmmsg,
+    __NR_poll,
+    __NR_ppoll,
     __NR_close,
     __NR_dup,
     __NR_dup3,
@@ -150,7 +167,7 @@ static int send_launcher_status(int sock_fd, uint8_t status, int send_fd, const 
     return 0;
 }
 
-static int install_notify_filter(void) {
+static int install_notify_filter(int allowed_sendmsg_fd) {
 #if defined(__x86_64__)
     static struct sock_filter filter[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
@@ -159,15 +176,40 @@ static int install_notify_filter(void) {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
         BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 7, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 6, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 5, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup, 4, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup2, 3, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup3, 2, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fcntl, 1, 0),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendto, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvfrom, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendmsg, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmsg, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendmmsg, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmmsg, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_poll, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ppoll, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup2, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup3, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fcntl, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
 #else
     static struct sock_filter filter[] = {
@@ -175,14 +217,38 @@ static int install_notify_filter(void) {
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_NATIVE, 1, 0),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 6, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 5, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 4, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup, 3, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup3, 2, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fcntl, 1, 0),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendto, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvfrom, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendmsg, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmsg, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendmmsg, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvmmsg, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_poll, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ppoll, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup3, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fcntl, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
 #endif
     struct sock_fprog prog = {
@@ -190,6 +256,12 @@ static int install_notify_filter(void) {
         .filter = filter,
     };
     long listener_fd;
+
+#if defined(__x86_64__)
+    filter[16].k = (uint32_t)allowed_sendmsg_fd;
+#else
+    filter[14].k = (uint32_t)allowed_sendmsg_fd;
+#endif
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         return -1;
@@ -204,15 +276,22 @@ static int install_notify_filter(void) {
 }
 
 int main(int argc, char *argv[]) {
-    int sock_fd = parse_sock_fd();
+    int inherited_sock_fd = parse_sock_fd();
+    int sock_fd = -1;
     int separator = -1;
     int notify_fd = -1;
     char **envp = NULL;
     (void)managed_syscalls;
 
-    if (sock_fd < 0) {
+    if (inherited_sock_fd < 0) {
         return 1;
     }
+    sock_fd = fcntl(inherited_sock_fd, F_DUPFD_CLOEXEC, 128);
+    if (sock_fd < 0) {
+        fprintf(stderr, "duplicate launcher socket: %s\n", strerror(errno));
+        return 1;
+    }
+    close(inherited_sock_fd);
     if (argc < 4) {
         (void)send_launcher_status(sock_fd, 0, -1, "launcher target argv is required");
         fprintf(stderr, "launcher target argv is required\n");
@@ -233,7 +312,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    notify_fd = install_notify_filter();
+    notify_fd = install_notify_filter(sock_fd);
     if (notify_fd < 0) {
         (void)send_launcher_status(sock_fd, 0, -1, "install seccomp notify filter");
         fprintf(stderr, "install seccomp notify filter: %s\n", strerror(errno));
@@ -246,6 +325,8 @@ int main(int argc, char *argv[]) {
         free(envp);
         return 1;
     }
+
+    close(sock_fd);
 
     execve(argv[1], &argv[separator + 1], envp);
 

@@ -1,6 +1,9 @@
 package seccompnotify
 
-import "os"
+import (
+	"context"
+	"os"
+)
 
 type SocketKind string
 
@@ -11,30 +14,48 @@ const (
 )
 
 type SocketState struct {
-	Kind         SocketKind
-	ChildFD      int
-	HelperFD     int
-	Family       int
-	SocketType   int
-	Protocol     int
-	Blocking     bool
-	DNSManaged   bool
+	// Kind selects the syscall emulation path for this child FD.
+	Kind       SocketKind
+	ChildFD    int
+	HelperFD   int
+	Family     int
+	SocketType int
+	Protocol   int
+	Blocking   bool
+	// DNSManaged marks UDP sockets that have been switched from kernel I/O to
+	// helper-mediated DNS request/response emulation.
+	DNSManaged    bool
+	ConnectedHost string
+	ConnectedPort int
+	// PendingDNSResponses buffers helper replies until the child issues a
+	// matching recv*/poll syscall.
+	PendingDNSResponses []dnsPacketResponse
+	// OriginalHost/OriginalPort retain the destination that triggered a raw TCP
+	// redirect so the transparent ingress can recover policy context.
 	OriginalHost string
 	OriginalPort int
+	// RedirectAddr records the helper-side endpoint that the child socket was
+	// actually connected to after seccomp redirection.
 	RedirectAddr string
 }
 
+type dnsPacketResponse struct {
+	Payload []byte
+	Source  DecodedSockaddr
+}
+
+// RuntimeTargets describes the helper endpoints and callbacks that seccomp
+// socket emulation can hand traffic to.
 type RuntimeTargets struct {
 	DNSAddr            string
-	HTTPAddr           string
-	HTTPAddrV6         string
-	HTTPSAddr          string
-	HTTPSAddrV6        string
+	DNSRoundTrip       func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error)
 	RawTCPAddr         string
 	RawTCPAddrV6       string
 	RecordRawTCPOrigin func(localAddr, host string, port int)
 }
 
+// DecodedSockaddr is the normalized form used after copying a sockaddr out of
+// the sandboxed process.
 type DecodedSockaddr struct {
 	Family int
 	Host   string
@@ -83,6 +104,8 @@ type getpeernameRequest struct {
 	WritePeername func(DecodedSockaddr) error
 }
 
+// Supervisor owns the seccomp notify control channel and the per-FD state used
+// to emulate socket syscalls on behalf of the sandboxed process.
 type Supervisor struct {
 	targets       RuntimeTargets
 	registry      *FDRegistry

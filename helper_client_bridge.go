@@ -13,13 +13,12 @@ import (
 type helperReady struct {
 	proxyAddr string
 	dnsAddr   string
-	httpAddr  string
-	httpsAddr string
+	tcpAddr   string
 	err       error
 }
 
 func (r helperReady) hasTransparentListeners() bool {
-	return r.dnsAddr != "" && r.httpAddr != "" && r.httpsAddr != ""
+	return r.dnsAddr != "" && r.tcpAddr != ""
 }
 
 func (c *helperClient) readLoop() error {
@@ -45,8 +44,7 @@ func (c *helperClient) readLoop() error {
 			c.notifyReady(helperReady{
 				proxyAddr: env.Ready.ProxyAddr,
 				dnsAddr:   env.Ready.DNSAddr,
-				httpAddr:  env.Ready.HTTPAddr,
-				httpsAddr: env.Ready.HTTPSAddr,
+				tcpAddr:   env.Ready.TCPAddr,
 			})
 		case env.ProxyRequest != nil:
 			req := *env.ProxyRequest
@@ -54,6 +52,9 @@ func (c *helperClient) readLoop() error {
 		case env.ConnectRequest != nil:
 			req := *env.ConnectRequest
 			go c.handleConnectRequest(env.ID, req)
+		case env.DNSRequest != nil:
+			req := *env.DNSRequest
+			go c.handleDNSRequest(env.ID, req)
 		case env.LeafCertRequest != nil:
 			req := *env.LeafCertRequest
 			go c.handleLeafCertRequest(env.ID, req)
@@ -136,6 +137,21 @@ func (c *helperClient) handleConnectRequest(id uint64, req helperproto.ConnectRe
 		return
 	}
 	tunnel.start()
+}
+
+func (c *helperClient) handleDNSRequest(id uint64, req helperproto.DNSRequest) {
+	response := c.manager.handleDNSRequest(c.ctx, c.sandboxID, req)
+	if response == nil {
+		response = &helperproto.DNSResponse{
+			Error: "dns request rejected: empty response",
+		}
+	}
+	if err := c.send(helperproto.Envelope{
+		ID:          id,
+		DNSResponse: response,
+	}); err != nil {
+		c.failCurrentRun(err)
+	}
 }
 
 func (c *helperClient) handleLeafCertRequest(id uint64, req helperproto.LeafCertRequest) {

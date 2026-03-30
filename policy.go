@@ -176,35 +176,7 @@ func (p compiledPolicy) Check(method, hostname string, connect bool) error {
 		}
 	}
 
-	if ip := net.ParseIP(normalizedHost); ip != nil {
-		for _, network := range p.denyIPCIDRs {
-			if network.Contains(ip) {
-				return fmt.Errorf("ip literal %s is denied by policy", normalizedHost)
-			}
-		}
-		for _, network := range p.allowIPCIDRs {
-			if network.Contains(ip) {
-				return nil
-			}
-		}
-	}
-
-	for _, re := range p.denyHosts {
-		if re.MatchString(normalizedHost) {
-			return fmt.Errorf("hostname %s is denied by policy", normalizedHost)
-		}
-	}
-
-	allowListConfigured := len(p.allowHosts) > 0 || len(p.allowIPCIDRs) > 0
-	for _, re := range p.allowHosts {
-		if re.MatchString(normalizedHost) {
-			return nil
-		}
-	}
-	if allowListConfigured {
-		return fmt.Errorf("hostname %s is not allowed by policy", normalizedHost)
-	}
-	return nil
+	return p.checkHostOnlyNormalized(normalizedHost)
 }
 
 func (p compiledPolicy) CheckRequest(req PolicyRequest) error {
@@ -251,6 +223,46 @@ func (p compiledPolicy) CheckDNS(host string) error {
 		}
 	}
 	return fmt.Errorf("hostname %s is not allowed by policy", normalized)
+}
+
+func (p compiledPolicy) CheckTransparentConnect(host string) error {
+	normalized, err := normalizePolicyHostname(host)
+	if err != nil {
+		return err
+	}
+	return p.checkHostOnlyNormalized(normalized)
+}
+
+func (p compiledPolicy) checkHostOnlyNormalized(normalizedHost string) error {
+	if ip := net.ParseIP(normalizedHost); ip != nil {
+		for _, network := range p.denyIPCIDRs {
+			if network.Contains(ip) {
+				return fmt.Errorf("ip literal %s is denied by policy", normalizedHost)
+			}
+		}
+		for _, network := range p.allowIPCIDRs {
+			if network.Contains(ip) {
+				return nil
+			}
+		}
+	}
+
+	for _, re := range p.denyHosts {
+		if re.MatchString(normalizedHost) {
+			return fmt.Errorf("hostname %s is denied by policy", normalizedHost)
+		}
+	}
+
+	allowListConfigured := len(p.allowHosts) > 0 || len(p.allowIPCIDRs) > 0
+	for _, re := range p.allowHosts {
+		if re.MatchString(normalizedHost) {
+			return nil
+		}
+	}
+	if allowListConfigured {
+		return fmt.Errorf("hostname %s is not allowed by policy", normalizedHost)
+	}
+	return nil
 }
 
 func normalizePolicyHostname(hostname string) (string, error) {

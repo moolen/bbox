@@ -278,6 +278,78 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 			return continueResp(req.ID)
 		}
 		return successResp(req.ID, 0)
+	case unix.SYS_SENDTO:
+		n, handled, err := s.emulateDNSSendTo(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
+	case unix.SYS_RECVFROM:
+		n, handled, err := s.emulateDNSRecvFrom(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
+	case unix.SYS_SENDMSG:
+		n, handled, err := s.emulateDNSSendMsg(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
+	case unix.SYS_RECVMSG:
+		n, handled, err := s.emulateDNSRecvMsg(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
+	case unix.SYS_SENDMMSG:
+		n, handled, err := s.emulateDNSSendMMsg(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
+	case unix.SYS_RECVMMSG:
+		n, handled, err := s.emulateDNSRecvMMsg(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
+	case unix.SYS_POLL:
+		n, handled, err := s.emulateDNSPoll(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
+	case unix.SYS_PPOLL:
+		n, handled, err := s.emulateDNSPPoll(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
 	case unix.SYS_CLOSE:
 		fd := int(req.Data.Args[0])
 		if fd >= 0 {
@@ -312,7 +384,7 @@ func (s *Supervisor) injectSocket(req *seccomp.ScmpNotifReq) (int, bool, error) 
 		return -1, false, err
 	}
 	if !managed {
-		return -1, false, unix.EPERM
+		return -1, false, nil
 	}
 
 	helperFD, err := unix.Socket(family, socketType, protocol)
@@ -373,7 +445,8 @@ func (s *Supervisor) redirectConnect(pid int, req *seccomp.ScmpNotifReq) (bool, 
 		})
 	case KindUDP:
 		if decoded.Port != 53 {
-			return true, unix.EPERM
+			s.registry.Close(childFD)
+			return false, nil
 		}
 		return true, s.handleDNSConnect(childFD, state, decoded)
 	default:
@@ -385,25 +458,18 @@ func (s *Supervisor) handleDNSConnect(childFD int, state SocketState, destinatio
 	if s == nil {
 		return unix.EINVAL
 	}
-	if s.targets.DNSAddr == "" {
+	if s.targets.DNSRoundTrip == nil && s.targets.DNSAddr == "" {
 		return unix.EHOSTUNREACH
-	}
-	sockaddr, err := parseTCPAddr(s.targets.DNSAddr)
-	if err != nil {
-		return err
-	}
-	if !sockaddrMatchesFamily(sockaddr, state.Family) {
-		return unix.EAFNOSUPPORT
-	}
-	if err := unix.Connect(state.HelperFD, sockaddr); err != nil {
-		return err
 	}
 
 	state.ChildFD = childFD
 	state.DNSManaged = true
+	state.ConnectedHost = destination.Host
+	state.ConnectedPort = destination.Port
+	state.PendingDNSResponses = nil
 	state.OriginalHost = destination.Host
 	state.OriginalPort = destination.Port
-	state.RedirectAddr = s.targets.DNSAddr
+	state.RedirectAddr = ""
 	s.registry.Insert(state)
 	return nil
 }
@@ -416,20 +482,19 @@ func classifyManagedSocket(targets RuntimeTargets, family, socketType, protocol 
 	switch baseSocketType(socketType) {
 	case unix.SOCK_STREAM:
 		if !targetsSupportFamilyIngress(targets, family) {
-			return KindUnknown, false, unix.EAFNOSUPPORT
+			return KindUnknown, false, nil
 		}
 		return KindTCP, true, nil
 	case unix.SOCK_DGRAM:
-		if (protocol != 0 && protocol != unix.IPPROTO_UDP) || targets.DNSAddr == "" {
-			return KindUnknown, false, unix.EPERM
+		if protocol != 0 && protocol != unix.IPPROTO_UDP {
+			return KindUnknown, false, nil
 		}
-		sockaddr, err := parseTCPAddr(targets.DNSAddr)
-		if err != nil || !sockaddrMatchesFamily(sockaddr, family) {
-			return KindUnknown, false, unix.EAFNOSUPPORT
+		if targets.DNSRoundTrip == nil && targets.DNSAddr == "" {
+			return KindUnknown, false, unix.EHOSTUNREACH
 		}
 		return KindUDP, true, nil
 	default:
-		return KindUnknown, false, unix.EPROTONOSUPPORT
+		return KindUnknown, false, nil
 	}
 }
 

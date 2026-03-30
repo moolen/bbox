@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func TestHelperClientRunSendFailureDoesNotWedgeFutureRuns(t *testing.T) {
@@ -220,8 +221,7 @@ func TestHelperClientStartAcceptsTransparentReadyEnvelope(t *testing.T) {
 			Ready: &helperproto.Ready{
 				ProtocolVersion: helperproto.ProtocolVersion,
 				DNSAddr:         "127.0.0.1:53",
-				HTTPAddr:        "127.0.0.1:80",
-				HTTPSAddr:       "127.0.0.1:443",
+				TCPAddr:         "127.0.0.1:18080",
 			},
 		})
 	}()
@@ -237,6 +237,127 @@ func TestHelperClientStartAcceptsTransparentReadyEnvelope(t *testing.T) {
 	if err := <-serverErrCh; err != nil {
 		t.Fatalf("server side failed: %v", err)
 	}
+}
+
+func TestHelperClientReadLoopDispatchesDNSRequest(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+
+	policy, err := compilePolicy(NetworkPolicy{
+		AllowHostPatterns: []string{`^example[.]com$`},
+	})
+	if err != nil {
+		t.Fatalf("compile policy: %v", err)
+	}
+
+	manager := newProxyManager(policy)
+	const sandboxID = "sandbox-a"
+	if err := manager.registerSandbox(sandboxID, policy); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	dnsConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen dns upstream: %v", err)
+	}
+	defer dnsConn.Close()
+
+	query := packDNSQueryForHelperClientTest(t, "example.com")
+	reply := []byte{0xca, 0xfe, 0xba, 0xbe}
+	serverErrCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 512)
+		n, addr, readErr := dnsConn.ReadFrom(buf)
+		if readErr != nil {
+			serverErrCh <- readErr
+			return
+		}
+		if !bytes.Equal(buf[:n], query) {
+			serverErrCh <- errors.New("unexpected dns query payload")
+			return
+		}
+		_, writeErr := dnsConn.WriteTo(reply, addr)
+		serverErrCh <- writeErr
+	}()
+
+	prevNewManagerDNSService := newManagerDNSService
+	newManagerDNSService = func() *managerDNSService {
+		return &managerDNSService{
+			dialContext: (&net.Dialer{Timeout: time.Second}).DialContext,
+			servers:     []string{dnsConn.LocalAddr().String()},
+			timeout:     time.Second,
+		}
+	}
+	defer func() {
+		newManagerDNSService = prevNewManagerDNSService
+	}()
+
+	client := newHelperClient(manager, sandboxID, clientSide)
+	go func() {
+		client.loopDone <- client.readLoop()
+	}()
+
+	dec := gob.NewDecoder(serverSide)
+	enc := gob.NewEncoder(serverSide)
+
+	if err := enc.Encode(&helperproto.Envelope{
+		ID: 1,
+		DNSRequest: &helperproto.DNSRequest{
+			Network: "udp",
+			Host:    "example.com",
+			Port:    53,
+			Payload: query,
+		},
+	}); err != nil {
+		t.Fatalf("send dns request: %v", err)
+	}
+
+	var env helperproto.Envelope
+	if err := dec.Decode(&env); err != nil {
+		t.Fatalf("decode dns response: %v", err)
+	}
+	if env.DNSResponse == nil {
+		t.Fatalf("expected dns response, got %#v", env)
+	}
+	if !bytes.Equal(env.DNSResponse.Payload, reply) {
+		t.Fatalf("unexpected dns response payload: got=%x want=%x", env.DNSResponse.Payload, reply)
+	}
+	if env.DNSResponse.Error != "" {
+		t.Fatalf("unexpected dns response error: %q", env.DNSResponse.Error)
+	}
+
+	select {
+	case err := <-serverErrCh:
+		if err != nil {
+			t.Fatalf("dns upstream: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for dns upstream")
+	}
+}
+
+func packDNSQueryForHelperClientTest(t *testing.T, host string) []byte {
+	t.Helper()
+
+	name, err := dnsmessage.NewName(host + ".")
+	if err != nil {
+		t.Fatalf("dns name: %v", err)
+	}
+
+	msg := dnsmessage.Message{
+		Header: dnsmessage.Header{ID: 1, RecursionDesired: true},
+		Questions: []dnsmessage.Question{{
+			Name:  name,
+			Type:  dnsmessage.TypeA,
+			Class: dnsmessage.ClassINET,
+		}},
+	}
+	payload, err := msg.Pack()
+	if err != nil {
+		t.Fatalf("pack dns query: %v", err)
+	}
+	return payload
 }
 
 func TestHelperClientTunnelActivationIsIdempotent(t *testing.T) {

@@ -14,6 +14,9 @@ import (
 	"github.com/moolen/bbox/internal/helperproto"
 )
 
+// RuntimeBridge is the helper-side view of the gob control channel. It
+// correlates one-shot request/response envelopes by ID and keeps long-lived
+// tunnel deliveries separate for CONNECT-style traffic.
 type RuntimeBridge struct {
 	conn      io.ReadWriteCloser
 	enc       *gob.Encoder
@@ -21,8 +24,7 @@ type RuntimeBridge struct {
 	logger    *log.Logger
 	proxyAddr string
 	dnsAddr   string
-	httpAddr  string
-	httpsAddr string
+	tcpAddr   string
 
 	sendMu   sync.Mutex
 	pending  map[uint64]chan helperproto.Envelope
@@ -63,10 +65,11 @@ func New(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *Runtime
 	}
 }
 
-func (b *RuntimeBridge) SetReadyAddrs(dnsAddr, httpAddr, httpsAddr string) {
+// SetReadyAddrs updates the listener addresses returned in the Ready envelope
+// after the runtime has finished binding its ingress sockets.
+func (b *RuntimeBridge) SetReadyAddrs(dnsAddr, tcpAddr string) {
 	b.dnsAddr = dnsAddr
-	b.httpAddr = httpAddr
-	b.httpsAddr = httpsAddr
+	b.tcpAddr = tcpAddr
 }
 
 func (b *RuntimeBridge) SetExecHandlers(
@@ -77,6 +80,8 @@ func (b *RuntimeBridge) SetExecHandlers(
 	b.onExecInput = onExecInput
 }
 
+// ReadLoop decodes envelopes from the manager side and either routes them to
+// a waiting request channel or dispatches them into the runtime handlers.
 func (b *RuntimeBridge) ReadLoop(ctx context.Context) error {
 	for {
 		var env helperproto.Envelope
@@ -223,6 +228,14 @@ func (b *RuntimeBridge) Connect(ctx context.Context, host string, port int) (uin
 }
 
 func (b *RuntimeBridge) AuthorizeConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
+	return b.authorizeConnect(ctx, host, port, false)
+}
+
+func (b *RuntimeBridge) AuthorizeTransparentConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
+	return b.authorizeConnect(ctx, host, port, true)
+}
+
+func (b *RuntimeBridge) authorizeConnect(ctx context.Context, host string, port int, transparent bool) (*helperproto.ConnectResponse, error) {
 	id := b.nextID.Add(1)
 	ch := make(chan helperproto.Envelope, 1)
 
@@ -239,8 +252,9 @@ func (b *RuntimeBridge) AuthorizeConnect(ctx context.Context, host string, port 
 	if err := b.Send(helperproto.Envelope{
 		ID: id,
 		ConnectRequest: &helperproto.ConnectRequest{
-			Host: host,
-			Port: port,
+			Host:        host,
+			Port:        port,
+			Transparent: transparent,
 		},
 	}); err != nil {
 		return nil, err
@@ -474,8 +488,7 @@ func (b *RuntimeBridge) handleHello(env helperproto.Envelope) error {
 			ProtocolVersion: helperproto.ProtocolVersion,
 			ProxyAddr:       b.proxyAddr,
 			DNSAddr:         b.dnsAddr,
-			HTTPAddr:        b.httpAddr,
-			HTTPSAddr:       b.httpsAddr,
+			TCPAddr:         b.tcpAddr,
 		},
 	})
 }

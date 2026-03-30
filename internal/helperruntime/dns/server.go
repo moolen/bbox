@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -14,34 +15,49 @@ import (
 const maxTCPPayloadSize = 4 << 10
 
 const tcpConnDeadline = 5 * time.Second
+const dualBindRetryLimit = 8
+
+var (
+	listenTCP    = func(network, addr string) (net.Listener, error) { return net.Listen(network, addr) }
+	listenPacket = func(network, addr string) (net.PacketConn, error) { return net.ListenPacket(network, addr) }
+)
 
 type Server struct {
 	tcpListener net.Listener
 	udpConn     net.PacketConn
 }
 
+// NewServer binds matching TCP and UDP DNS listeners. When the caller requests
+// an ephemeral port, another concurrent test process can briefly win the UDP
+// bind after the TCP port is chosen, so the dual bind is retried a few times.
 func NewServer(addr string) (*Server, error) {
-	tcpListener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
+	for attempt := 0; attempt < dualBindRetryLimit; attempt++ {
+		tcpListener, err := listenTCP("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
 
-	udpAddr, err := udpAddr(tcpListener.Addr())
-	if err != nil {
+		udpAddr, err := udpAddr(tcpListener.Addr())
+		if err != nil {
+			_ = tcpListener.Close()
+			return nil, err
+		}
+
+		udpConn, err := listenPacket("udp", udpAddr)
+		if err == nil {
+			return &Server{
+				tcpListener: tcpListener,
+				udpConn:     udpConn,
+			}, nil
+		}
+
 		_ = tcpListener.Close()
-		return nil, err
+		if !canRetryDualBind(addr, err) {
+			return nil, err
+		}
 	}
 
-	udpConn, err := net.ListenPacket("udp", udpAddr)
-	if err != nil {
-		_ = tcpListener.Close()
-		return nil, err
-	}
-
-	return &Server{
-		tcpListener: tcpListener,
-		udpConn:     udpConn,
-	}, nil
+	return nil, fmt.Errorf("bind DNS tcp/udp listeners for %q: exceeded retry limit", addr)
 }
 
 func udpAddr(addr net.Addr) (string, error) {
@@ -51,6 +67,18 @@ func udpAddr(addr net.Addr) (string, error) {
 	}
 
 	return net.JoinHostPort(host, port), nil
+}
+
+func canRetryDualBind(addr string, err error) bool {
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return false
+	}
+
+	_, port, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return false
+	}
+	return port == "0"
 }
 
 func (s *Server) Addr() string {

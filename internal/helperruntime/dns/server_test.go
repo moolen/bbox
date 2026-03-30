@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -66,6 +67,44 @@ func TestServeTCPConnRejectsOversizedLength(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for oversized DNS TCP frame rejection")
+	}
+}
+
+func TestNewServerRetriesEphemeralPortWhenUDPBindRaces(t *testing.T) {
+	origListenTCP := listenTCP
+	origListenPacket := listenPacket
+	t.Cleanup(func() {
+		listenTCP = origListenTCP
+		listenPacket = origListenPacket
+	})
+
+	tcpAttempts := 0
+	udpAttempts := 0
+	listenTCP = func(network, addr string) (net.Listener, error) {
+		tcpAttempts++
+		return net.Listen(network, addr)
+	}
+	listenPacket = func(network, addr string) (net.PacketConn, error) {
+		udpAttempts++
+		if udpAttempts == 1 {
+			return nil, &net.OpError{Op: "listen", Net: network, Err: syscall.EADDRINUSE}
+		}
+		return net.ListenPacket(network, addr)
+	}
+
+	server, err := NewServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = server.Close()
+	})
+
+	if tcpAttempts < 2 {
+		t.Fatalf("expected at least 2 TCP listen attempts, got %d", tcpAttempts)
+	}
+	if udpAttempts < 2 {
+		t.Fatalf("expected at least 2 UDP listen attempts, got %d", udpAttempts)
 	}
 }
 

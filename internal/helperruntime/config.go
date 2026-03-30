@@ -8,8 +8,6 @@ import (
 
 const DefaultProxyAddr = "127.0.0.1:31111"
 const DefaultTransparentDNSAddr = "127.0.0.1:53"
-const DefaultTransparentHTTPAddr = "127.0.0.1:80"
-const DefaultTransparentHTTPSAddr = "127.0.0.1:443"
 
 const connectHandshakeTimeout = 5 * time.Second
 
@@ -20,15 +18,18 @@ const (
 	TrafficModeTransparent TrafficMode = "transparent"
 )
 
+// Config controls how the helper runtime exposes ingress listeners and how it
+// talks back to the manager over the control bridge.
 type Config struct {
-	Bridge              io.ReadWriteCloser
-	TrafficMode         TrafficMode
-	ProxyAddr           string
-	DNSAddr             string
-	HTTPAddr            string
-	HTTPSAddr           string
-	Logger              *log.Logger
-	MITMEnabled         bool
+	Bridge      io.ReadWriteCloser
+	TrafficMode TrafficMode
+	ProxyAddr   string
+	// DNSAddr is the only transparent-mode listener that still binds directly on
+	// its configured address because DNS interception stays protocol-specific.
+	DNSAddr     string
+	Logger      *log.Logger
+	MITMEnabled bool
+
 	MaxRequestBodyBytes int64
 }
 

@@ -161,7 +161,7 @@ func TestHandleExecInputCancelTargetsCurrentRequestID(t *testing.T) {
 	}
 }
 
-func TestRunTransparentRequiresAllListeners(t *testing.T) {
+func TestRunTransparentRequiresDNSListener(t *testing.T) {
 	t.Parallel()
 
 	blockedListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -177,12 +177,10 @@ func TestRunTransparentRequiresAllListeners(t *testing.T) {
 		Bridge:      newTestBridge(),
 		TrafficMode: TrafficModeTransparent,
 		MITMEnabled: true,
-		DNSAddr:     "127.0.0.1:0",
-		HTTPAddr:    blockedListener.Addr().String(),
-		HTTPSAddr:   "127.0.0.1:0",
+		DNSAddr:     blockedListener.Addr().String(),
 	})
 	if err == nil {
-		t.Fatal("expected transparent startup to fail when a listener cannot bind")
+		t.Fatal("expected transparent startup to fail when the DNS listener cannot bind")
 	}
 }
 
@@ -281,7 +279,7 @@ func TestTransparentHTTPRejectsMissingHost(t *testing.T) {
 	ready, shutdown := startTransparentRuntimeReady(t)
 	defer shutdown()
 
-	conn, err := net.Dial("tcp", ready.HTTPAddr)
+	conn, err := net.Dial("tcp", ready.TCPAddr)
 	if err != nil {
 		t.Fatalf("dial transparent HTTP listener: %v", err)
 	}
@@ -337,8 +335,6 @@ func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
 			Bridge:      bridgeSide,
 			TrafficMode: TrafficModeTransparent,
 			DNSAddr:     "127.0.0.1:0",
-			HTTPAddr:    "127.0.0.1:0",
-			HTTPSAddr:   "127.0.0.1:0",
 			Logger:      log.New(io.Discard, "", 0),
 		})
 	}()
@@ -362,8 +358,8 @@ func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
 	if ready.Ready == nil {
 		t.Fatalf("expected ready response, got %#v", ready)
 	}
-	if ready.Ready.HTTPAddr == "" {
-		t.Fatal("expected transparent runtime to report an HTTP address")
+	if ready.Ready.TCPAddr == "" {
+		t.Fatal("expected transparent runtime to report a TCP ingress address")
 	}
 
 	peerErrCh := make(chan error, 1)
@@ -406,7 +402,7 @@ func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
 		peerErrCh <- nil
 	}()
 
-	conn, err := net.Dial("tcp", ready.Ready.HTTPAddr)
+	conn, err := net.Dial("tcp", ready.Ready.TCPAddr)
 	if err != nil {
 		t.Fatalf("dial transparent HTTP listener: %v", err)
 	}
@@ -468,7 +464,7 @@ func TestTransparentHTTPSRejectsMissingSNI(t *testing.T) {
 		peerErrCh <- nil
 	}()
 
-	conn, err := net.Dial("tcp", ready.HTTPSAddr)
+	conn, err := net.Dial("tcp", ready.TCPAddr)
 	if err != nil {
 		t.Fatalf("dial transparent HTTPS listener: %v", err)
 	}
@@ -523,7 +519,7 @@ func TestTransparentHTTPSRequestsLeafCertForSNIHost(t *testing.T) {
 		peerErrCh <- nil
 	}()
 
-	conn, err := tls.Dial("tcp", ready.HTTPSAddr, &tls.Config{
+	conn, err := tls.Dial("tcp", ready.TCPAddr, &tls.Config{
 		RootCAs:    roots,
 		ServerName: "example.com",
 		NextProtos: []string{"http/1.1"},
@@ -611,7 +607,7 @@ func TestTransparentHTTPSForwardsDecryptedRequestsThroughMITMPath(t *testing.T) 
 		peerErrCh <- nil
 	}()
 
-	conn, err := tls.Dial("tcp", ready.HTTPSAddr, &tls.Config{
+	conn, err := tls.Dial("tcp", ready.TCPAddr, &tls.Config{
 		RootCAs:    roots,
 		ServerName: "example.com",
 		NextProtos: []string{"http/1.1"},
@@ -776,7 +772,7 @@ func TestTransparentHTTPSSupportsHTTP2MITM(t *testing.T) {
 	transport := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 			var d net.Dialer
-			rawConn, err := d.DialContext(ctx, network, ready.HTTPSAddr)
+			rawConn, err := d.DialContext(ctx, network, ready.TCPAddr)
 			if err != nil {
 				return nil, err
 			}
@@ -823,6 +819,268 @@ func TestTransparentHTTPSSupportsHTTP2MITM(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for transparent HTTPS HTTP/2 bridge peer")
+	}
+}
+
+func TestTransparentHTTPSupportsH2CPriorKnowledgeMultipleStreams(t *testing.T) {
+	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	type result struct {
+		path string
+		err  error
+	}
+	reqDone := make(chan result, 2)
+
+	go func() {
+		for i := 0; i < 2; i++ {
+			var proxyReq helperproto.Envelope
+			if err := dec.Decode(&proxyReq); err != nil {
+				reqDone <- result{err: err}
+				continue
+			}
+			if proxyReq.ProxyRequest == nil {
+				reqDone <- result{err: fmt.Errorf("expected proxy request, got %#v", proxyReq)}
+				continue
+			}
+			reqDone <- result{path: proxyReq.ProxyRequest.URL}
+			if err := enc.Encode(&helperproto.Envelope{
+				ID: proxyReq.ID,
+				ProxyResponse: &helperproto.ProxyResponse{
+					StatusCode: http.StatusOK,
+					Body:       []byte(proxyReq.ProxyRequest.URL),
+				},
+			}); err != nil {
+				reqDone <- result{err: err}
+				return
+			}
+		}
+	}()
+
+	transport := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, ready.TCPAddr)
+		},
+	}
+	client := &http.Client{Transport: transport}
+
+	type response struct {
+		body string
+		err  error
+	}
+	respCh := make(chan response, 2)
+	for _, path := range []string{"/stream-a", "/stream-b"} {
+		go func(path string) {
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com"+path, nil)
+			if err != nil {
+				respCh <- response{err: err}
+				return
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				respCh <- response{err: err}
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				respCh <- response{err: err}
+				return
+			}
+			respCh <- response{body: string(body)}
+		}(path)
+	}
+
+	gotBodies := make(map[string]struct{}, 2)
+	for i := 0; i < 2; i++ {
+		resp := <-respCh
+		if resp.err != nil {
+			t.Fatalf("h2c request failed: %v", resp.err)
+		}
+		gotBodies[resp.body] = struct{}{}
+	}
+
+	if _, ok := gotBodies["http://example.com/stream-a"]; !ok {
+		t.Fatalf("missing h2c response for stream-a: %#v", gotBodies)
+	}
+	if _, ok := gotBodies["http://example.com/stream-b"]; !ok {
+		t.Fatalf("missing h2c response for stream-b: %#v", gotBodies)
+	}
+
+	gotRequests := make(map[string]struct{}, 2)
+	for i := 0; i < 2; i++ {
+		req := <-reqDone
+		if req.err != nil {
+			t.Fatalf("bridge peer failed: %v", req.err)
+		}
+		gotRequests[req.path] = struct{}{}
+	}
+	if _, ok := gotRequests["http://example.com/stream-a"]; !ok {
+		t.Fatalf("missing proxied h2c request for stream-a: %#v", gotRequests)
+	}
+	if _, ok := gotRequests["http://example.com/stream-b"]; !ok {
+		t.Fatalf("missing proxied h2c request for stream-b: %#v", gotRequests)
+	}
+}
+
+func TestTransparentHTTPSupportsHTTP2MultipleStreams(t *testing.T) {
+	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	defer shutdown()
+
+	const streamCount = 8
+	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	type result struct {
+		path string
+		err  error
+	}
+	reqDone := make(chan result, streamCount+1)
+
+	go func() {
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			reqDone <- result{err: err}
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			reqDone <- result{err: fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)}
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			reqDone <- result{err: err}
+			return
+		}
+
+		for i := 0; i < streamCount+1; i++ {
+			var mitmReq helperproto.Envelope
+			if err := dec.Decode(&mitmReq); err != nil {
+				reqDone <- result{err: err}
+				return
+			}
+			if mitmReq.MITMRequest == nil {
+				reqDone <- result{err: fmt.Errorf("expected MITM request, got %#v", mitmReq)}
+				return
+			}
+			if mitmReq.MITMRequest.Proto != "HTTP/2.0" {
+				reqDone <- result{err: fmt.Errorf("expected HTTP/2.0 request, got %#v", mitmReq.MITMRequest)}
+				return
+			}
+			reqDone <- result{path: mitmReq.MITMRequest.Path}
+			if err := enc.Encode(&helperproto.Envelope{
+				ID: mitmReq.ID,
+				MITMResponse: &helperproto.MITMResponse{
+					StatusCode: http.StatusOK,
+					Body:       []byte(mitmReq.MITMRequest.Path),
+				},
+			}); err != nil {
+				reqDone <- result{err: err}
+				return
+			}
+		}
+	}()
+
+	transport := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			var d net.Dialer
+			rawConn, err := d.DialContext(ctx, network, ready.TCPAddr)
+			if err != nil {
+				return nil, err
+			}
+
+			tlsCfg := cfg.Clone()
+			tlsCfg.RootCAs = roots
+			tlsCfg.ServerName = "example.com"
+			tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+
+			tlsConn := tls.Client(rawConn, tlsCfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+	}
+
+	client := &http.Client{Transport: transport}
+
+	warmupReq, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/warmup", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warmupResp, err := client.Do(warmupReq)
+	if err != nil {
+		t.Fatalf("transparent HTTPS HTTP/2 warmup GET failed: %v", err)
+	}
+	warmupBody, err := io.ReadAll(warmupResp.Body)
+	_ = warmupResp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(warmupBody) != "/warmup" {
+		t.Fatalf("unexpected warmup body: %q", string(warmupBody))
+	}
+
+	errCh := make(chan error, streamCount)
+	for i := 0; i < streamCount; i++ {
+		i := i
+		go func() {
+			path := fmt.Sprintf("/stream-%d", i)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com"+path, nil)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				errCh <- readErr
+				return
+			}
+			if string(body) != path {
+				errCh <- fmt.Errorf("unexpected body for %s: %q", path, string(body))
+				return
+			}
+			errCh <- nil
+		}()
+	}
+
+	for i := 0; i < streamCount; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wantPaths := map[string]struct{}{
+		"/warmup": {},
+	}
+	for i := 0; i < streamCount; i++ {
+		wantPaths[fmt.Sprintf("/stream-%d", i)] = struct{}{}
+	}
+	for i := 0; i < streamCount+1; i++ {
+		res := <-reqDone
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+		if _, ok := wantPaths[res.path]; !ok {
+			t.Fatalf("unexpected transparent HTTPS HTTP/2 path: %q", res.path)
+		}
+		delete(wantPaths, res.path)
+	}
+	if len(wantPaths) != 0 {
+		t.Fatalf("missing transparent HTTPS HTTP/2 requests: %#v", wantPaths)
 	}
 }
 
@@ -2252,27 +2510,54 @@ func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
 			Bridge:      bridgeSide,
 			TrafficMode: TrafficModeTransparent,
 			DNSAddr:     "127.0.0.1:0",
-			HTTPAddr:    "127.0.0.1:0",
-			HTTPSAddr:   "127.0.0.1:0",
 			Logger:      log.New(io.Discard, "", 0),
 		})
 	}()
 
 	enc := gob.NewEncoder(peerSide)
 	dec := gob.NewDecoder(peerSide)
-	if err := enc.Encode(&helperproto.Envelope{
-		ID: 1,
-		Hello: &helperproto.Hello{
-			ProtocolVersion: helperproto.ProtocolVersion,
-			SandboxID:       "transparent-dns-test",
-		},
-	}); err != nil {
-		t.Fatalf("send hello: %v", err)
+	sendErrCh := make(chan error, 1)
+	go func() {
+		sendErrCh <- enc.Encode(&helperproto.Envelope{
+			ID: 1,
+			Hello: &helperproto.Hello{
+				ProtocolVersion: helperproto.ProtocolVersion,
+				SandboxID:       "transparent-dns-test",
+			},
+		})
+	}()
+
+	select {
+	case err := <-sendErrCh:
+		if err != nil {
+			t.Fatalf("send hello: %v", err)
+		}
+	case err := <-errCh:
+		t.Fatalf("transparent runtime exited before hello handshake: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out sending hello to transparent runtime")
 	}
 
+	readyCh := make(chan helperproto.Envelope, 1)
+	readyErrCh := make(chan error, 1)
+	go func() {
+		var ready helperproto.Envelope
+		if err := dec.Decode(&ready); err != nil {
+			readyErrCh <- err
+			return
+		}
+		readyCh <- ready
+	}()
+
 	var ready helperproto.Envelope
-	if err := dec.Decode(&ready); err != nil {
+	select {
+	case ready = <-readyCh:
+	case err := <-readyErrCh:
 		t.Fatalf("read ready: %v", err)
+	case err := <-errCh:
+		t.Fatalf("transparent runtime exited before ready: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent runtime ready")
 	}
 	if ready.Ready == nil {
 		t.Fatalf("expected ready response, got %#v", ready)
@@ -2280,11 +2565,8 @@ func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
 	if ready.Ready.DNSAddr == "" {
 		t.Fatal("expected transparent runtime to report a DNS address")
 	}
-	if ready.Ready.HTTPAddr == "" {
-		t.Fatal("expected transparent runtime to report an HTTP address")
-	}
-	if ready.Ready.HTTPSAddr == "" {
-		t.Fatal("expected transparent runtime to report an HTTPS address")
+	if ready.Ready.TCPAddr == "" {
+		t.Fatal("expected transparent runtime to report a TCP ingress address")
 	}
 
 	shutdown := func() {
@@ -2316,33 +2598,60 @@ func startTransparentRuntimeBridge(t *testing.T) (*helperproto.Ready, net.Conn, 
 			TrafficMode: TrafficModeTransparent,
 			MITMEnabled: true,
 			DNSAddr:     "127.0.0.1:0",
-			HTTPAddr:    "127.0.0.1:0",
-			HTTPSAddr:   "127.0.0.1:0",
 			Logger:      log.New(io.Discard, "", 0),
 		})
 	}()
 
 	enc := gob.NewEncoder(peerSide)
 	dec := gob.NewDecoder(peerSide)
-	if err := enc.Encode(&helperproto.Envelope{
-		ID: 1,
-		Hello: &helperproto.Hello{
-			ProtocolVersion: helperproto.ProtocolVersion,
-			SandboxID:       "transparent-https-test",
-		},
-	}); err != nil {
-		t.Fatalf("send hello: %v", err)
+	sendErrCh := make(chan error, 1)
+	go func() {
+		sendErrCh <- enc.Encode(&helperproto.Envelope{
+			ID: 1,
+			Hello: &helperproto.Hello{
+				ProtocolVersion: helperproto.ProtocolVersion,
+				SandboxID:       "transparent-https-test",
+			},
+		})
+	}()
+
+	select {
+	case err := <-sendErrCh:
+		if err != nil {
+			t.Fatalf("send hello: %v", err)
+		}
+	case err := <-errCh:
+		t.Fatalf("transparent runtime exited before hello handshake: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out sending hello to transparent runtime")
 	}
 
+	readyCh := make(chan helperproto.Envelope, 1)
+	readyErrCh := make(chan error, 1)
+	go func() {
+		var ready helperproto.Envelope
+		if err := dec.Decode(&ready); err != nil {
+			readyErrCh <- err
+			return
+		}
+		readyCh <- ready
+	}()
+
 	var ready helperproto.Envelope
-	if err := dec.Decode(&ready); err != nil {
+	select {
+	case ready = <-readyCh:
+	case err := <-readyErrCh:
 		t.Fatalf("read ready: %v", err)
+	case err := <-errCh:
+		t.Fatalf("transparent runtime exited before ready: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent runtime ready")
 	}
 	if ready.Ready == nil {
 		t.Fatalf("expected ready response, got %#v", ready)
 	}
-	if ready.Ready.HTTPSAddr == "" {
-		t.Fatal("expected transparent runtime to report an HTTPS address")
+	if ready.Ready.TCPAddr == "" {
+		t.Fatal("expected transparent runtime to report a TCP ingress address")
 	}
 
 	shutdown := func() {
@@ -2380,19 +2689,48 @@ func startProxyRuntimeBridge(t *testing.T, maxRequestBodyBytes int64) (*helperpr
 
 	enc := gob.NewEncoder(peerSide)
 	dec := gob.NewDecoder(peerSide)
-	if err := enc.Encode(&helperproto.Envelope{
-		ID: 1,
-		Hello: &helperproto.Hello{
-			ProtocolVersion: helperproto.ProtocolVersion,
-			SandboxID:       "proxy-body-limit-test",
-		},
-	}); err != nil {
-		t.Fatalf("send hello: %v", err)
+	sendErrCh := make(chan error, 1)
+	go func() {
+		sendErrCh <- enc.Encode(&helperproto.Envelope{
+			ID: 1,
+			Hello: &helperproto.Hello{
+				ProtocolVersion: helperproto.ProtocolVersion,
+				SandboxID:       "proxy-body-limit-test",
+			},
+		})
+	}()
+
+	select {
+	case err := <-sendErrCh:
+		if err != nil {
+			t.Fatalf("send hello: %v", err)
+		}
+	case err := <-errCh:
+		t.Fatalf("proxy runtime exited before hello handshake: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out sending hello to proxy runtime")
 	}
 
+	readyCh := make(chan helperproto.Envelope, 1)
+	readyErrCh := make(chan error, 1)
+	go func() {
+		var ready helperproto.Envelope
+		if err := dec.Decode(&ready); err != nil {
+			readyErrCh <- err
+			return
+		}
+		readyCh <- ready
+	}()
+
 	var ready helperproto.Envelope
-	if err := dec.Decode(&ready); err != nil {
+	select {
+	case ready = <-readyCh:
+	case err := <-readyErrCh:
 		t.Fatalf("read ready: %v", err)
+	case err := <-errCh:
+		t.Fatalf("proxy runtime exited before ready: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for proxy runtime ready")
 	}
 	if ready.Ready == nil {
 		t.Fatalf("expected ready response, got %#v", ready)

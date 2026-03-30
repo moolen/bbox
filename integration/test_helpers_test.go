@@ -216,11 +216,15 @@ func startTransparentHTTPTestServer(t *testing.T, handler http.Handler) *httptes
 }
 
 func startTransparentTLSTestServer(t *testing.T, host string, handler http.Handler) *httptest.Server {
+	return startTransparentTLSTestServerOnPort(t, host, 443, handler)
+}
+
+func startTransparentTLSTestServerOnPort(t *testing.T, host string, port int, handler http.Handler) *httptest.Server {
 	t.Helper()
 	_ = host
 
 	server := httptest.NewUnstartedServer(handler)
-	server.Listener = mustListenLoopbackPort(t, 443)
+	server.Listener = mustListenLoopbackPort(t, port)
 	server.TLS = &tls.Config{
 		Certificates: []tls.Certificate{sharedTLSTestCertificate(t)},
 	}

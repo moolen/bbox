@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 
 	dnsruntime "github.com/moolen/bbox/internal/helperruntime/dns"
 )
@@ -15,12 +14,6 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	if cfg.DNSAddr == "" {
 		cfg.DNSAddr = DefaultTransparentDNSAddr
 	}
-	if cfg.HTTPAddr == "" {
-		cfg.HTTPAddr = DefaultTransparentHTTPAddr
-	}
-	if cfg.HTTPSAddr == "" {
-		cfg.HTTPSAddr = DefaultTransparentHTTPSAddr
-	}
 
 	dnsServer, err := dnsruntime.NewServer(cfg.DNSAddr)
 	if err != nil {
@@ -28,39 +21,38 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	}
 	defer dnsServer.Close()
 
-	httpListener, err := net.Listen("tcp", cfg.HTTPAddr)
+	rawTCPListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return fmt.Errorf("listen on HTTP address %q: %w", cfg.HTTPAddr, err)
+		return fmt.Errorf("listen on transparent TCP ingress: %w", err)
 	}
-	defer httpListener.Close()
+	defer rawTCPListener.Close()
 
-	httpsListener, err := net.Listen("tcp", cfg.HTTPSAddr)
-	if err != nil {
-		return fmt.Errorf("listen on HTTPS address %q: %w", cfg.HTTPSAddr, err)
+	rawTCPListenerV6 := listenOptionalLoopbackTCP6()
+	if rawTCPListenerV6 != nil {
+		defer rawTCPListenerV6.Close()
 	}
-	defer httpsListener.Close()
 
 	bridge := newBridge(cfg.Bridge, cfg.Logger, "")
 	bridge.trafficMode = TrafficModeTransparent
 	bridge.mitmEnabled = cfg.MITMEnabled
 	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
 	bridge.dnsAddr = dnsServer.Addr()
-	bridge.httpAddr = httpListener.Addr().String()
-	bridge.httpsAddr = httpsListener.Addr().String()
-
-	httpServer := &http.Server{
-		Handler: bridge.transparentHTTPHandler(),
+	bridge.rawTCPAddr = rawTCPListener.Addr().String()
+	bridge.tcpAddr = bridge.rawTCPAddr
+	if rawTCPListenerV6 != nil {
+		bridge.rawTCPAddrV6 = rawTCPListenerV6.Addr().String()
 	}
 
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 
 	go func() {
 		<-ctx.Done()
 
 		_ = dnsServer.Close()
-		_ = httpServer.Shutdown(context.Background())
-		_ = httpListener.Close()
-		_ = httpsListener.Close()
+		_ = rawTCPListener.Close()
+		if rawTCPListenerV6 != nil {
+			_ = rawTCPListenerV6.Close()
+		}
 		_ = cfg.Bridge.Close()
 	}()
 
@@ -68,13 +60,13 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 		errCh <- dnsServer.Serve()
 	}()
 	go func() {
-		if err := httpServer.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("serve transparent HTTP listener: %w", err)
-		}
+		errCh <- serveRawTCPListener(rawTCPListener, bridge)
 	}()
-	go func() {
-		errCh <- serveTransparentListener(httpsListener, bridge)
-	}()
+	if rawTCPListenerV6 != nil {
+		go func() {
+			errCh <- serveRawTCPListener(rawTCPListenerV6, bridge)
+		}()
+	}
 	go func() {
 		errCh <- bridge.readLoop(ctx)
 	}()
@@ -90,12 +82,20 @@ func runTransparentMode(ctx context.Context, cfg Config) error {
 	}
 }
 
-func serveTransparentListener(listener net.Listener, bridge *bridge) error {
+func listenOptionalLoopbackTCP6() net.Listener {
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		return nil
+	}
+	return listener
+}
+
+func serveRawTCPListener(listener net.Listener, bridge *bridge) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return err
 		}
-		go bridge.handleTransparentHTTPSConn(conn)
+		go bridge.handleTransparentTCPConn(conn)
 	}
 }

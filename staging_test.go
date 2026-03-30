@@ -127,7 +127,8 @@ func TestWriteSandboxConfigSkipsMITMTrustFilesWhenDisabled(t *testing.T) {
 }
 
 func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
-	root, err := stageSandboxRoot(SandboxOptions{}, "/bin/sh", []byte("test mitm ca\n"), TrafficModeProxy)
+	helperPath := writeHelperFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{}, helperPath, []byte("test mitm ca\n"), TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -253,7 +254,8 @@ func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
 		t.Skip("skip: libnss_dns.so.2 not available")
 	}
 
-	root, err := stageSandboxRoot(SandboxOptions{}, "/bin/sh", nil, TrafficModeTransparent)
+	helperPath := writeHelperFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{}, helperPath, nil, TrafficModeTransparent)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -282,7 +284,8 @@ func TestStageSandboxRootStagesShebangInterpreter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, "/bin/echo", nil, TrafficModeProxy)
+	helperPath := writeHelperFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, helperPath, nil, TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -304,7 +307,8 @@ func TestStageSandboxRootStagesEnvShebangTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, "/bin/echo", nil, TrafficModeProxy)
+	helperPath := writeHelperFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, helperPath, nil, TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -415,4 +419,18 @@ func hostResolvConfNameservers(t *testing.T) []string {
 		t.Fatalf("scan host resolv.conf: %v", err)
 	}
 	return lines
+}
+
+func writeHelperFixture(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "bbox-helper")
+	launcherPath := filepath.Join(dir, "bbox-seccomp-launcher")
+	for _, path := range []string{helperPath, launcherPath} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write helper fixture %q: %v", path, err)
+		}
+	}
+	return helperPath
 }

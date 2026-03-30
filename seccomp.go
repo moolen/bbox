@@ -459,7 +459,6 @@ var baselineSeccompRuleSpecs = func() []seccompRuleSpec {
 		denyOptionalSyscall("kexec_load"),
 		denyOptionalSyscall("kexec_file_load"),
 		denyRequiredSyscall("ptrace"),
-		denyOptionalSyscall("process_vm_readv"),
 		denyOptionalSyscall("process_vm_writev"),
 		denyOptionalSyscall("kcmp"),
 		denyOptionalSyscall("pidfd_getfd"),
@@ -496,6 +495,7 @@ var baselineSeccompRuleSpecs = func() []seccompRuleSpec {
 
 var restrictedSeccompRuleSpecs = []seccompRuleSpec{
 	denyRequiredSyscall("seccomp"),
+	denyOptionalSyscall("process_vm_readv"),
 	{rule: SeccompRule{
 		Syscall: "prctl",
 		Conditions: []SeccompCondition{

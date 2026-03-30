@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,9 +118,10 @@ func mitmHandler(rt Bridge, connectHost string, connectPort int) http.Handler {
 		if host == "" {
 			host = connectHost
 		}
+		authority := mitmAuthority(host, connectHost, connectPort)
 		response, err := rt.MITMRoundTrip(req.Context(), helperproto.MITMRequest{
 			Scheme:       "https",
-			Authority:    net.JoinHostPort(connectHost, strconv.Itoa(connectPort)),
+			Authority:    authority,
 			Host:         host,
 			Method:       req.Method,
 			Path:         req.URL.Path,
@@ -143,6 +145,30 @@ func mitmHandler(rt Bridge, connectHost string, connectPort int) http.Handler {
 			bridgeLogger(rt).Printf("copy MITM response body: %v", err)
 		}
 	})
+}
+
+func mitmAuthority(requestHost, connectHost string, connectPort int) string {
+	connectHost = strings.TrimSpace(connectHost)
+	if connectHost != "" {
+		// CONNECT/SNI identifies the upstream endpoint that policy should bind to;
+		// the decrypted Host header is validated against this authority later.
+		if connectPort <= 0 {
+			connectPort = 443
+		}
+		return net.JoinHostPort(connectHost, strconv.Itoa(connectPort))
+	}
+
+	requestHost = strings.TrimSpace(requestHost)
+	if requestHost != "" {
+		if _, _, err := net.SplitHostPort(requestHost); err == nil {
+			return requestHost
+		}
+		if connectPort <= 0 {
+			return requestHost
+		}
+		return net.JoinHostPort(requestHost, strconv.Itoa(connectPort))
+	}
+	return ""
 }
 
 func serveMITMConn(conn net.Conn, rt Bridge, connectHost string, connectPort int) {

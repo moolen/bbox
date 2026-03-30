@@ -11,8 +11,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/moolen/bbox/internal/helperproto"
 	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
@@ -31,6 +33,8 @@ var (
 	}
 )
 
+// OpenBridgeFromFD adopts the already-open control bridge passed into the
+// helper process by the parent launcher.
 func OpenBridgeFromFD(fd int) (io.ReadWriteCloser, error) {
 	if fd < 0 {
 		return nil, fmt.Errorf("bridge fd must be non-negative")
@@ -46,6 +50,8 @@ func OpenBridgeFromFD(fd int) (io.ReadWriteCloser, error) {
 	return file, nil
 }
 
+// Run starts the helper runtime in either proxy or transparent mode and serves
+// the control bridge until the context or bridge terminates.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Bridge == nil {
 		return fmt.Errorf("bridge is required")
@@ -62,24 +68,30 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
+// bridge adapts the runtime packages to the helper's control bridge and keeps
+// per-exec or per-connection state that is local to one helper process.
 type bridge struct {
 	runtimeBridge       *bridgepkg.RuntimeBridge
 	logger              *log.Logger
 	trafficMode         TrafficMode
 	dnsAddr             string
-	httpAddr            string
-	httpsAddr           string
+	tcpAddr             string
+	rawTCPAddr          string
+	rawTCPAddrV6        string
 	mitmEnabled         bool
 	maxRequestBodyBytes int64
 	execMu              sync.Mutex
 	execStateMu         sync.Mutex
 	currentExec         *execState
+	rawTCPMu            sync.Mutex
+	rawTCPOrigins       map[string]rawTCPDestination
 }
 
 func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
 	return &bridge{
 		runtimeBridge: bridgepkg.New(conn, logger, proxyAddr),
 		logger:        logger,
+		rawTCPOrigins: make(map[string]rawTCPDestination),
 	}
 }
 
@@ -89,8 +101,15 @@ type execState struct {
 	cancel  context.CancelFunc
 }
 
+type rawTCPDestination struct {
+	host string
+	port int
+}
+
+const rawTCPOriginLookupTimeout = 1 * time.Second
+
 func (b *bridge) readLoop(ctx context.Context) error {
-	b.runtimeBridge.SetReadyAddrs(b.dnsAddr, b.httpAddr, b.httpsAddr)
+	b.runtimeBridge.SetReadyAddrs(b.dnsAddr, b.tcpAddr)
 	b.runtimeBridge.SetExecHandlers(b.handleExec, b.handleExecInput)
 	return b.runtimeBridge.ReadLoop(ctx)
 }
@@ -103,8 +122,13 @@ func (b *bridge) transparentHTTPHandler() http.Handler {
 	return ingress.TransparentHTTPHandler(b)
 }
 
-func (b *bridge) handleTransparentHTTPSConn(conn net.Conn) {
-	ingress.ServeTransparentHTTPSConn(conn, b)
+func (b *bridge) handleTransparentTCPConn(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+
+	host, port, _ := b.waitRawTCPOrigin(conn.RemoteAddr().String(), rawTCPOriginLookupTimeout)
+	ingress.ServeTransparentTCPConn(conn, b, host, port)
 }
 
 func (b *bridge) handleMITMConnect(w http.ResponseWriter, req *http.Request) {
@@ -217,10 +241,84 @@ func (b *bridge) sendExecError(id uint64, err error) {
 
 func (b *bridge) transparentRuntime() seccompnotify.RuntimeTargets {
 	return seccompnotify.RuntimeTargets{
-		DNSAddr:   b.dnsAddr,
-		HTTPAddr:  b.httpAddr,
-		HTTPSAddr: b.httpsAddr,
+		DNSAddr:            b.dnsAddr,
+		DNSRoundTrip:       b.dnsRoundTrip,
+		RawTCPAddr:         b.rawTCPAddr,
+		RawTCPAddrV6:       b.rawTCPAddrV6,
+		RecordRawTCPOrigin: b.recordRawTCPOrigin,
 	}
+}
+
+func (b *bridge) dnsRoundTrip(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
+	if b == nil || b.runtimeBridge == nil {
+		return nil, fmt.Errorf("runtime bridge is required")
+	}
+	return b.runtimeBridge.DNSRoundTrip(ctx, helperproto.DNSRequest{
+		Network: network,
+		Host:    host,
+		Port:    port,
+		Payload: append([]byte(nil), payload...),
+	})
+}
+
+func (b *bridge) recordRawTCPOrigin(localAddr, host string, port int) {
+	if b == nil || localAddr == "" || host == "" || port < 1 || port > 65535 {
+		return
+	}
+	localAddr = canonicalTCPOriginKey(localAddr)
+	b.rawTCPMu.Lock()
+	b.rawTCPOrigins[localAddr] = rawTCPDestination{host: host, port: port}
+	b.rawTCPMu.Unlock()
+}
+
+func (b *bridge) takeRawTCPOrigin(localAddr string) (string, int, bool) {
+	if b == nil || localAddr == "" {
+		return "", 0, false
+	}
+	localAddr = canonicalTCPOriginKey(localAddr)
+
+	b.rawTCPMu.Lock()
+	dest, ok := b.rawTCPOrigins[localAddr]
+	if ok {
+		delete(b.rawTCPOrigins, localAddr)
+	}
+	b.rawTCPMu.Unlock()
+	if !ok {
+		return "", 0, false
+	}
+	return dest.host, dest.port, true
+}
+
+func (b *bridge) waitRawTCPOrigin(localAddr string, timeout time.Duration) (string, int, bool) {
+	if timeout <= 0 {
+		return b.takeRawTCPOrigin(localAddr)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		host, port, ok := b.takeRawTCPOrigin(localAddr)
+		if ok {
+			return host, port, true
+		}
+		if time.Now().After(deadline) {
+			return "", 0, false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func canonicalTCPOriginKey(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return addr
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func runSupervisedExec(runCtx context.Context, cmd *exec.Cmd, req helperproto.ExecRequest, runtimeTargets seccompnotify.RuntimeTargets) (*hrexec.Session, []hrexec.OutputStream, *seccompnotify.Supervisor, error) {
@@ -310,6 +408,10 @@ func (b *bridge) Connect(ctx context.Context, host string, port int) (uint64, <-
 
 func (b *bridge) AuthorizeConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
 	return b.runtimeBridge.AuthorizeConnect(ctx, host, port)
+}
+
+func (b *bridge) AuthorizeTransparentConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
+	return b.runtimeBridge.AuthorizeTransparentConnect(ctx, host, port)
 }
 
 func (b *bridge) RequestLeafCert(ctx context.Context, host string) (tls.Certificate, error) {

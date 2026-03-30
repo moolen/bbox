@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -107,18 +108,19 @@ func (s *Supervisor) handleConnect(req connectRequest) error {
 	state.OriginalHost = req.Destination.Host
 	state.OriginalPort = req.Destination.Port
 	state.RedirectAddr = route.Addr
-	if err := unix.Connect(state.HelperFD, route.Sockaddr); err != nil {
-		return err
+	connectErr := unix.Connect(state.HelperFD, route.Sockaddr)
+	if connectErr != nil && connectErr != unix.EINPROGRESS && connectErr != unix.EALREADY {
+		return connectErr
 	}
 	s.registry.Insert(state)
 
 	if route.Kind == routeRawTCPIngress && s.targets.RecordRawTCPOrigin != nil {
-		localAddr, err := getsocknameString(state.HelperFD)
+		localAddr, err := getsocknameStringWithRetry(state.HelperFD, 50*time.Millisecond)
 		if err == nil && localAddr != "" {
 			s.targets.RecordRawTCPOrigin(localAddr, req.Destination.Host, req.Destination.Port)
 		}
 	}
-	return nil
+	return connectErr
 }
 
 func (s *Supervisor) handleClose(req syscallRequest) error {
@@ -216,29 +218,13 @@ func peernameFamily(host string, fallbackFamily int) int {
 
 func routeTCPDestination(targets RuntimeTargets, family int, host string, port int) (tcpRoute, error) {
 	_ = host
-
-	var (
-		kind  tcpRouteKind
-		addr4 string
-		addr6 string
-	)
-	switch port {
-	case 80:
-		kind = routeHTTPIngress
-		addr4 = targets.HTTPAddr
-		addr6 = targets.HTTPAddrV6
-	case 443:
-		kind = routeHTTPSIngress
-		addr4 = targets.HTTPSAddr
-		addr6 = targets.HTTPSAddrV6
-	default:
-		kind = routeRawTCPIngress
-		addr4 = targets.RawTCPAddr
-		addr6 = targets.RawTCPAddrV6
+	if port == 53 {
+		return tcpRoute{}, unix.EPERM
 	}
-	addr := selectIngressAddrForFamily(family, addr4, addr6)
+
+	addr := selectIngressAddrForFamily(family, targets.RawTCPAddr, targets.RawTCPAddrV6)
 	if addr == "" {
-		return tcpRoute{}, fmt.Errorf("missing ingress address for route %q", kind)
+		return tcpRoute{}, fmt.Errorf("missing ingress address for route %q", routeRawTCPIngress)
 	}
 	sockaddr, err := parseTCPAddr(addr)
 	if err != nil {
@@ -248,7 +234,7 @@ func routeTCPDestination(targets RuntimeTargets, family int, host string, port i
 		return tcpRoute{}, unix.EAFNOSUPPORT
 	}
 	return tcpRoute{
-		Kind:     kind,
+		Kind:     routeRawTCPIngress,
 		Addr:     addr,
 		Sockaddr: sockaddr,
 	}, nil
@@ -301,6 +287,27 @@ func getsocknameString(fd int) (string, error) {
 	}
 }
 
+func getsocknameStringWithRetry(fd int, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		return getsocknameString(fd)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		addr, err := getsocknameString(fd)
+		if err == nil && addr != "" {
+			return addr, nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return "", err
+			}
+			return "", nil
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+}
+
 func isManagedSocketFamily(family int) bool {
 	switch family {
 	case unix.AF_INET, unix.AF_INET6:
@@ -329,9 +336,9 @@ func sockaddrMatchesFamily(sockaddr unix.Sockaddr, family int) bool {
 func targetsSupportFamilyIngress(targets RuntimeTargets, family int) bool {
 	switch family {
 	case unix.AF_INET:
-		return targets.HTTPAddr != "" || targets.HTTPSAddr != "" || targets.RawTCPAddr != ""
+		return targets.RawTCPAddr != ""
 	case unix.AF_INET6:
-		return targets.HTTPAddrV6 != "" || targets.HTTPSAddrV6 != "" || targets.RawTCPAddrV6 != ""
+		return targets.RawTCPAddrV6 != ""
 	default:
 		return false
 	}

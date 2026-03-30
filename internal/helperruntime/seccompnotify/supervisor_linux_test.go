@@ -11,6 +11,35 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestClassifyManagedSocketBypassesICMPDatagramProtocols(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		family   int
+		sockType int
+		protocol int
+	}{
+		{name: "icmp-dgram", family: unix.AF_INET, sockType: unix.SOCK_DGRAM, protocol: unix.IPPROTO_ICMP},
+		{name: "icmpv6-dgram", family: unix.AF_INET6, sockType: unix.SOCK_DGRAM, protocol: unix.IPPROTO_ICMPV6},
+		{name: "icmp-raw", family: unix.AF_INET, sockType: unix.SOCK_RAW, protocol: unix.IPPROTO_ICMP},
+		{name: "icmpv6-raw", family: unix.AF_INET6, sockType: unix.SOCK_RAW, protocol: unix.IPPROTO_ICMPV6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, managed, err := classifyManagedSocket(RuntimeTargets{}, tc.family, tc.sockType, tc.protocol)
+			if err != nil {
+				t.Fatalf("classifyManagedSocket() error = %v", err)
+			}
+			if managed {
+				t.Fatal("expected ICMP datagram socket to bypass seccomp management")
+			}
+			if kind != KindUnknown {
+				t.Fatalf("unexpected socket kind: got %q want %q", kind, KindUnknown)
+			}
+		})
+	}
+}
+
 func TestSupervisorConnectRedirectsManagedTCPFD(t *testing.T) {
 	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -30,10 +59,6 @@ func TestSupervisorConnectRedirectsManagedTCPFD(t *testing.T) {
 	s, err := NewSupervisor(RuntimeTargets{
 		RawTCPAddr:   rawListener.Addr().String(),
 		RawTCPAddrV6: "[::1]:39001",
-		HTTPAddr:     "127.0.0.1:30080",
-		HTTPAddrV6:   "[::1]:30080",
-		HTTPSAddr:    "127.0.0.1:30443",
-		HTTPSAddrV6:  "[::1]:30443",
 	})
 	if err != nil {
 		t.Fatalf("new supervisor: %v", err)
@@ -88,6 +113,101 @@ func TestSupervisorConnectRedirectsManagedTCPFD(t *testing.T) {
 	}
 }
 
+func TestSupervisorConnectRecordsRawTCPOriginForNonblockingSocket(t *testing.T) {
+	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen raw ingress: %v", err)
+	}
+	t.Cleanup(func() { _ = rawListener.Close() })
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := rawListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		accepted <- conn
+	}()
+
+	type originRecord struct {
+		localAddr string
+		host      string
+		port      int
+	}
+	recorded := make(chan originRecord, 1)
+
+	s, err := NewSupervisor(RuntimeTargets{
+		RawTCPAddr: rawListener.Addr().String(),
+		RecordRawTCPOrigin: func(localAddr, host string, port int) {
+			recorded <- originRecord{
+				localAddr: localAddr,
+				host:      host,
+				port:      port,
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+
+	const childFD = 41
+	if err := s.handleSocket(socketRequest{
+		ChildFD:    childFD,
+		Family:     unix.AF_INET,
+		SocketType: unix.SOCK_STREAM | unix.SOCK_NONBLOCK,
+		Protocol:   unix.IPPROTO_TCP,
+	}); err != nil {
+		t.Fatalf("handle socket: %v", err)
+	}
+	state, ok := s.Registry().Lookup(childFD)
+	if !ok {
+		t.Fatal("managed socket state missing after handleSocket")
+	}
+	t.Cleanup(func() {
+		_ = unix.Close(state.HelperFD)
+		s.Registry().Close(childFD)
+	})
+
+	err = s.handleConnect(connectRequest{
+		ChildFD: childFD,
+		Destination: DecodedSockaddr{
+			Family: unix.AF_INET,
+			Host:   "93.184.216.34",
+			Port:   8443,
+		},
+	})
+	if err != nil && err != unix.EINPROGRESS && err != unix.EALREADY {
+		t.Fatalf("handle connect: %v", err)
+	}
+
+	select {
+	case conn := <-accepted:
+		_ = conn.Close()
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for redirected raw ingress accept")
+	}
+
+	select {
+	case record := <-recorded:
+		if record.localAddr == "" {
+			t.Fatal("expected local address to be recorded")
+		}
+		if record.host != "93.184.216.34" || record.port != 8443 {
+			t.Fatalf("unexpected origin record: %+v", record)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for raw TCP origin record")
+	}
+
+	got, ok := s.Registry().Lookup(childFD)
+	if !ok {
+		t.Fatal("managed socket state missing after handleConnect")
+	}
+	if got.OriginalHost != "93.184.216.34" || got.OriginalPort != 8443 {
+		t.Fatalf("unexpected original destination metadata: %+v", got)
+	}
+}
+
 func TestSupervisorConnectRedirectsManagedTCPFDIPv6(t *testing.T) {
 	rawListener, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
@@ -107,10 +227,6 @@ func TestSupervisorConnectRedirectsManagedTCPFDIPv6(t *testing.T) {
 	s, err := NewSupervisor(RuntimeTargets{
 		RawTCPAddr:   "127.0.0.1:39001",
 		RawTCPAddrV6: rawListener.Addr().String(),
-		HTTPAddr:     "127.0.0.1:30080",
-		HTTPAddrV6:   "[::1]:30080",
-		HTTPSAddr:    "127.0.0.1:30443",
-		HTTPSAddrV6:  "[::1]:30443",
 	})
 	if err != nil {
 		t.Fatalf("new supervisor: %v", err)
@@ -168,10 +284,6 @@ func TestSupervisorConnectRedirectsManagedTCPFDIPv6(t *testing.T) {
 
 func TestRouteTCPDestinationUsesFamilySpecificIngress(t *testing.T) {
 	route, err := routeTCPDestination(RuntimeTargets{
-		HTTPAddr:     "127.0.0.1:30080",
-		HTTPAddrV6:   "[::1]:30080",
-		HTTPSAddr:    "127.0.0.1:30443",
-		HTTPSAddrV6:  "[::1]:30443",
 		RawTCPAddr:   "127.0.0.1:39001",
 		RawTCPAddrV6: "[::1]:39002",
 	}, unix.AF_INET6, "example.com", 8443)
@@ -185,10 +297,6 @@ func TestRouteTCPDestinationUsesFamilySpecificIngress(t *testing.T) {
 
 func TestRouteTCPDestinationPortRoutingBothFamilies(t *testing.T) {
 	targets := RuntimeTargets{
-		HTTPAddr:     "127.0.0.1:30080",
-		HTTPAddrV6:   "[::1]:30080",
-		HTTPSAddr:    "127.0.0.1:30443",
-		HTTPSAddrV6:  "[::1]:30443",
 		RawTCPAddr:   "127.0.0.1:39001",
 		RawTCPAddrV6: "[::1]:39002",
 	}
@@ -199,11 +307,11 @@ func TestRouteTCPDestinationPortRoutingBothFamilies(t *testing.T) {
 		wantKind tcpRouteKind
 		wantAddr string
 	}{
-		{name: "ipv4-http", family: unix.AF_INET, port: 80, wantKind: routeHTTPIngress, wantAddr: "127.0.0.1:30080"},
-		{name: "ipv4-https", family: unix.AF_INET, port: 443, wantKind: routeHTTPSIngress, wantAddr: "127.0.0.1:30443"},
+		{name: "ipv4-http", family: unix.AF_INET, port: 80, wantKind: routeRawTCPIngress, wantAddr: "127.0.0.1:39001"},
+		{name: "ipv4-https", family: unix.AF_INET, port: 443, wantKind: routeRawTCPIngress, wantAddr: "127.0.0.1:39001"},
 		{name: "ipv4-raw", family: unix.AF_INET, port: 9000, wantKind: routeRawTCPIngress, wantAddr: "127.0.0.1:39001"},
-		{name: "ipv6-http", family: unix.AF_INET6, port: 80, wantKind: routeHTTPIngress, wantAddr: "[::1]:30080"},
-		{name: "ipv6-https", family: unix.AF_INET6, port: 443, wantKind: routeHTTPSIngress, wantAddr: "[::1]:30443"},
+		{name: "ipv6-http", family: unix.AF_INET6, port: 80, wantKind: routeRawTCPIngress, wantAddr: "[::1]:39002"},
+		{name: "ipv6-https", family: unix.AF_INET6, port: 443, wantKind: routeRawTCPIngress, wantAddr: "[::1]:39002"},
 		{name: "ipv6-raw", family: unix.AF_INET6, port: 9000, wantKind: routeRawTCPIngress, wantAddr: "[::1]:39002"},
 	}
 	for _, tc := range tests {
@@ -221,8 +329,6 @@ func TestRouteTCPDestinationPortRoutingBothFamilies(t *testing.T) {
 
 func TestSupervisorSocketIPv6FallbackWhenIngressUnavailable(t *testing.T) {
 	s, err := NewSupervisor(RuntimeTargets{
-		HTTPAddr:   "127.0.0.1:30080",
-		HTTPSAddr:  "127.0.0.1:30443",
 		RawTCPAddr: "127.0.0.1:39001",
 	})
 	if err != nil {
@@ -272,8 +378,6 @@ func TestSupervisorSocketIPv6FallbackClearsStaleManagedStateOnFDReuse(t *testing
 	}()
 
 	s, err := NewSupervisor(RuntimeTargets{
-		HTTPAddr:   "127.0.0.1:30080",
-		HTTPSAddr:  "127.0.0.1:30443",
 		RawTCPAddr: rawListener.Addr().String(),
 		// intentionally no IPv6 ingress targets
 	})

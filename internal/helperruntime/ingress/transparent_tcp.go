@@ -1,0 +1,133 @@
+package ingress
+
+import (
+	"bufio"
+	"errors"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+)
+
+const http2ClientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+const transparentProtocolSniffTimeout = 250 * time.Millisecond
+
+func ServeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, connectPort int) {
+	if conn == nil {
+		return
+	}
+
+	_ = conn.SetDeadline(timeNow().Add(transparentProtocolSniffTimeout))
+	reader := bufio.NewReader(conn)
+	wrappedConn := &preloadedConn{Conn: conn, reader: reader}
+
+	switch detectTransparentTCPProtocol(reader) {
+	case transparentTCPProtocolTLS:
+		_ = conn.SetDeadline(time.Time{})
+		ServeTransparentHTTPSConn(wrappedConn, rt, connectHost, connectPort)
+	case transparentTCPProtocolHTTP:
+		_ = conn.SetDeadline(time.Time{})
+		serveTransparentHTTPConn(wrappedConn, rt, connectHost, connectPort)
+	default:
+		closeWithRST(conn)
+	}
+}
+
+type transparentTCPProtocol string
+
+const (
+	transparentTCPProtocolUnknown transparentTCPProtocol = "unknown"
+	transparentTCPProtocolHTTP    transparentTCPProtocol = "http"
+	transparentTCPProtocolTLS     transparentTCPProtocol = "tls"
+)
+
+func detectTransparentTCPProtocol(reader *bufio.Reader) transparentTCPProtocol {
+	if reader == nil {
+		return transparentTCPProtocolUnknown
+	}
+
+	prefix, err := reader.Peek(1)
+	if err != nil {
+		return transparentTCPProtocolUnknown
+	}
+	if len(prefix) > 0 && prefix[0] == 0x16 {
+		if looksLikeTLSClientHello(reader) {
+			return transparentTCPProtocolTLS
+		}
+		return transparentTCPProtocolUnknown
+	}
+	if looksLikeHTTP2ClientPreface(reader) || looksLikeHTTP1Request(reader) {
+		return transparentTCPProtocolHTTP
+	}
+	return transparentTCPProtocolUnknown
+}
+
+func serveTransparentHTTPConn(conn net.Conn, rt Bridge, connectHost string, connectPort int) {
+	server := &http.Server{
+		Handler: h2c.NewHandler(
+			transparentHTTPHandlerForDestination(rt, connectHost, connectPort),
+			&http2.Server{},
+		),
+	}
+	serveErr := server.Serve(&singleConnListener{conn: conn})
+	if serveErr != nil && !errors.Is(serveErr, net.ErrClosed) && !errors.Is(serveErr, http.ErrServerClosed) {
+		bridgeLogger(rt).Printf("serve transparent TCP connection: %v", serveErr)
+	}
+}
+
+func closeWithRST(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.SetDeadline(time.Time{})
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetLinger(0)
+	}
+	_ = conn.Close()
+}
+
+func looksLikeTLSClientHello(reader *bufio.Reader) bool {
+	header, err := reader.Peek(3)
+	if err != nil || len(header) < 3 {
+		return false
+	}
+	return header[0] == 0x16 && header[1] == 0x03 && header[2] >= 0x01 && header[2] <= 0x04
+}
+
+func looksLikeHTTP2ClientPreface(reader *bufio.Reader) bool {
+	prefix, err := reader.Peek(len(http2ClientPreface))
+	if err != nil || len(prefix) < len(http2ClientPreface) {
+		return false
+	}
+	return string(prefix) == http2ClientPreface
+}
+
+func looksLikeHTTP1Request(reader *bufio.Reader) bool {
+	peekLen := 16
+	if reader.Buffered() > peekLen {
+		peekLen = reader.Buffered()
+	}
+	prefix, err := reader.Peek(peekLen)
+	if err != nil && len(prefix) == 0 {
+		return false
+	}
+	upper := strings.ToUpper(string(prefix))
+	for _, method := range []string{
+		"GET ",
+		"HEAD ",
+		"POST ",
+		"PUT ",
+		"PATCH ",
+		"DELETE ",
+		"OPTIONS ",
+		"TRACE ",
+	} {
+		if strings.HasPrefix(upper, method) {
+			return true
+		}
+	}
+	return false
+}

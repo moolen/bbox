@@ -2,7 +2,7 @@ package helperproto
 
 import "net/http"
 
-const ProtocolVersion = 7
+const ProtocolVersion = 9
 
 type Envelope struct {
 	ID               uint64
@@ -78,8 +78,7 @@ type Ready struct {
 	ProtocolVersion int
 	ProxyAddr       string
 	DNSAddr         string
-	HTTPAddr        string
-	HTTPSAddr       string
+	TCPAddr         string
 }
 
 type ProxyRequest struct {
@@ -97,8 +96,9 @@ type ProxyResponse struct {
 }
 
 type ConnectRequest struct {
-	Host string
-	Port int
+	Host        string
+	Port        int
+	Transparent bool
 }
 
 type ConnectResponse struct {

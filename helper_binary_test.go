@@ -43,6 +43,15 @@ func TestHelperBinaryResolverCachesBuiltPath(t *testing.T) {
 		}
 		return os.WriteFile(out, []byte("#!/bin/sh\n"), 0o755)
 	}
+	resolver.buildLauncher = func(root, out string) error {
+		if root != moduleRoot {
+			t.Fatalf("unexpected module root: got %q want %q", root, moduleRoot)
+		}
+		if out != filepath.Join(buildDir, "bbox-seccomp-launcher") {
+			t.Fatalf("unexpected launcher path: got %q", out)
+		}
+		return os.WriteFile(out, []byte("#!/bin/sh\n"), 0o755)
+	}
 
 	first, err := resolver.HelperBinary()
 	if err != nil {

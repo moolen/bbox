@@ -252,6 +252,22 @@ func TestNetworkRestrictionsTransparentMode(t *testing.T) {
 	for _, probe := range transparentBlockedProbeSpecs(shellPath, tools, targets) {
 		t.Run(probe.name, func(t *testing.T) {
 			result, err := sandbox.Run(ctx, probe.argv, bbox.RunOptions{})
+			if probe.name == "ip-literal-https" {
+				if err != nil {
+					t.Fatalf("sandbox run transport failed: %v", err)
+				}
+				if result == nil {
+					t.Fatal("expected sandbox run result")
+				}
+				if result.ExitCode != 0 {
+					t.Fatalf("expected blocked transparent HTTPS probe to return an HTTP response, exit=%d stderr=%q", result.ExitCode, string(result.Stderr))
+				}
+				output := strings.TrimSpace(string(result.Stdout))
+				if !strings.Contains(output, "proxy request denied: hostname 127.0.0.1 is not allowed by policy") {
+					t.Fatalf("unexpected blocked transparent HTTPS probe output: %q", output)
+				}
+				return
+			}
 			assertBlockedRunResult(t, result, err)
 		})
 	}
@@ -276,13 +292,23 @@ func proxyBlockedProbeSpecs(shellPath string, tools networkToolPaths, targets ne
 
 func transparentBlockedProbeSpecs(shellPath string, tools networkToolPaths, targets networkRestrictionTargets) []blockedProbeSpec {
 	probes := append([]blockedProbeSpec(nil), proxyBlockedProbeSpecs(shellPath, tools, targets)...)
+	for i, probe := range probes {
+		if probe.name == "tcp" {
+			probes[i] = blockedProbeSpec{name: "tcp", argv: tcpPayloadProbeArgv(shellPath, tools, targets.rawTCPPort)}
+		}
+	}
 	probes = append(probes,
-		// Transparent mode only supports hostname-based HTTPS on the default port.
 		blockedProbeSpec{name: "ip-literal-https", argv: []string{tools.curl, "-sS", "--connect-timeout", "5", "--max-time", "10", "https://127.0.0.1/ok"}},
-		// Transparent mode intentionally does not proxy arbitrary HTTPS destination ports.
-		blockedProbeSpec{name: "non-default-port-https", argv: []string{tools.curl, "-sS", "--connect-timeout", "5", "--max-time", "10", "https://secure.localhost:8443/ok"}},
 	)
 	return probes
+}
+
+func tcpPayloadProbeArgv(shellPath string, tools networkToolPaths, port int) []string {
+	return []string{
+		shellPath,
+		"-c",
+		fmt.Sprintf("printf 'not-http' | %s -n -v -w 1 127.0.0.1 %d", tools.nc, port),
+	}
 }
 
 func dnsUDPProbeArgv(tools networkToolPaths, host string, port int) []string {

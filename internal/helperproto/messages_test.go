@@ -73,8 +73,9 @@ func TestConnectRequestRoundTrip(t *testing.T) {
 	want := Envelope{
 		ID: 9,
 		ConnectRequest: &ConnectRequest{
-			Host: "example.com",
-			Port: 443,
+			Host:        "example.com",
+			Port:        443,
+			Transparent: true,
 		},
 	}
 	if err := enc.Encode(&want); err != nil {
@@ -91,7 +92,7 @@ func TestConnectRequestRoundTrip(t *testing.T) {
 	if got.ConnectRequest == nil {
 		t.Fatalf("unexpected connect request: %#v", got.ConnectRequest)
 	}
-	if got.ConnectRequest.Host != want.ConnectRequest.Host || got.ConnectRequest.Port != want.ConnectRequest.Port {
+	if got.ConnectRequest.Host != want.ConnectRequest.Host || got.ConnectRequest.Port != want.ConnectRequest.Port || got.ConnectRequest.Transparent != want.ConnectRequest.Transparent {
 		t.Fatalf("unexpected connect request payload: got=%#v want=%#v", got.ConnectRequest, want.ConnectRequest)
 	}
 }
@@ -396,9 +397,8 @@ func TestReadyRoundTripIncludesTrafficModeAddrs(t *testing.T) {
 		Ready: &Ready{
 			ProtocolVersion: ProtocolVersion,
 			ProxyAddr:       "127.0.0.1:31111",
-			HTTPAddr:        "127.0.0.1:80",
-			HTTPSAddr:       "127.0.0.1:443",
 			DNSAddr:         "127.0.0.1:53",
+			TCPAddr:         "127.0.0.1:18080",
 		},
 	}
 	if err := enc.Encode(&want); err != nil {
@@ -418,20 +418,17 @@ func TestReadyRoundTripIncludesTrafficModeAddrs(t *testing.T) {
 	if got.Ready.ProxyAddr != want.Ready.ProxyAddr {
 		t.Fatalf("unexpected proxy address: got=%q want=%q", got.Ready.ProxyAddr, want.Ready.ProxyAddr)
 	}
-	if got.Ready.HTTPAddr != want.Ready.HTTPAddr {
-		t.Fatalf("unexpected HTTP address: got=%q want=%q", got.Ready.HTTPAddr, want.Ready.HTTPAddr)
-	}
-	if got.Ready.HTTPSAddr != want.Ready.HTTPSAddr {
-		t.Fatalf("unexpected HTTPS address: got=%q want=%q", got.Ready.HTTPSAddr, want.Ready.HTTPSAddr)
-	}
 	if got.Ready.DNSAddr != want.Ready.DNSAddr {
 		t.Fatalf("unexpected DNS address: got=%q want=%q", got.Ready.DNSAddr, want.Ready.DNSAddr)
+	}
+	if got.Ready.TCPAddr != want.Ready.TCPAddr {
+		t.Fatalf("unexpected TCP address: got=%q want=%q", got.Ready.TCPAddr, want.Ready.TCPAddr)
 	}
 }
 
 func TestProtocolVersion(t *testing.T) {
-	if ProtocolVersion != 7 {
-		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 7)
+	if ProtocolVersion != 9 {
+		t.Fatalf("unexpected protocol version: got=%d want=%d", ProtocolVersion, 9)
 	}
 }
 

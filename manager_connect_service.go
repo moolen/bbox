@@ -19,11 +19,17 @@ func newManagerConnectService(record func(accessEvent)) *managerConnectService {
 
 func (s *managerConnectService) HandleConnectRequest(_ context.Context, policy *compiledPolicy, sandboxID string, req helperproto.ConnectRequest) *helperproto.ConnectResponse {
 	host, port := normalizeHostPort(req.Host, req.Port)
-	hostport := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
-	if err := policy.Check(http.MethodConnect, hostport, true); err != nil {
+	var err error
+	if req.Transparent {
+		err = policy.CheckTransparentConnect(req.Host)
+	} else {
+		hostport := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
+		err = policy.Check(http.MethodConnect, hostport, true)
+	}
+	if err != nil {
 		s.recordEvent(accessEvent{
 			SandboxID:  sandboxID,
-			Kind:       "connect",
+			Kind:       connectAccessKind(req.Transparent),
 			Host:       host,
 			Port:       port,
 			Method:     http.MethodConnect,
@@ -41,7 +47,7 @@ func (s *managerConnectService) HandleConnectRequest(_ context.Context, policy *
 
 	s.recordEvent(accessEvent{
 		SandboxID:  sandboxID,
-		Kind:       "connect",
+		Kind:       connectAccessKind(req.Transparent),
 		Host:       host,
 		Port:       port,
 		Method:     http.MethodConnect,
@@ -50,6 +56,13 @@ func (s *managerConnectService) HandleConnectRequest(_ context.Context, policy *
 		Result:     "allowed",
 	})
 	return &helperproto.ConnectResponse{StatusCode: http.StatusOK}
+}
+
+func connectAccessKind(transparent bool) string {
+	if transparent {
+		return "transparent_connect"
+	}
+	return "connect"
 }
 
 func (s *managerConnectService) recordEvent(event accessEvent) {

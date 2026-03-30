@@ -32,6 +32,12 @@ func TestPackageRootFallsBackToWorkingDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repoRoot, "cmd", "bbox-helper", "main.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatalf("write helper main: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, "cmd", "bbox-seccomp-launcher"), 0o755); err != nil {
+		t.Fatalf("create launcher dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "cmd", "bbox-seccomp-launcher", "main.c"), []byte("int main(void) { return 0; }\n"), 0o644); err != nil {
+		t.Fatalf("write launcher main: %v", err)
+	}
 
 	prevCaller := packageRootRuntimeCaller
 	prevGetwd := packageRootGetwd
