@@ -5,6 +5,45 @@ import (
 	"testing"
 )
 
+func TestCompilePolicySupportsCIDRRules(t *testing.T) {
+	policy, err := compilePolicy(NetworkPolicy{
+		AllowIPCIDRs: []string{"192.0.2.0/24"},
+		DenyIPCIDRs:  []string{"192.0.2.128/25"},
+	})
+	if err != nil {
+		t.Fatalf("compilePolicy() error = %v", err)
+	}
+	if policy == nil {
+		t.Fatal("expected compiled policy")
+	}
+}
+
+func TestPolicyCheckAllowsIPLiteralWithinCIDR(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowIPCIDRs: []string{"192.0.2.0/24"},
+	})
+
+	if err := policy.Check("GET", "192.0.2.10", false); err != nil {
+		t.Fatalf("expected CIDR-allowed IP literal to pass: %v", err)
+	}
+	if err := policy.Check("GET", "198.51.100.10", false); err == nil {
+		t.Fatal("expected IP literal outside CIDR allowlist to fail")
+	}
+}
+
+func TestPolicyCheckDNSUsesHostRules(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		AllowHostPatterns: []string{"^allowed\\.example\\.com$"},
+	})
+
+	if err := policy.CheckDNS("allowed.example.com."); err != nil {
+		t.Fatalf("expected allowed DNS hostname to pass: %v", err)
+	}
+	if err := policy.CheckDNS("denied.example.com."); err == nil {
+		t.Fatal("expected denied DNS hostname to fail")
+	}
+}
+
 func TestCompiledPolicyHonorsDenyBeforeAllow(t *testing.T) {
 	policy, err := compilePolicy(NetworkPolicy{
 		AllowHostPatterns: []string{`(^|[.])github[.]com$`},

@@ -158,6 +158,10 @@ type NetworkPolicy struct {
 	AllowHostPatterns []string
 	// DenyHostPatterns is a regex denylist applied before the allowlist.
 	DenyHostPatterns []string
+	// AllowIPCIDRs is a CIDR allowlist matched against IP literal destinations.
+	AllowIPCIDRs []string
+	// DenyIPCIDRs is a CIDR denylist applied before the CIDR allowlist.
+	DenyIPCIDRs []string
 	// AllowHTTPMethods restricts plain HTTP requests to the listed methods.
 	AllowHTTPMethods []string
 	// AllowConnect enables HTTP CONNECT tunneling.

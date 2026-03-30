@@ -93,6 +93,66 @@ func (m *ProxyManager) handleConnectRequest(ctx context.Context, sandboxID strin
 	return newManagerConnectService(m.recordAccessEvent).HandleConnectRequest(ctx, policy, sandboxID, req)
 }
 
+func (m *ProxyManager) handleDNSRequest(ctx context.Context, sandboxID string, req helperproto.DNSRequest) *helperproto.DNSResponse {
+	policy, ok := m.policyForSandbox(sandboxID)
+	if !ok {
+		return &helperproto.DNSResponse{Error: fmt.Sprintf("sandbox %q is not registered", sandboxID)}
+	}
+
+	hosts, err := dnsQuestionHosts(req.Payload)
+	if err != nil {
+		return &helperproto.DNSResponse{Error: err.Error()}
+	}
+	if len(hosts) == 0 && strings.TrimSpace(req.Host) != "" {
+		hosts = []string{strings.TrimSpace(req.Host)}
+	}
+
+	for _, host := range hosts {
+		if err := policy.CheckDNS(host); err != nil {
+			m.recordAccessEvent(accessEvent{
+				SandboxID:  sandboxID,
+				Kind:       "dns",
+				Host:       host,
+				Port:       53,
+				Allowed:    false,
+				StatusCode: http.StatusForbidden,
+				Result:     "denied",
+				Error:      err.Error(),
+			})
+			return &helperproto.DNSResponse{Error: "dns request denied: " + err.Error()}
+		}
+	}
+
+	payload, err := newManagerDNSService().HandleQueryWithNetwork(ctx, req.Network, req.Payload)
+	if err != nil {
+		for _, host := range hosts {
+			m.recordAccessEvent(accessEvent{
+				SandboxID:  sandboxID,
+				Kind:       "dns",
+				Host:       host,
+				Port:       53,
+				Allowed:    true,
+				StatusCode: http.StatusBadGateway,
+				Result:     "upstream_error",
+				Error:      err.Error(),
+			})
+		}
+		return &helperproto.DNSResponse{Error: err.Error()}
+	}
+	for _, host := range hosts {
+		m.recordAccessEvent(accessEvent{
+			SandboxID:  sandboxID,
+			Kind:       "dns",
+			Host:       host,
+			Port:       53,
+			Allowed:    true,
+			StatusCode: http.StatusOK,
+			Result:     "allowed",
+		})
+	}
+	return &helperproto.DNSResponse{Payload: payload}
+}
+
 func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, req helperproto.MITMRequest) *helperproto.MITMResponse {
 	policy, ok := m.policyForSandbox(sandboxID)
 	if !ok {

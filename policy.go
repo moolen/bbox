@@ -14,6 +14,8 @@ type compiledPolicy struct {
 	allowMethods map[string]struct{}
 	allowHosts   []*regexp.Regexp
 	denyHosts    []*regexp.Regexp
+	allowIPCIDRs []*net.IPNet
+	denyIPCIDRs  []*net.IPNet
 	allowConnect bool
 	connectPorts []portRange
 	allowPaths   []*regexp.Regexp
@@ -66,6 +68,20 @@ func compilePolicy(policy NetworkPolicy) (*compiledPolicy, error) {
 			return nil, fmt.Errorf("compile deny host pattern %q: %w", pattern, err)
 		}
 		compiled.denyHosts = append(compiled.denyHosts, re)
+	}
+	for _, cidr := range policy.AllowIPCIDRs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err != nil {
+			return nil, fmt.Errorf("parse allow IP CIDR %q: %w", cidr, err)
+		}
+		compiled.allowIPCIDRs = append(compiled.allowIPCIDRs, network)
+	}
+	for _, cidr := range policy.DenyIPCIDRs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err != nil {
+			return nil, fmt.Errorf("parse deny IP CIDR %q: %w", cidr, err)
+		}
+		compiled.denyIPCIDRs = append(compiled.denyIPCIDRs, network)
 	}
 	for _, pattern := range policy.AllowPathPatterns {
 		re, err := regexp.Compile(pattern)
@@ -160,13 +176,26 @@ func (p compiledPolicy) Check(method, hostname string, connect bool) error {
 		}
 	}
 
+	if ip := net.ParseIP(normalizedHost); ip != nil {
+		for _, network := range p.denyIPCIDRs {
+			if network.Contains(ip) {
+				return fmt.Errorf("ip literal %s is denied by policy", normalizedHost)
+			}
+		}
+		for _, network := range p.allowIPCIDRs {
+			if network.Contains(ip) {
+				return nil
+			}
+		}
+	}
+
 	for _, re := range p.denyHosts {
 		if re.MatchString(normalizedHost) {
 			return fmt.Errorf("hostname %s is denied by policy", normalizedHost)
 		}
 	}
 
-	allowListConfigured := len(p.allowHosts) > 0
+	allowListConfigured := len(p.allowHosts) > 0 || len(p.allowIPCIDRs) > 0
 	for _, re := range p.allowHosts {
 		if re.MatchString(normalizedHost) {
 			return nil
@@ -200,6 +229,28 @@ func (p compiledPolicy) CheckRequest(req PolicyRequest) error {
 		return err
 	}
 	return nil
+}
+
+func (p compiledPolicy) CheckDNS(host string) error {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(host, ".")))
+	if normalized == "" {
+		return fmt.Errorf("dns hostname is required")
+	}
+
+	for _, re := range p.denyHosts {
+		if re.MatchString(normalized) {
+			return fmt.Errorf("hostname %s is denied by policy", normalized)
+		}
+	}
+	if len(p.allowHosts) == 0 {
+		return nil
+	}
+	for _, re := range p.allowHosts {
+		if re.MatchString(normalized) {
+			return nil
+		}
+	}
+	return fmt.Errorf("hostname %s is not allowed by policy", normalized)
 }
 
 func normalizePolicyHostname(hostname string) (string, error) {
