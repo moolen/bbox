@@ -61,12 +61,12 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, err
 	}
 
-	helperBinary, err := m.helperBinary()
+	runtimeBinary, err := m.runtimeBinary()
 	if err != nil {
 		return nil, err
 	}
 
-	root, err := stageSandboxRoot(opts, helperBinary, m.CACertPEM(), mode)
+	root, err := stageSandboxRoot(opts, runtimeBinary, m.CACertPEM(), mode)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 
 	cmd := exec.Command("bwrap", buildBwrapArgs(bwrapArgsConfig{
 		root:                root,
-		helperPath:          defaultSandboxHelperPath,
+		helperPath:          defaultSandboxBBoxPath,
 		proxyListenAddr:     m.listenAddr,
 		mitm:                m.mitm,
 		maxRequestBodyBytes: m.requestBodyLimitBytes,

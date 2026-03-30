@@ -112,6 +112,7 @@ func buildBwrapArgs(cfg bwrapArgsConfig) []string {
 		"--chdir", "/tmp",
 		"--",
 		cfg.helperPath,
+		"internal-helper",
 		"--bridge-fd", strconv.Itoa(cfg.bridgeFD),
 		"--proxy-addr", cfg.proxyListenAddr,
 		"--traffic-mode", string(normalizedMode),

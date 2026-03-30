@@ -127,8 +127,8 @@ func TestWriteSandboxConfigSkipsMITMTrustFilesWhenDisabled(t *testing.T) {
 }
 
 func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
-	helperPath := writeHelperFixture(t)
-	root, err := stageSandboxRoot(SandboxOptions{}, helperPath, []byte("test mitm ca\n"), TrafficModeProxy)
+	bboxPath := writeBBoxFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, []byte("test mitm ca\n"), TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -144,17 +144,34 @@ func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
 	}
 }
 
+func TestStageSandboxRootCopiesBBoxEntrypoint(t *testing.T) {
+	bboxPath := filepath.Join(t.TempDir(), "bbox")
+	if err := os.WriteFile(bboxPath, []byte("bbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeProxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	if _, err := os.Stat(filepath.Join(root, "app", "bbox")); err != nil {
+		t.Fatalf("expected /app/bbox: %v", err)
+	}
+}
+
 func TestStageSandboxRootCopiesSeccompLauncher(t *testing.T) {
 	buildDir := t.TempDir()
-	helperPath := filepath.Join(buildDir, "bbox-helper")
+	bboxPath := filepath.Join(buildDir, "bbox")
 	launcherPath := filepath.Join(buildDir, "bbox-seccomp-launcher")
-	for _, path := range []string{helperPath, launcherPath} {
+	for _, path := range []string{bboxPath, launcherPath} {
 		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatalf("write stub binary %q: %v", path, err)
 		}
 	}
 
-	root, err := stageSandboxRoot(SandboxOptions{}, helperPath, nil, TrafficModeTransparent)
+	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeTransparent)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -220,7 +237,7 @@ func TestWriteSandboxConfigMirrorsHostResolvConfNameservers(t *testing.T) {
 func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
 	args := buildBwrapArgs(bwrapArgsConfig{
 		root:            "/tmp/root",
-		helperPath:      "/app/bbox-helper",
+		helperPath:      "/app/bbox",
 		proxyListenAddr: "127.0.0.1:31111",
 		bridgeFD:        3,
 		trafficMode:     TrafficModeTransparent,
@@ -228,12 +245,16 @@ func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
 	if !containsArgSequence(args, []string{"--traffic-mode", "transparent"}) {
 		t.Fatalf("expected args to include --traffic-mode transparent, got %v", args)
 	}
+	wantTail := []string{"/app/bbox", "internal-helper", "--bridge-fd", "3"}
+	if !containsArgSequence(args, wantTail) {
+		t.Fatalf("expected args to include %v, got %v", wantTail, args)
+	}
 }
 
 func TestBuildBwrapArgsPassesBridgeAndSeccompFDs(t *testing.T) {
 	args := buildBwrapArgs(bwrapArgsConfig{
 		root:            "/tmp/root",
-		helperPath:      "/app/bbox-helper",
+		helperPath:      "/app/bbox",
 		proxyListenAddr: "127.0.0.1:31111",
 		bridgeFD:        3,
 		seccompFD:       4,
@@ -246,6 +267,10 @@ func TestBuildBwrapArgsPassesBridgeAndSeccompFDs(t *testing.T) {
 	if !containsArgSequence(args, []string{"--bridge-fd", "3"}) {
 		t.Fatalf("expected args to include --bridge-fd 3, got %v", args)
 	}
+	wantTail := []string{"/app/bbox", "internal-helper", "--bridge-fd", "3"}
+	if !containsArgSequence(args, wantTail) {
+		t.Fatalf("expected args to include %v, got %v", wantTail, args)
+	}
 }
 
 func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
@@ -254,8 +279,8 @@ func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
 		t.Skip("skip: libnss_dns.so.2 not available")
 	}
 
-	helperPath := writeHelperFixture(t)
-	root, err := stageSandboxRoot(SandboxOptions{}, helperPath, nil, TrafficModeTransparent)
+	bboxPath := writeBBoxFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeTransparent)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -284,8 +309,8 @@ func TestStageSandboxRootStagesShebangInterpreter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	helperPath := writeHelperFixture(t)
-	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, helperPath, nil, TrafficModeProxy)
+	bboxPath := writeBBoxFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, bboxPath, nil, TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -307,8 +332,8 @@ func TestStageSandboxRootStagesEnvShebangTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	helperPath := writeHelperFixture(t)
-	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, helperPath, nil, TrafficModeProxy)
+	bboxPath := writeBBoxFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, bboxPath, nil, TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -421,16 +446,16 @@ func hostResolvConfNameservers(t *testing.T) []string {
 	return lines
 }
 
-func writeHelperFixture(t *testing.T) string {
+func writeBBoxFixture(t *testing.T) string {
 	t.Helper()
 
 	dir := t.TempDir()
-	helperPath := filepath.Join(dir, "bbox-helper")
+	bboxPath := filepath.Join(dir, "bbox")
 	launcherPath := filepath.Join(dir, "bbox-seccomp-launcher")
-	for _, path := range []string{helperPath, launcherPath} {
+	for _, path := range []string{bboxPath, launcherPath} {
 		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatalf("write helper fixture %q: %v", path, err)
+			t.Fatalf("write bbox fixture %q: %v", path, err)
 		}
 	}
-	return helperPath
+	return bboxPath
 }

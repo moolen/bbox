@@ -17,7 +17,7 @@ import (
 func newProxyManager(policy *compiledPolicy) *ProxyManager {
 	return &ProxyManager{
 		registry:   newSandboxRegistry(policy),
-		resolver:   newHelperBinaryResolver(),
+		resolver:   newRuntimeBinaryResolver(),
 		transport:  cloneDefaultTransport(),
 		listenAddr: helperruntime.DefaultProxyAddr,
 	}
@@ -65,8 +65,8 @@ func (m *ProxyManager) nextSandboxName(requested string) string {
 	return fmt.Sprintf("sandbox-%d", m.nextSandboxID.Add(1))
 }
 
-func (m *ProxyManager) helperBinary() (string, error) {
-	return m.resolver.HelperBinary()
+func (m *ProxyManager) runtimeBinary() (string, error) {
+	return m.resolver.RuntimeBinary()
 }
 
 func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string, req helperproto.ProxyRequest) *helperproto.ProxyResponse {

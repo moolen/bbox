@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	defaultSandboxHelperPath   = "/app/bbox-helper"
+	defaultSandboxBBoxPath     = "/app/bbox"
 	defaultSandboxLauncherPath = "/app/bbox-seccomp-launcher"
 )
 
@@ -166,7 +166,7 @@ func envShebangTarget(args []string) (string, bool) {
 	return "", false
 }
 
-func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte, mode TrafficMode) (root string, err error) {
+func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byte, mode TrafficMode) (root string, err error) {
 	root, err = os.MkdirTemp("", "bwrap-go-root-")
 	if err != nil {
 		return "", fmt.Errorf("create sandbox root: %w", err)
@@ -177,13 +177,17 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 		}
 	}()
 
-	helperHostPath, err := resolveBinary(helperBinary)
+	bboxHostPath, err := resolveBinary(runtimeBinary)
 	if err != nil {
 		return "", err
 	}
-	launcherHostPath := filepath.Join(filepath.Dir(helperHostPath), seccompLauncherBinaryName)
-	if _, err := os.Stat(launcherHostPath); err != nil {
-		return "", fmt.Errorf("resolve seccomp launcher beside helper %q: %w", helperHostPath, err)
+	normalizedMode := normalizeTrafficMode(mode)
+	var launcherHostPath string
+	if normalizedMode == TrafficModeTransparent {
+		launcherHostPath = filepath.Join(filepath.Dir(bboxHostPath), seccompLauncherBinaryName)
+		if _, err := os.Stat(launcherHostPath); err != nil {
+			return "", fmt.Errorf("resolve seccomp launcher beside bbox %q: %w", bboxHostPath, err)
+		}
 	}
 
 	var files []string
@@ -199,16 +203,18 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 		files = append(files, commandFiles...)
 	}
 
-	helperRuntimeFiles, err := filesForCommand(helperHostPath)
+	bboxRuntimeFiles, err := filesForCommand(bboxHostPath)
 	if err != nil {
 		return "", err
 	}
-	files = append(files, helperRuntimeFiles...)
-	launcherRuntimeFiles, err := filesForCommand(launcherHostPath)
-	if err != nil {
-		return "", err
+	files = append(files, bboxRuntimeFiles...)
+	if launcherHostPath != "" {
+		launcherRuntimeFiles, err := filesForCommand(launcherHostPath)
+		if err != nil {
+			return "", err
+		}
+		files = append(files, launcherRuntimeFiles...)
 	}
-	files = append(files, launcherRuntimeFiles...)
 
 	extras := []string{
 		"/lib64/ld-linux-x86-64.so.2",
@@ -221,7 +227,7 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 		}
 		files = append(files, deps...)
 	}
-	if normalizeTrafficMode(mode) == TrafficModeTransparent {
+	if normalizedMode == TrafficModeTransparent {
 		if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2")); ok {
 			extras = append(extras, path)
 			deps, err := runtimeFilesForBinary(path)
@@ -244,11 +250,13 @@ func stageSandboxRoot(opts SandboxOptions, helperBinary string, mitmCAPEM []byte
 		}
 	}
 
-	if err := copyFileToPath(root, helperHostPath, defaultSandboxHelperPath); err != nil {
+	if err := copyFileToPath(root, bboxHostPath, defaultSandboxBBoxPath); err != nil {
 		return "", err
 	}
-	if err := copyFileToPath(root, launcherHostPath, defaultSandboxLauncherPath); err != nil {
-		return "", err
+	if launcherHostPath != "" {
+		if err := copyFileToPath(root, launcherHostPath, defaultSandboxLauncherPath); err != nil {
+			return "", err
+		}
 	}
 
 	if err := writeSandboxConfig(root, mitmCAPEM, mode); err != nil {
