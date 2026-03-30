@@ -47,6 +47,8 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           args: release --snapshot --clean --skip=publish --config .goreleaser.release.yaml
+        env:
+          PROJECT_ROOT: ${{ github.workspace }}
 
       - name: Verify multi-arch release archives
         run: ./scripts/verify-release-archives.sh --run-native amd64 linux_amd64 linux_arm64

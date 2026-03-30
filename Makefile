@@ -7,7 +7,7 @@ IMAGE ?= bbox-agent
 TAG ?= latest
 IMAGE_REF := $(IMAGE):$(TAG)
 
-.PHONY: build docker-build lint release-snapshot
+.PHONY: build docker-build lint release-snapshot release-snapshot-multiarch
 
 build:
 	mkdir -p $(BIN_DIR)
@@ -17,6 +17,9 @@ build:
 
 release-snapshot:
 	./scripts/release-snapshot.sh
+
+release-snapshot-multiarch:
+	./scripts/release-multiarch-snapshot.sh
 
 docker-build:
 	$(DOCKER) build -t $(IMAGE_REF) .

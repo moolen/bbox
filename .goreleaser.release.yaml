@@ -35,8 +35,8 @@ builds:
     env:
       - CGO_ENABLED=1
       - CC=aarch64-linux-gnu-gcc
-      - PKG_CONFIG_PATH={{ .Env.PWD }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
-      - PKG_CONFIG_LIBDIR={{ .Env.PWD }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
+      - PKG_CONFIG_PATH={{ .Env.PROJECT_ROOT }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
+      - PKG_CONFIG_LIBDIR={{ .Env.PROJECT_ROOT }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
     goos:
       - linux
     goarch:
@@ -47,8 +47,8 @@ builds:
     env:
       - CGO_ENABLED=1
       - CC=aarch64-linux-gnu-gcc
-      - PKG_CONFIG_PATH={{ .Env.PWD }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
-      - PKG_CONFIG_LIBDIR={{ .Env.PWD }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
+      - PKG_CONFIG_PATH={{ .Env.PROJECT_ROOT }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
+      - PKG_CONFIG_LIBDIR={{ .Env.PROJECT_ROOT }}/.goreleaser-sysroot/linux_arm64/lib/pkgconfig
     goos:
       - linux
     goarch:
