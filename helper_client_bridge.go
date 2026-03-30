@@ -18,7 +18,7 @@ type helperReady struct {
 }
 
 func (r helperReady) hasTransparentListeners() bool {
-	return r.dnsAddr != "" && r.tcpAddr != ""
+	return r.tcpAddr != ""
 }
 
 func (c *helperClient) readLoop() error {

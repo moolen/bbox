@@ -7,7 +7,6 @@ import (
 )
 
 const DefaultProxyAddr = "127.0.0.1:31111"
-const DefaultTransparentDNSAddr = "127.0.0.1:53"
 
 const connectHandshakeTimeout = 5 * time.Second
 
@@ -24,9 +23,6 @@ type Config struct {
 	Bridge      io.ReadWriteCloser
 	TrafficMode TrafficMode
 	ProxyAddr   string
-	// DNSAddr is the only transparent-mode listener that still binds directly on
-	// its configured address because DNS interception stays protocol-specific.
-	DNSAddr     string
 	Logger      *log.Logger
 	MITMEnabled bool
 

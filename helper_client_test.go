@@ -239,6 +239,49 @@ func TestHelperClientStartAcceptsTransparentReadyEnvelope(t *testing.T) {
 	}
 }
 
+func TestHelperClientStartAcceptsTransparentReadyEnvelopeWithoutDNSAddr(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	client := newHelperClient(nil, "sandbox-a", clientSide)
+	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = serverSide.Close() })
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(serverSide)
+		enc := gob.NewEncoder(serverSide)
+
+		var hello helperproto.Envelope
+		if err := dec.Decode(&hello); err != nil {
+			serverErrCh <- err
+			return
+		}
+		if hello.Hello == nil {
+			serverErrCh <- errors.New("expected hello envelope")
+			return
+		}
+
+		serverErrCh <- enc.Encode(&helperproto.Envelope{
+			ID: hello.ID,
+			Ready: &helperproto.Ready{
+				ProtocolVersion: helperproto.ProtocolVersion,
+				TCPAddr:         "127.0.0.1:18080",
+			},
+		})
+	}()
+
+	proxyAddr, err := client.Start(context.Background())
+	if err != nil {
+		t.Fatalf("expected transparent readiness to succeed, got %v", err)
+	}
+	if proxyAddr != "" {
+		t.Fatalf("expected no proxy address for transparent readiness, got %q", proxyAddr)
+	}
+
+	if err := <-serverErrCh; err != nil {
+		t.Fatalf("server side failed: %v", err)
+	}
+}
+
 func TestHelperClientReadLoopDispatchesDNSRequest(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer clientSide.Close()

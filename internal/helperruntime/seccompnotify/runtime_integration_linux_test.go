@@ -888,7 +888,7 @@ func TestSupervisorStartRedirectsNCConnectRuntime(t *testing.T) {
 	}
 }
 
-func TestSupervisorStartRedirectsTCPConnectRuntimeWithDNSIngress(t *testing.T) {
+func TestSupervisorStartRedirectsTCPConnectRuntimeWithDNSRoundTripOnly(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
@@ -900,12 +900,6 @@ func TestSupervisorStartRedirectsTCPConnectRuntimeWithDNSIngress(t *testing.T) {
 		t.Fatalf("listen raw ingress: %v", err)
 	}
 	t.Cleanup(func() { _ = rawListener.Close() })
-
-	dnsConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen dns ingress: %v", err)
-	}
-	t.Cleanup(func() { _ = dnsConn.Close() })
 
 	accepted := make(chan net.Conn, 1)
 	go func() {
@@ -922,7 +916,9 @@ func TestSupervisorStartRedirectsTCPConnectRuntimeWithDNSIngress(t *testing.T) {
 
 	s, err := NewSupervisor(RuntimeTargets{
 		RawTCPAddr: rawListener.Addr().String(),
-		DNSAddr:    dnsConn.LocalAddr().String(),
+		DNSRoundTrip: func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
+			return nil, fmt.Errorf("unexpected dns round trip for %s %s:%d", network, host, port)
+		},
 	})
 	if err != nil {
 		t.Fatalf("new supervisor: %v", err)
@@ -962,7 +958,7 @@ func TestSupervisorStartRedirectsTCPConnectRuntimeWithDNSIngress(t *testing.T) {
 	case conn := <-accepted:
 		_ = conn.Close()
 	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for redirected tcp accept with dns ingress")
+		t.Fatal("timed out waiting for redirected tcp accept with dns round trip only")
 	}
 
 	if err := cmd.Wait(); err != nil {

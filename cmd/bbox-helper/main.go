@@ -15,7 +15,6 @@ import (
 type helperFlags struct {
 	bridgeFD            int
 	proxyAddr           string
-	dnsAddr             string
 	mitmEnabled         bool
 	maxRequestBodyBytes int64
 	trafficMode         string
@@ -26,7 +25,6 @@ func parseFlags(args []string) (helperFlags, error) {
 	fs := flag.NewFlagSet("bbox-helper", flag.ContinueOnError)
 	fs.IntVar(&parsed.bridgeFD, "bridge-fd", 3, "file descriptor carrying the helper control bridge")
 	fs.StringVar(&parsed.proxyAddr, "proxy-addr", helperruntime.DefaultProxyAddr, "sandbox-local proxy listen address")
-	fs.StringVar(&parsed.dnsAddr, "dns-addr", "", "sandbox-local transparent DNS listen address")
 	fs.BoolVar(&parsed.mitmEnabled, "mitm-enabled", false, "enable TLS MITM interception for CONNECT requests")
 	fs.Int64Var(&parsed.maxRequestBodyBytes, "max-request-body-bytes", 0, "maximum intercepted request body bytes to buffer for policy evaluation")
 	fs.StringVar(&parsed.trafficMode, "traffic-mode", string(helperruntime.TrafficModeProxy), "traffic mode (proxy or transparent)")
@@ -59,7 +57,6 @@ func main() {
 		Bridge:              bridge,
 		TrafficMode:         helperruntime.TrafficMode(parsed.trafficMode),
 		ProxyAddr:           parsed.proxyAddr,
-		DNSAddr:             parsed.dnsAddr,
 		Logger:              logger,
 		MITMEnabled:         parsed.mitmEnabled,
 		MaxRequestBodyBytes: parsed.maxRequestBodyBytes,
