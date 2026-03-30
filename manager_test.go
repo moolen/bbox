@@ -23,20 +23,14 @@ import (
 func TestPackageRootFallsBackToWorkingDirectory(t *testing.T) {
 	tempDir := t.TempDir()
 	repoRoot := filepath.Join(tempDir, "repo")
-	if err := os.MkdirAll(filepath.Join(repoRoot, "cmd", "bbox-helper"), 0o755); err != nil {
-		t.Fatalf("create helper dir: %v", err)
+	if err := os.MkdirAll(filepath.Join(repoRoot, "cmd", "bbox"), 0o755); err != nil {
+		t.Fatalf("create bbox dir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module github.com/moolen/bbox\n\ngo 1.25.0\n"), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(repoRoot, "cmd", "bbox-helper", "main.go"), []byte("package main\n"), 0o644); err != nil {
-		t.Fatalf("write helper main: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(repoRoot, "cmd", "bbox-seccomp-launcher"), 0o755); err != nil {
-		t.Fatalf("create launcher dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repoRoot, "cmd", "bbox-seccomp-launcher", "main.c"), []byte("int main(void) { return 0; }\n"), 0o644); err != nil {
-		t.Fatalf("write launcher main: %v", err)
+	if err := os.WriteFile(filepath.Join(repoRoot, "cmd", "bbox", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write bbox main: %v", err)
 	}
 
 	prevCaller := packageRootRuntimeCaller

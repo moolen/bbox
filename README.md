@@ -17,8 +17,11 @@ I want restrict egress traffic of an untrusted process. When running AI agents a
 
 How it works:
 1. use bubblewrap to create a sandbox for pid/mount/network etc. This sandbox has not network connectivity to the host. CA trust is injected into the sandbox, so we are able to terminate TLS and inspect traffic.
-2. deploy a `bridge` helper into the isolated sandbox which provides a way out for DNS, HTTP and HTTPS. no ICMP, raw TCP or UDP can leave
+2. stage a single `bbox` binary into the isolated sandbox. it re-enters hidden internal helper mode to provide a way out for DNS, HTTP and HTTPS. no ICMP, raw TCP or UDP can leave
 3. use `seccomp unotify` to intercept tcp/udp syscalls and point them at the `bridge`.
 4. enforce network policies on the host side for HTTP, HTTPS and DNS traffic. 
 
+## Packaging
+
+`bbox` ships as a single linux binary. the transparent seccomp launcher is embedded into `bbox` and executed from an anonymous `memfd`, so release archives and the sandbox filesystem only need `/app/bbox`.
 

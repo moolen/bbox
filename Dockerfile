@@ -20,9 +20,7 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-        go build -trimpath -o /out/bbox ./cmd/bbox \
-    && CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-        go build -trimpath -o /out/bbox-helper ./cmd/bbox-helper
+        go build -trimpath -o /out/bbox ./cmd/bbox
 
 FROM debian:bookworm-slim AS runtime
 
@@ -78,7 +76,6 @@ RUN apt-get update \
 
 COPY --from=builder /usr/local/go /usr/local/go
 COPY --from=builder /out/bbox /usr/local/bin/bbox
-COPY --from=builder /out/bbox-helper /usr/local/bin/bbox-helper
 
 RUN mkdir -p "${GOPATH}/bin" "${GOPATH}/pkg" "${GOMODCACHE}" /workspace \
     && ln -sf /usr/bin/pip3 /usr/local/bin/pip \
@@ -88,7 +85,6 @@ RUN mkdir -p "${GOPATH}/bin" "${GOPATH}/pkg" "${GOMODCACHE}" /workspace \
     && git config --system --add safe.directory '*' \
     && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | bash -s -- -b /usr/local/bin "${GOLANGCI_LINT_VERSION}" \
     && GOBIN=/usr/local/bin go install golang.org/x/vuln/cmd/govulncheck@"${GOVULNCHECK_VERSION}" \
-    && bbox --help >/dev/null \
-    && test -x /usr/local/bin/bbox-helper
+    && bbox --help >/dev/null
 
 CMD ["/bin/bash"]

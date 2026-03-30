@@ -25,7 +25,7 @@ func TestRuntimeBinaryResolverPrefersPackagedBBox(t *testing.T) {
 	}
 }
 
-func TestRuntimeBinaryResolverBuildsSiblingLauncherForSourceFallback(t *testing.T) {
+func TestRuntimeBinaryResolverBuildsOnlyBBoxForSourceFallback(t *testing.T) {
 	moduleRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(moduleRoot, "go.mod"), []byte("module example.com/test\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -33,10 +33,8 @@ func TestRuntimeBinaryResolverBuildsSiblingLauncherForSourceFallback(t *testing.
 
 	buildDir := t.TempDir()
 	bboxPath := filepath.Join(buildDir, "bbox")
-	launcherPath := filepath.Join(buildDir, "bbox-seccomp-launcher")
 
 	bboxBuilds := 0
-	launcherBuilds := 0
 
 	resolver := newRuntimeBinaryResolver()
 	resolver.executablePath = func() (string, error) { return "", nil }
@@ -52,16 +50,6 @@ func TestRuntimeBinaryResolverBuildsSiblingLauncherForSourceFallback(t *testing.
 		}
 		return os.WriteFile(out, []byte("#!/bin/sh\n"), 0o755)
 	}
-	resolver.buildLauncher = func(root, out string) error {
-		launcherBuilds++
-		if root != moduleRoot {
-			t.Fatalf("unexpected build root: got %q want %q", root, moduleRoot)
-		}
-		if out != launcherPath {
-			t.Fatalf("unexpected launcher path: got %q want %q", out, launcherPath)
-		}
-		return os.WriteFile(out, []byte("#!/bin/sh\n"), 0o755)
-	}
 
 	got, err := resolver.RuntimeBinary()
 	if err != nil {
@@ -70,13 +58,7 @@ func TestRuntimeBinaryResolverBuildsSiblingLauncherForSourceFallback(t *testing.
 	if got != bboxPath {
 		t.Fatalf("unexpected runtime binary path: got %q want %q", got, bboxPath)
 	}
-	if _, err := os.Stat(launcherPath); err != nil {
-		t.Fatalf("expected sibling launcher at %q: %v", launcherPath, err)
-	}
 	if bboxBuilds != 1 {
 		t.Fatalf("expected one bbox build, got %d", bboxBuilds)
-	}
-	if launcherBuilds != 1 {
-		t.Fatalf("expected one launcher build, got %d", launcherBuilds)
 	}
 }

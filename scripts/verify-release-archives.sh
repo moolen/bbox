@@ -36,7 +36,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 expect_members() {
   archive="$1"
   members="$(tar -tzf "$archive" | sort)"
-  expected="$(printf '%s\n' bbox bbox-helper bbox-seccomp-launcher)"
+  expected="$(printf '%s\n' bbox)"
   if [ "$members" != "$expected" ]; then
     echo "unexpected archive contents for $archive" >&2
     echo "got:" >&2
@@ -85,8 +85,6 @@ for target in "$@"; do
 
   arch="${target#linux_}"
   expect_file_arch "$target_dir/bbox" "$arch"
-  expect_file_arch "$target_dir/bbox-helper" "$arch"
-  expect_file_arch "$target_dir/bbox-seccomp-launcher" "$arch"
 
   if [ -n "$native_arch" ] && [ "$arch" = "$native_arch" ]; then
     "$target_dir/bbox" --help >/dev/null

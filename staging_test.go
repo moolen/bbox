@@ -2,6 +2,7 @@ package bbox
 
 import (
 	"bufio"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -161,14 +162,10 @@ func TestStageSandboxRootCopiesBBoxEntrypoint(t *testing.T) {
 	}
 }
 
-func TestStageSandboxRootCopiesSeccompLauncher(t *testing.T) {
-	buildDir := t.TempDir()
-	bboxPath := filepath.Join(buildDir, "bbox")
-	launcherPath := filepath.Join(buildDir, "bbox-seccomp-launcher")
-	for _, path := range []string{bboxPath, launcherPath} {
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatalf("write stub binary %q: %v", path, err)
-		}
+func TestStageSandboxRootDoesNotStageSeccompLauncher(t *testing.T) {
+	bboxPath := filepath.Join(t.TempDir(), "bbox")
+	if err := os.WriteFile(bboxPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write stub bbox: %v", err)
 	}
 
 	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeTransparent)
@@ -178,8 +175,8 @@ func TestStageSandboxRootCopiesSeccompLauncher(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 
 	stagedLauncher := filepath.Join(root, "app", "bbox-seccomp-launcher")
-	if _, err := os.Stat(stagedLauncher); err != nil {
-		t.Fatalf("expected staged launcher at %q: %v", stagedLauncher, err)
+	if _, err := os.Stat(stagedLauncher); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no staged launcher at %q, got %v", stagedLauncher, err)
 	}
 }
 
@@ -451,11 +448,8 @@ func writeBBoxFixture(t *testing.T) string {
 
 	dir := t.TempDir()
 	bboxPath := filepath.Join(dir, "bbox")
-	launcherPath := filepath.Join(dir, "bbox-seccomp-launcher")
-	for _, path := range []string{bboxPath, launcherPath} {
-		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatalf("write bbox fixture %q: %v", path, err)
-		}
+	if err := os.WriteFile(bboxPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write bbox fixture %q: %v", bboxPath, err)
 	}
 	return bboxPath
 }

@@ -10,8 +10,7 @@ import (
 )
 
 const (
-	defaultSandboxBBoxPath     = "/app/bbox"
-	defaultSandboxLauncherPath = "/app/bbox-seccomp-launcher"
+	defaultSandboxBBoxPath = "/app/bbox"
 )
 
 var mitmTrustBundlePaths = []string{
@@ -182,13 +181,6 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 		return "", err
 	}
 	normalizedMode := normalizeTrafficMode(mode)
-	var launcherHostPath string
-	if normalizedMode == TrafficModeTransparent {
-		launcherHostPath = filepath.Join(filepath.Dir(bboxHostPath), seccompLauncherBinaryName)
-		if _, err := os.Stat(launcherHostPath); err != nil {
-			return "", fmt.Errorf("resolve seccomp launcher beside bbox %q: %w", bboxHostPath, err)
-		}
-	}
 
 	var files []string
 	for _, requested := range opts.Binaries {
@@ -208,13 +200,6 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 		return "", err
 	}
 	files = append(files, bboxRuntimeFiles...)
-	if launcherHostPath != "" {
-		launcherRuntimeFiles, err := filesForCommand(launcherHostPath)
-		if err != nil {
-			return "", err
-		}
-		files = append(files, launcherRuntimeFiles...)
-	}
 
 	extras := []string{
 		"/lib64/ld-linux-x86-64.so.2",
@@ -252,11 +237,6 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 
 	if err := copyFileToPath(root, bboxHostPath, defaultSandboxBBoxPath); err != nil {
 		return "", err
-	}
-	if launcherHostPath != "" {
-		if err := copyFileToPath(root, launcherHostPath, defaultSandboxLauncherPath); err != nil {
-			return "", err
-		}
 	}
 
 	if err := writeSandboxConfig(root, mitmCAPEM, mode); err != nil {
