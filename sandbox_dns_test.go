@@ -67,6 +67,7 @@ func TestTransparentSandboxLibcGetaddrinfoUsesManagedDNS(t *testing.T) {
 		},
 	})
 	if err != nil {
+		skipIfLoopbackSetupUnsupported(t, err)
 		t.Fatalf("create sandbox: %v", err)
 	}
 	defer func() {
@@ -125,6 +126,7 @@ func TestTransparentSandboxAuditModeAllowsPolicyDeniedDNS(t *testing.T) {
 		},
 	})
 	if err != nil {
+		skipIfLoopbackSetupUnsupported(t, err)
 		t.Fatalf("create sandbox: %v", err)
 	}
 	defer func() {
@@ -293,6 +295,18 @@ func main() {
 		t.Fatalf("build audit dns client: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return binaryPath, dir
+}
+
+func skipIfLoopbackSetupUnsupported(t *testing.T, err error) {
+	t.Helper()
+
+	if err == nil {
+		return
+	}
+	message := err.Error()
+	if strings.Contains(message, "loopback: Failed RTM_NEWADDR: Operation not permitted") {
+		t.Skipf("transparent sandbox test requires loopback RTM_NEWADDR support inside bubblewrap: %v", err)
+	}
 }
 
 type dnsStubTrace struct {
