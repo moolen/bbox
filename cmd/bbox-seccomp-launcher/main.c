@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -18,6 +19,7 @@
 extern char **environ;
 
 #define LAUNCHER_SOCK_FD_ENV "BBOX_SECCOMP_NOTIFY_SOCK_FD"
+#define PAYLOAD_SECCOMP_BPF_FLAG "--payload-seccomp-bpf"
 #define X32_SYSCALL_BIT 0x40000000U
 
 #if defined(__x86_64__)
@@ -25,6 +27,7 @@ extern char **environ;
 static const uint32_t managed_syscalls[] = {
     __NR_socket,
     __NR_connect,
+    __NR_getpeername,
     __NR_sendto,
     __NR_recvfrom,
     __NR_sendmsg,
@@ -35,6 +38,7 @@ static const uint32_t managed_syscalls[] = {
     __NR_poll,
 #endif
     __NR_ppoll,
+    __NR_ioctl,
     __NR_close,
     __NR_dup,
     __NR_dup2,
@@ -46,6 +50,7 @@ static const uint32_t managed_syscalls[] = {
 static const uint32_t managed_syscalls[] = {
     __NR_socket,
     __NR_connect,
+    __NR_getpeername,
     __NR_sendto,
     __NR_recvfrom,
     __NR_sendmsg,
@@ -56,6 +61,7 @@ static const uint32_t managed_syscalls[] = {
     __NR_poll,
 #endif
     __NR_ppoll,
+    __NR_ioctl,
     __NR_close,
     __NR_dup,
     __NR_dup3,
@@ -117,12 +123,49 @@ static char **filtered_envp(void) {
 
 static int find_separator(int argc, char *argv[]) {
     int idx;
-    for (idx = 2; idx < argc; ++idx) {
+    for (idx = 1; idx < argc; ++idx) {
         if (strcmp(argv[idx], "--") == 0) {
             return idx;
         }
     }
     return -1;
+}
+
+static int parse_launcher_args(int argc, char *argv[], int *target_index, int *separator, const char **payload_seccomp_bpf) {
+    int idx = 1;
+
+    if (target_index == NULL || separator == NULL || payload_seccomp_bpf == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *payload_seccomp_bpf = NULL;
+    while (idx < argc) {
+        if (strcmp(argv[idx], PAYLOAD_SECCOMP_BPF_FLAG) == 0) {
+            if (idx + 1 >= argc) {
+                errno = EINVAL;
+                return -1;
+            }
+            *payload_seccomp_bpf = argv[idx + 1];
+            idx += 2;
+            continue;
+        }
+        break;
+    }
+
+    if (idx >= argc) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *target_index = idx;
+    *separator = find_separator(argc, argv);
+    if (*separator < 0 || *separator + 1 >= argc || *separator <= *target_index) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return 0;
 }
 
 static int send_launcher_status(int sock_fd, uint8_t status, int send_fd, const char *message) {
@@ -184,6 +227,8 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getpeername, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendto, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvfrom, 0, 1),
@@ -204,6 +249,8 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
 #endif
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ppoll, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ioctl, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
@@ -227,6 +274,8 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getpeername, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendto, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvfrom, 0, 1),
@@ -248,6 +297,8 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
 #endif
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ppoll, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ioctl, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_close, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_dup, 0, 1),
@@ -266,7 +317,7 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
     long listener_fd;
 
 #if defined(__x86_64__)
-    filter[16].k = (uint32_t)allowed_sendmsg_fd;
+    filter[18].k = (uint32_t)allowed_sendmsg_fd;
 #else
     filter[14].k = (uint32_t)allowed_sendmsg_fd;
 #endif
@@ -283,11 +334,78 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
     return (int)listener_fd;
 }
 
+static int install_payload_seccomp_filter(const char *path) {
+    int fd = -1;
+    struct stat st;
+    struct sock_filter *filter = NULL;
+    struct sock_fprog prog;
+    ssize_t total = 0;
+
+    if (path == NULL || *path == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (st.st_size <= 0 || (st.st_size % (off_t)sizeof(struct sock_filter)) != 0) {
+        close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+
+    filter = malloc((size_t)st.st_size);
+    if (filter == NULL) {
+        close(fd);
+        return -1;
+    }
+
+    while (total < st.st_size) {
+        ssize_t n = read(fd, ((char *)filter) + total, (size_t)(st.st_size - total));
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            free(filter);
+            close(fd);
+            return -1;
+        }
+        if (n == 0) {
+            free(filter);
+            close(fd);
+            errno = EINVAL;
+            return -1;
+        }
+        total += n;
+    }
+    close(fd);
+
+    prog.len = (unsigned short)(st.st_size / (off_t)sizeof(struct sock_filter));
+    prog.filter = filter;
+    if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog) != 0) {
+        int saved_errno = errno;
+        free(filter);
+        errno = saved_errno;
+        return -1;
+    }
+
+    free(filter);
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     int inherited_sock_fd = parse_sock_fd();
     int sock_fd = -1;
+    int target_index = -1;
     int separator = -1;
     int notify_fd = -1;
+    const char *payload_seccomp_bpf = NULL;
     char **envp = NULL;
     (void)managed_syscalls;
 
@@ -306,8 +424,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    separator = find_separator(argc, argv);
-    if (separator < 0 || separator + 1 >= argc) {
+    if (parse_launcher_args(argc, argv, &target_index, &separator, &payload_seccomp_bpf) != 0) {
         (void)send_launcher_status(sock_fd, 0, -1, "launcher target argv is required");
         fprintf(stderr, "launcher target argv is required\n");
         return 1;
@@ -336,7 +453,13 @@ int main(int argc, char *argv[]) {
 
     close(sock_fd);
 
-    execve(argv[1], &argv[separator + 1], envp);
+    if (payload_seccomp_bpf != NULL && install_payload_seccomp_filter(payload_seccomp_bpf) != 0) {
+        fprintf(stderr, "install payload seccomp filter: %s\n", strerror(errno));
+        free(envp);
+        return 1;
+    }
+
+    execve(argv[target_index], &argv[separator + 1], envp);
 
     fprintf(stderr, "execve target: %s\n", strerror(errno));
     free(envp);

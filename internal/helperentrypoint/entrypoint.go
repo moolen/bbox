@@ -23,6 +23,7 @@ type helperFlags struct {
 	mitmEnabled         bool
 	maxRequestBodyBytes int64
 	trafficMode         string
+	payloadSeccompBPF   string
 }
 
 func parseFlags(args []string) (helperFlags, error) {
@@ -33,6 +34,7 @@ func parseFlags(args []string) (helperFlags, error) {
 	fs.BoolVar(&parsed.mitmEnabled, "mitm-enabled", false, "enable TLS MITM interception for CONNECT requests")
 	fs.Int64Var(&parsed.maxRequestBodyBytes, "max-request-body-bytes", 0, "maximum intercepted request body bytes to buffer for policy evaluation")
 	fs.StringVar(&parsed.trafficMode, "traffic-mode", string(helperruntime.TrafficModeProxy), "traffic mode (proxy or transparent)")
+	fs.StringVar(&parsed.payloadSeccompBPF, "payload-seccomp-bpf", "", "path to a staged seccomp BPF program that the launcher should install for payload execs")
 	if err := fs.Parse(args); err != nil {
 		return parsed, err
 	}
@@ -64,11 +66,12 @@ func Run(args []string) error {
 
 	logger := log.New(os.Stderr, "bbox-helper: ", log.LstdFlags)
 	return runHelperRuntime(ctx, helperruntime.Config{
-		Bridge:              bridge,
-		TrafficMode:         helperruntime.TrafficMode(parsed.trafficMode),
-		ProxyAddr:           parsed.proxyAddr,
-		Logger:              logger,
-		MITMEnabled:         parsed.mitmEnabled,
-		MaxRequestBodyBytes: parsed.maxRequestBodyBytes,
+		Bridge:                bridge,
+		TrafficMode:           helperruntime.TrafficMode(parsed.trafficMode),
+		ProxyAddr:             parsed.proxyAddr,
+		Logger:                logger,
+		MITMEnabled:           parsed.mitmEnabled,
+		MaxRequestBodyBytes:   parsed.maxRequestBodyBytes,
+		PayloadSeccompBPFPath: parsed.payloadSeccompBPF,
 	})
 }

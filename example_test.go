@@ -124,7 +124,11 @@ func ExampleProxyManager_NewSandbox() {
 	}
 
 	log.Printf("proxy=%s exit=%d stdout=%dB stderr=%dB", sandbox.ProxyURL(), result.ExitCode, len(result.Stdout), len(result.Stderr))
-	log.Printf("accessed=%d entries=%d", len(sandbox.AccessedDomains()), len(logger.snapshot()))
+	summary := sandbox.AccessSummary()
+	for _, req := range summary.Requests {
+		log.Printf("%s %s:%d %s %s attempts=%d", req.Kind, req.Host, req.Port, req.Method, req.Path, req.Attempts)
+	}
+	log.Printf("entries=%d", len(logger.snapshot()))
 }
 
 func ExampleProxyModeSandbox() {

@@ -133,136 +133,19 @@ func compilePolicy(policy NetworkPolicy) (*compiledPolicy, error) {
 }
 
 func (p compiledPolicy) Check(method, hostname string, connect bool) error {
-	method = strings.ToUpper(strings.TrimSpace(method))
-
-	if method == "" {
-		return fmt.Errorf("request method is required")
-	}
-	if connect && method != http.MethodConnect {
-		return fmt.Errorf("connect requests must use CONNECT method")
-	}
-	if method == http.MethodConnect && !connect {
-		return fmt.Errorf("CONNECT method requires connect request type")
-	}
-
-	if !connect && len(p.allowMethods) > 0 {
-		if _, ok := p.allowMethods[method]; !ok {
-			return fmt.Errorf("method %s is not allowed", method)
-		}
-	}
-	var (
-		normalizedHost string
-		err            error
-	)
-	if connect {
-		var port int
-		normalizedHost, port, err = splitConnectTarget(hostname)
-		if err != nil {
-			return err
-		}
-		if !p.allowConnect {
-			return fmt.Errorf("CONNECT requests are not allowed")
-		}
-		if len(p.connectPorts) == 0 {
-			return fmt.Errorf("CONNECT port allowlist is empty")
-		}
-		if !matchConnectPort(p.connectPorts, port) {
-			return fmt.Errorf("CONNECT port %d is not allowed", port)
-		}
-	} else {
-		normalizedHost, err = normalizePolicyHostname(hostname)
-		if err != nil {
-			return err
-		}
-	}
-
-	return p.checkHostOnlyNormalized(normalizedHost)
+	return p.evaluate(method, hostname, connect).firstReasonAsError()
 }
 
 func (p compiledPolicy) CheckRequest(req PolicyRequest) error {
-	if err := p.Check(req.Method, req.Host, false); err != nil {
-		return err
-	}
-	if req.BodyTooLarge {
-		return fmt.Errorf("request body exceeds inspection limit")
-	}
-
-	path := strings.TrimSpace(req.Path)
-	if path == "" {
-		path = "/"
-	}
-	if err := matchPolicyPatterns("path", path, p.denyPaths, p.allowPaths); err != nil {
-		return err
-	}
-	if err := p.checkHeaders(req.Header); err != nil {
-		return err
-	}
-	if err := matchPolicyPatterns("request body", string(req.Body), p.denyBodies, p.allowBodies); err != nil {
-		return err
-	}
-	return nil
+	return p.evaluateRequest(req).firstReasonAsError()
 }
 
 func (p compiledPolicy) CheckDNS(host string) error {
-	normalized := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(host, ".")))
-	if normalized == "" {
-		return fmt.Errorf("dns hostname is required")
-	}
-
-	for _, re := range p.denyHosts {
-		if re.MatchString(normalized) {
-			return fmt.Errorf("hostname %s is denied by policy", normalized)
-		}
-	}
-	if len(p.allowHosts) == 0 {
-		return nil
-	}
-	for _, re := range p.allowHosts {
-		if re.MatchString(normalized) {
-			return nil
-		}
-	}
-	return fmt.Errorf("hostname %s is not allowed by policy", normalized)
+	return p.evaluateDNS(host).firstReasonAsError()
 }
 
 func (p compiledPolicy) CheckTransparentConnect(host string) error {
-	normalized, err := normalizePolicyHostname(host)
-	if err != nil {
-		return err
-	}
-	return p.checkHostOnlyNormalized(normalized)
-}
-
-func (p compiledPolicy) checkHostOnlyNormalized(normalizedHost string) error {
-	if ip := net.ParseIP(normalizedHost); ip != nil {
-		for _, network := range p.denyIPCIDRs {
-			if network.Contains(ip) {
-				return fmt.Errorf("ip literal %s is denied by policy", normalizedHost)
-			}
-		}
-		for _, network := range p.allowIPCIDRs {
-			if network.Contains(ip) {
-				return nil
-			}
-		}
-	}
-
-	for _, re := range p.denyHosts {
-		if re.MatchString(normalizedHost) {
-			return fmt.Errorf("hostname %s is denied by policy", normalizedHost)
-		}
-	}
-
-	allowListConfigured := len(p.allowHosts) > 0 || len(p.allowIPCIDRs) > 0
-	for _, re := range p.allowHosts {
-		if re.MatchString(normalizedHost) {
-			return nil
-		}
-	}
-	if allowListConfigured {
-		return fmt.Errorf("hostname %s is not allowed by policy", normalizedHost)
-	}
-	return nil
+	return p.evaluateConnect(host, 0, true).firstReasonAsError()
 }
 
 func normalizePolicyHostname(hostname string) (string, error) {

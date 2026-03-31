@@ -101,6 +101,178 @@ func TestNilSandboxAccessedDomains(t *testing.T) {
 	}
 }
 
+func TestNilSandboxAccessSummary(t *testing.T) {
+	var sandbox Sandbox
+
+	got := sandbox.AccessSummary()
+	if got.Hosts == nil {
+		t.Fatal("expected empty hosts slice, got nil")
+	}
+	if got.Requests == nil {
+		t.Fatal("expected empty requests slice, got nil")
+	}
+	if len(got.Hosts) != 0 {
+		t.Fatalf("expected empty hosts slice, got %d entries", len(got.Hosts))
+	}
+	if len(got.Requests) != 0 {
+		t.Fatalf("expected empty requests slice, got %d entries", len(got.Requests))
+	}
+
+	got.Hosts = append(got.Hosts, AccessedHostSummary{Host: "mutated"})
+	got.Requests = append(got.Requests, RequestAggregate{Host: "mutated"})
+
+	again := sandbox.AccessSummary()
+	if len(again.Hosts) != 0 {
+		t.Fatalf("expected empty hosts slice on second snapshot, got %d entries", len(again.Hosts))
+	}
+	if len(again.Requests) != 0 {
+		t.Fatalf("expected empty requests slice on second snapshot, got %d entries", len(again.Requests))
+	}
+}
+
+func TestSandboxAccessSummaryIsCopy(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	sandbox := &Sandbox{manager: manager, id: "sandbox-a"}
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	manager.recordAccessEvent(accessEvent{
+		Time:          time.Date(2026, 3, 31, 11, 0, 0, 0, time.UTC),
+		SandboxID:     "sandbox-a",
+		TrafficMode:   TrafficModeTransparent,
+		Kind:          "http",
+		Host:          "example.com",
+		Port:          80,
+		Method:        "GET",
+		Path:          "/ok",
+		Allowed:       true,
+		StatusCode:    200,
+		Result:        "allowed",
+		PolicyAllowed: true,
+	})
+
+	first := sandbox.AccessSummary()
+	if len(first.Hosts) != 1 {
+		t.Fatalf("expected 1 host summary, got %d", len(first.Hosts))
+	}
+	if len(first.Requests) != 1 {
+		t.Fatalf("expected 1 request summary, got %d", len(first.Requests))
+	}
+
+	first.Hosts[0].Host = "mutated.example"
+	first.Hosts[0].Attempts = 99
+	first.Hosts[0].PolicyAllowedCount = 99
+	first.Requests[0].Host = "mutated.example"
+	first.Requests[0].Attempts = 99
+	first.Requests[0].PolicyAllowedCount = 99
+
+	latest := sandbox.AccessSummary()
+	if latest.Hosts[0].Host != "example.com" {
+		t.Fatalf("expected original host to remain intact, got %#v", latest.Hosts[0])
+	}
+	if latest.Hosts[0].Attempts != 1 {
+		t.Fatalf("expected original host attempts to remain 1, got %d", latest.Hosts[0].Attempts)
+	}
+	if latest.Hosts[0].PolicyAllowedCount != 1 {
+		t.Fatalf("expected original host policy-allowed count to remain 1, got %d", latest.Hosts[0].PolicyAllowedCount)
+	}
+	if latest.Requests[0].Host != "example.com" {
+		t.Fatalf("expected original request host to remain intact, got %#v", latest.Requests[0])
+	}
+	if latest.Requests[0].Attempts != 1 {
+		t.Fatalf("expected original request attempts to remain 1, got %d", latest.Requests[0].Attempts)
+	}
+	if latest.Requests[0].PolicyAllowedCount != 1 {
+		t.Fatalf("expected original request policy-allowed count to remain 1, got %d", latest.Requests[0].PolicyAllowedCount)
+	}
+}
+
+func TestSandboxAccessSummaryReflectsPolicyCounters(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	sandbox := &Sandbox{manager: manager, id: "sandbox-a"}
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	manager.recordAccessEvent(accessEvent{
+		Time:          time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC),
+		SandboxID:     "sandbox-a",
+		TrafficMode:   TrafficModeTransparent,
+		Kind:          "http",
+		Host:          "example.com",
+		Port:          80,
+		Method:        "GET",
+		Path:          "/ok",
+		Allowed:       true,
+		StatusCode:    200,
+		Result:        "allowed",
+		PolicyAllowed: true,
+	})
+	manager.recordAccessEvent(accessEvent{
+		Time:             time.Date(2026, 3, 31, 12, 1, 0, 0, time.UTC),
+		SandboxID:        "sandbox-a",
+		TrafficMode:      TrafficModeTransparent,
+		Kind:             "http",
+		Host:             "example.com",
+		Port:             80,
+		Method:           "POST",
+		Path:             "/ok",
+		Allowed:          true,
+		StatusCode:       200,
+		Result:           "allowed",
+		PolicyAllowed:    false,
+		PolicyViolations: []string{"method POST is not allowed"},
+	})
+
+	summary := sandbox.AccessSummary()
+	if len(summary.Hosts) != 1 {
+		t.Fatalf("expected 1 host summary, got %d", len(summary.Hosts))
+	}
+
+	host := summary.Hosts[0]
+	if host.PolicyAllowedCount != 1 {
+		t.Fatalf("expected 1 policy-allowed host attempt, got %d", host.PolicyAllowedCount)
+	}
+	if host.PolicyDeniedCount != 1 {
+		t.Fatalf("expected 1 policy-denied host attempt, got %d", host.PolicyDeniedCount)
+	}
+	if host.PolicyViolations != 1 {
+		t.Fatalf("expected 1 host policy violation, got %d", host.PolicyViolations)
+	}
+	if len(summary.Requests) != 2 {
+		t.Fatalf("expected 2 request summaries, got %d", len(summary.Requests))
+	}
+
+	var post RequestAggregate
+	foundPost := false
+	for _, aggregate := range summary.Requests {
+		if aggregate.Kind == "http" && aggregate.Host == "example.com" && aggregate.Port == 80 && aggregate.Method == "POST" && aggregate.Path == "/ok" {
+			post = aggregate
+			foundPost = true
+			break
+		}
+	}
+	if !foundPost {
+		t.Fatalf("expected POST request summary in %#v", summary.Requests)
+	}
+	if post.Attempts != 1 {
+		t.Fatalf("expected 1 POST attempt, got %d", post.Attempts)
+	}
+	if post.AllowedCount != 1 {
+		t.Fatalf("expected 1 runtime-allowed POST attempt, got %d", post.AllowedCount)
+	}
+	if post.DeniedCount != 0 {
+		t.Fatalf("expected 0 runtime-denied POST attempts, got %d", post.DeniedCount)
+	}
+	if post.PolicyAllowedCount != 0 {
+		t.Fatalf("expected 0 policy-allowed POST attempts, got %d", post.PolicyAllowedCount)
+	}
+	if post.PolicyDeniedCount != 1 {
+		t.Fatalf("expected 1 policy-denied POST attempt, got %d", post.PolicyDeniedCount)
+	}
+}
+
 func TestRecordAccessEventUpdatesAttemptsAndLastResult(t *testing.T) {
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {

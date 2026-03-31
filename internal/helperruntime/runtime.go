@@ -71,20 +71,21 @@ func Run(ctx context.Context, cfg Config) error {
 // bridge adapts the runtime packages to the helper's control bridge and keeps
 // per-exec or per-connection state that is local to one helper process.
 type bridge struct {
-	runtimeBridge       *bridgepkg.RuntimeBridge
-	logger              *log.Logger
-	trafficMode         TrafficMode
-	dnsAddr             string
-	tcpAddr             string
-	rawTCPAddr          string
-	rawTCPAddrV6        string
-	mitmEnabled         bool
-	maxRequestBodyBytes int64
-	execMu              sync.Mutex
-	execStateMu         sync.Mutex
-	currentExec         *execState
-	rawTCPMu            sync.Mutex
-	rawTCPOrigins       map[string]rawTCPDestination
+	runtimeBridge         *bridgepkg.RuntimeBridge
+	logger                *log.Logger
+	trafficMode           TrafficMode
+	dnsAddr               string
+	tcpAddr               string
+	rawTCPAddr            string
+	rawTCPAddrV6          string
+	mitmEnabled           bool
+	maxRequestBodyBytes   int64
+	payloadSeccompBPFPath string
+	execMu                sync.Mutex
+	execStateMu           sync.Mutex
+	currentExec           *execState
+	rawTCPMu              sync.Mutex
+	rawTCPOrigins         map[string]rawTCPDestination
 }
 
 func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
@@ -241,10 +242,11 @@ func (b *bridge) sendExecError(id uint64, err error) {
 
 func (b *bridge) transparentRuntime() seccompnotify.RuntimeTargets {
 	return seccompnotify.RuntimeTargets{
-		DNSRoundTrip:       b.dnsRoundTrip,
-		RawTCPAddr:         b.rawTCPAddr,
-		RawTCPAddrV6:       b.rawTCPAddrV6,
-		RecordRawTCPOrigin: b.recordRawTCPOrigin,
+		DNSRoundTrip:          b.dnsRoundTrip,
+		RawTCPAddr:            b.rawTCPAddr,
+		RawTCPAddrV6:          b.rawTCPAddrV6,
+		RecordRawTCPOrigin:    b.recordRawTCPOrigin,
+		PayloadSeccompBPFPath: b.payloadSeccompBPFPath,
 	}
 }
 
@@ -325,6 +327,7 @@ func runSupervisedExec(runCtx context.Context, cmd *exec.Cmd, req helperproto.Ex
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	supervisor.SetPayloadSeccompBPFPath(runtimeTargets.PayloadSeccompBPFPath)
 	if err := prepareSupervisorExec(runCtx, supervisor, cmd); err != nil {
 		_ = supervisor.Close()
 		return nil, nil, nil, err

@@ -21,6 +21,7 @@ func managedNotifySyscallNames() []string {
 	names := []string{
 		"socket",
 		"connect",
+		"getpeername",
 		"sendto",
 		"recvfrom",
 		"sendmsg",
@@ -28,6 +29,7 @@ func managedNotifySyscallNames() []string {
 		"sendmmsg",
 		"recvmmsg",
 		"ppoll",
+		"ioctl",
 		"close",
 		"dup",
 		"dup3",

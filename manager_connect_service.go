@@ -2,42 +2,46 @@ package bbox
 
 import (
 	"context"
-	"net"
 	"net/http"
-	"strconv"
 
 	"github.com/moolen/bbox/internal/helperproto"
 )
 
 type managerConnectService struct {
-	record func(accessEvent)
+	record     func(accessEvent)
+	policyMode PolicyMode
 }
 
-func newManagerConnectService(record func(accessEvent)) *managerConnectService {
-	return &managerConnectService{record: record}
+func newManagerConnectService(record func(accessEvent), policyMode PolicyMode) *managerConnectService {
+	return &managerConnectService{
+		record:     record,
+		policyMode: normalizedPolicyModeOrDefault(policyMode),
+	}
 }
 
 func (s *managerConnectService) HandleConnectRequest(_ context.Context, policy *compiledPolicy, sandboxID string, req helperproto.ConnectRequest) *helperproto.ConnectResponse {
 	host, port := normalizeHostPort(req.Host, req.Port)
-	var err error
+	var eval policyEvaluation
 	if req.Transparent {
-		err = policy.CheckTransparentConnect(req.Host)
+		eval = policy.evaluateConnect(req.Host, req.Port, true)
 	} else {
-		hostport := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
-		err = policy.Check(http.MethodConnect, hostport, true)
+		eval = policy.evaluateConnect(req.Host, req.Port, false)
 	}
-	if err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       connectAccessKind(req.Transparent),
-			Host:       host,
-			Port:       port,
-			Method:     http.MethodConnect,
-			Allowed:    false,
-			StatusCode: http.StatusForbidden,
-			Result:     "denied",
-			Error:      err.Error(),
-		})
+	event := eventWithPolicyMetadata(accessEvent{
+		SandboxID: sandboxID,
+		Kind:      connectAccessKind(req.Transparent),
+		Host:      host,
+		Port:      port,
+		Method:    http.MethodConnect,
+	}, s.policyMode, eval)
+
+	if !eval.Allowed && s.policyMode != PolicyModeAudit {
+		err := eval.firstReasonAsError()
+		event.Allowed = false
+		event.StatusCode = http.StatusForbidden
+		event.Result = "denied"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.ConnectResponse{
 			StatusCode: http.StatusForbidden,
 			Message:    "connect request denied",
@@ -45,16 +49,10 @@ func (s *managerConnectService) HandleConnectRequest(_ context.Context, policy *
 		}
 	}
 
-	s.recordEvent(accessEvent{
-		SandboxID:  sandboxID,
-		Kind:       connectAccessKind(req.Transparent),
-		Host:       host,
-		Port:       port,
-		Method:     http.MethodConnect,
-		Allowed:    true,
-		StatusCode: http.StatusOK,
-		Result:     "allowed",
-	})
+	event.Allowed = true
+	event.StatusCode = http.StatusOK
+	event.Result = "allowed"
+	s.recordEvent(event)
 	return &helperproto.ConnectResponse{StatusCode: http.StatusOK}
 }
 

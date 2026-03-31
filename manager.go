@@ -20,6 +20,7 @@ func newProxyManager(policy *compiledPolicy) *ProxyManager {
 		resolver:   newRuntimeBinaryResolver(),
 		transport:  cloneDefaultTransport(),
 		listenAddr: helperruntime.DefaultProxyAddr,
+		policyMode: PolicyModeEnforce,
 	}
 }
 
@@ -74,10 +75,12 @@ func (m *ProxyManager) handleProxyRequest(ctx context.Context, sandboxID string,
 	if !ok {
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("sandbox %q is not registered", sandboxID)}
 	}
+	policyMode := m.policyModeForSandbox(sandboxID)
 	return newManagerProxyService(managerProxyConfig{
 		transport:            m.transport,
 		maxRequestBodyBytes:  m.requestBodyLimitBytes,
 		maxResponseBodyBytes: m.responseBodyLimitBytes,
+		policyMode:           policyMode,
 		record:               m.recordAccessEvent,
 	}).HandleProxyRequest(ctx, policy, sandboxID, req)
 }
@@ -90,7 +93,7 @@ func (m *ProxyManager) handleConnectRequest(ctx context.Context, sandboxID strin
 			Error:      fmt.Sprintf("sandbox %q is not registered", sandboxID),
 		}
 	}
-	return newManagerConnectService(m.recordAccessEvent).HandleConnectRequest(ctx, policy, sandboxID, req)
+	return newManagerConnectService(m.recordAccessEvent, m.policyModeForSandbox(sandboxID)).HandleConnectRequest(ctx, policy, sandboxID, req)
 }
 
 func (m *ProxyManager) handleDNSRequest(ctx context.Context, sandboxID string, req helperproto.DNSRequest) *helperproto.DNSResponse {
@@ -107,9 +110,14 @@ func (m *ProxyManager) handleDNSRequest(ctx context.Context, sandboxID string, r
 		hosts = []string{strings.TrimSpace(req.Host)}
 	}
 
+	policyMode := m.policyModeForSandbox(sandboxID)
+	hostEvaluations := make([]policyEvaluation, 0, len(hosts))
 	for _, host := range hosts {
-		if err := policy.CheckDNS(host); err != nil {
-			m.recordAccessEvent(accessEvent{
+		eval := policy.evaluateDNS(host)
+		hostEvaluations = append(hostEvaluations, eval)
+		if !eval.Allowed && policyMode != PolicyModeAudit {
+			err := eval.firstReasonAsError()
+			event := eventWithPolicyMetadata(accessEvent{
 				SandboxID:  sandboxID,
 				Kind:       "dns",
 				Host:       host,
@@ -118,15 +126,16 @@ func (m *ProxyManager) handleDNSRequest(ctx context.Context, sandboxID string, r
 				StatusCode: http.StatusForbidden,
 				Result:     "denied",
 				Error:      err.Error(),
-			})
+			}, policyMode, eval)
+			m.recordAccessEvent(event)
 			return &helperproto.DNSResponse{Error: "dns request denied: " + err.Error()}
 		}
 	}
 
 	payload, err := newManagerDNSService().HandleQueryWithNetwork(ctx, req.Network, req.Payload)
 	if err != nil {
-		for _, host := range hosts {
-			m.recordAccessEvent(accessEvent{
+		for i, host := range hosts {
+			event := eventWithPolicyMetadata(accessEvent{
 				SandboxID:  sandboxID,
 				Kind:       "dns",
 				Host:       host,
@@ -135,12 +144,13 @@ func (m *ProxyManager) handleDNSRequest(ctx context.Context, sandboxID string, r
 				StatusCode: http.StatusBadGateway,
 				Result:     "upstream_error",
 				Error:      err.Error(),
-			})
+			}, policyMode, hostEvaluations[i])
+			m.recordAccessEvent(event)
 		}
 		return &helperproto.DNSResponse{Error: err.Error()}
 	}
-	for _, host := range hosts {
-		m.recordAccessEvent(accessEvent{
+	for i, host := range hosts {
+		event := eventWithPolicyMetadata(accessEvent{
 			SandboxID:  sandboxID,
 			Kind:       "dns",
 			Host:       host,
@@ -148,7 +158,8 @@ func (m *ProxyManager) handleDNSRequest(ctx context.Context, sandboxID string, r
 			Allowed:    true,
 			StatusCode: http.StatusOK,
 			Result:     "allowed",
-		})
+		}, policyMode, hostEvaluations[i])
+		m.recordAccessEvent(event)
 	}
 	return &helperproto.DNSResponse{Payload: payload}
 }
@@ -161,10 +172,12 @@ func (m *ProxyManager) handleMITMRequest(ctx context.Context, sandboxID string, 
 			Error:      fmt.Sprintf("sandbox %q is not registered", sandboxID),
 		}
 	}
+	policyMode := m.policyModeForSandbox(sandboxID)
 	return newManagerProxyService(managerProxyConfig{
 		transport:            m.transport,
 		maxRequestBodyBytes:  m.requestBodyLimitBytes,
 		maxResponseBodyBytes: m.responseBodyLimitBytes,
+		policyMode:           policyMode,
 		record:               m.recordAccessEvent,
 	}).HandleMITMRequest(ctx, policy, sandboxID, req)
 }
@@ -200,6 +213,26 @@ var dialTunnelFn = func(ctx context.Context, host string, port int) (net.Conn, e
 
 func (m *ProxyManager) dialTunnel(ctx context.Context, host string, port int) (net.Conn, error) {
 	return dialTunnelFn(ctx, host, port)
+}
+
+func normalizedPolicyModeOrDefault(mode PolicyMode) PolicyMode {
+	normalized, err := normalizePolicyMode(mode)
+	if err != nil {
+		return PolicyModeEnforce
+	}
+	return normalized
+}
+
+func (m *ProxyManager) policyModeForSandbox(sandboxID string) PolicyMode {
+	if m == nil {
+		return PolicyModeEnforce
+	}
+	if sandboxID != "" {
+		if sandbox, ok := m.registry.Sandbox(sandboxID); ok && sandbox != nil {
+			return normalizedPolicyModeOrDefault(sandbox.policyMode)
+		}
+	}
+	return normalizedPolicyModeOrDefault(m.policyMode)
 }
 
 // CACertPEM returns the manager's MITM CA certificate in PEM form.

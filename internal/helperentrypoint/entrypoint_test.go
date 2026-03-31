@@ -21,6 +21,9 @@ func TestRunParsesHelperFlagsAndCallsRuntime(t *testing.T) {
 		if cfg.ProxyAddr != "127.0.0.1:31111" {
 			t.Fatalf("proxy addr = %q", cfg.ProxyAddr)
 		}
+		if cfg.PayloadSeccompBPFPath != "/app/bbox-payload-seccomp.bpf" {
+			t.Fatalf("payload seccomp bpf path = %q", cfg.PayloadSeccompBPFPath)
+		}
 		return nil
 	}
 	t.Cleanup(func() { runHelperRuntime = helperruntime.Run })
@@ -30,6 +33,7 @@ func TestRunParsesHelperFlagsAndCallsRuntime(t *testing.T) {
 		"--proxy-addr", "127.0.0.1:31111",
 		"--traffic-mode", "transparent",
 		"--mitm-enabled=true",
+		"--payload-seccomp-bpf", "/app/bbox-payload-seccomp.bpf",
 		"child-proxy",
 	}); err != nil {
 		t.Fatal(err)

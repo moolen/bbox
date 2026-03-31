@@ -293,6 +293,75 @@ func TestHandleProxyRequestRecordsDeniedAccess(t *testing.T) {
 	}
 }
 
+func TestHandleProxyRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %q", r.Method)
+		}
+		if r.URL.Path != "/audit" {
+			t.Fatalf("unexpected path: %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("audit ok"))
+	}))
+	defer server.Close()
+
+	logger := &stubAccessLogger{}
+	manager, err := NewProxyManager(ProxyOptions{
+		NetworkPolicy: NetworkPolicy{
+			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
+			AllowHTTPMethods:  []string{http.MethodGet},
+		},
+		PolicyMode:   PolicyModeAudit,
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	manager.transport = server.Client().Transport.(*http.Transport).Clone()
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleProxyRequest(t.Context(), "sandbox-a", helperproto.ProxyRequest{
+		Method: http.MethodPost,
+		URL:    server.URL + "/audit",
+		Header: make(http.Header),
+	})
+
+	if response == nil || response.StatusCode != http.StatusCreated {
+		t.Fatalf("unexpected proxy response: %#v", response)
+	}
+	if string(response.Body) != "audit ok" {
+		t.Fatalf("unexpected proxy response body: %q", string(response.Body))
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if !entry.Allowed {
+		t.Fatal("expected audit-mode request to be allowed at runtime")
+	}
+	if entry.Result != "allowed" {
+		t.Fatalf("expected allowed result, got %q", entry.Result)
+	}
+	if entry.PolicyMode != PolicyModeAudit {
+		t.Fatalf("expected policy mode audit, got %q", entry.PolicyMode)
+	}
+	if entry.PolicyAllowed {
+		t.Fatal("expected policy evaluation to reject POST request")
+	}
+	if len(entry.PolicyViolations) == 0 {
+		t.Fatal("expected policy violations to be recorded")
+	}
+	if !strings.Contains(entry.PolicyViolations[0], "method POST is not allowed") {
+		t.Fatalf("expected method denial, got %#v", entry.PolicyViolations)
+	}
+}
+
 func TestHandleProxyRequestRecordsUpstreamErrorAccess(t *testing.T) {
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
@@ -514,6 +583,112 @@ func TestHandleConnectRequestRecordsDeniedAccess(t *testing.T) {
 	}
 }
 
+func TestHandleConnectRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager, err := NewProxyManager(ProxyOptions{
+		NetworkPolicy: NetworkPolicy{
+			AllowHostPatterns: []string{`^example[.]com$`},
+		},
+		PolicyMode:   PolicyModeAudit,
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleConnectRequest(t.Context(), "sandbox-a", helperproto.ConnectRequest{
+		Host: "example.com",
+		Port: 443,
+	})
+
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected connect response: %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "connect" {
+		t.Fatalf("expected connect access kind, got %q", entry.Kind)
+	}
+	if !entry.Allowed {
+		t.Fatal("expected audit-mode connect to be allowed at runtime")
+	}
+	if entry.Result != "allowed" {
+		t.Fatalf("expected allowed result, got %q", entry.Result)
+	}
+	if entry.PolicyMode != PolicyModeAudit {
+		t.Fatalf("expected policy mode audit, got %q", entry.PolicyMode)
+	}
+	if entry.PolicyAllowed {
+		t.Fatal("expected CONNECT policy evaluation to be denied")
+	}
+	if len(entry.PolicyViolations) == 0 {
+		t.Fatal("expected policy violations to be recorded")
+	}
+	if !strings.Contains(entry.PolicyViolations[0], "CONNECT requests are not allowed") {
+		t.Fatalf("expected CONNECT denial reason, got %#v", entry.PolicyViolations)
+	}
+}
+
+func TestHandleConnectRequestAuditModeAllowsTransparentPolicyViolationAndRecordsIt(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager, err := NewProxyManager(ProxyOptions{
+		NetworkPolicy: NetworkPolicy{
+			AllowHostPatterns: []string{`^allowed[.]example$`},
+		},
+		PolicyMode:   PolicyModeAudit,
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleConnectRequest(t.Context(), "sandbox-a", helperproto.ConnectRequest{
+		Host:        "blocked.example",
+		Port:        443,
+		Transparent: true,
+	})
+
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected transparent connect response: %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "transparent_connect" {
+		t.Fatalf("expected transparent_connect access kind, got %q", entry.Kind)
+	}
+	if !entry.Allowed {
+		t.Fatal("expected audit-mode transparent connect to be allowed at runtime")
+	}
+	if entry.PolicyMode != PolicyModeAudit {
+		t.Fatalf("expected policy mode audit, got %q", entry.PolicyMode)
+	}
+	if entry.PolicyAllowed {
+		t.Fatal("expected transparent CONNECT policy evaluation to be denied")
+	}
+	if len(entry.PolicyViolations) == 0 {
+		t.Fatal("expected policy violations to be recorded")
+	}
+	if !strings.Contains(entry.PolicyViolations[0], "hostname blocked.example is not allowed by policy") {
+		t.Fatalf("expected transparent CONNECT denial reason, got %#v", entry.PolicyViolations)
+	}
+}
+
 func TestHandleMITMRequestRecordsAccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/mitm" {
@@ -595,6 +770,84 @@ func TestHandleMITMRequestRecordsAccess(t *testing.T) {
 	}
 	if mitmEntry.Result != "allowed" {
 		t.Fatalf("expected allowed mitm result, got %q", mitmEntry.Result)
+	}
+}
+
+func TestHandleMITMRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %q", r.Method)
+		}
+		if r.URL.Path != "/audit" {
+			t.Fatalf("unexpected path: %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("mitm audit ok"))
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	logger := &stubAccessLogger{}
+	manager, err := NewProxyManager(ProxyOptions{
+		NetworkPolicy: NetworkPolicy{
+			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
+			AllowHTTPMethods:  []string{http.MethodGet},
+		},
+		PolicyMode:   PolicyModeAudit,
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	manager.transport = server.Client().Transport.(*http.Transport).Clone()
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleMITMRequest(t.Context(), "sandbox-a", helperproto.MITMRequest{
+		Scheme:    serverURL.Scheme,
+		Authority: serverURL.Host,
+		Host:      serverURL.Hostname(),
+		Method:    http.MethodPost,
+		Path:      "/audit",
+		Proto:     "HTTP/1.1",
+		Header:    make(http.Header),
+	})
+
+	if response == nil || response.StatusCode != http.StatusAccepted {
+		t.Fatalf("unexpected MITM response: %#v", response)
+	}
+	if string(response.Body) != "mitm audit ok" {
+		t.Fatalf("unexpected MITM response body: %q", string(response.Body))
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if !entry.Allowed {
+		t.Fatal("expected audit-mode MITM request to be allowed at runtime")
+	}
+	if entry.Result != "allowed" {
+		t.Fatalf("expected allowed result, got %q", entry.Result)
+	}
+	if entry.PolicyMode != PolicyModeAudit {
+		t.Fatalf("expected policy mode audit, got %q", entry.PolicyMode)
+	}
+	if entry.PolicyAllowed {
+		t.Fatal("expected MITM policy evaluation to reject POST request")
+	}
+	if len(entry.PolicyViolations) == 0 {
+		t.Fatal("expected policy violations to be recorded")
+	}
+	if !strings.Contains(entry.PolicyViolations[0], "method POST is not allowed") {
+		t.Fatalf("expected method denial, got %#v", entry.PolicyViolations)
 	}
 }
 
@@ -874,5 +1127,76 @@ func TestLoggerFailureDoesNotBreakRequestConnect(t *testing.T) {
 	}
 	if logger.calls != 1 {
 		t.Fatalf("expected logger to be called once, got %d", logger.calls)
+	}
+}
+
+func TestHandleDNSRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager, err := NewProxyManager(ProxyOptions{
+		NetworkPolicy: NetworkPolicy{
+			AllowHostPatterns: []string{`^allowed[.]example[.]com$`},
+		},
+		PolicyMode:   PolicyModeAudit,
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	originalNewManagerDNSService := newManagerDNSService
+	stubErr := errors.New("upstream unavailable")
+	newManagerDNSService = func() *managerDNSService {
+		return &managerDNSService{
+			dialContext: func(context.Context, string, string) (net.Conn, error) {
+				return nil, stubErr
+			},
+			servers: []string{"127.0.0.1:53"},
+		}
+	}
+	t.Cleanup(func() {
+		newManagerDNSService = originalNewManagerDNSService
+	})
+
+	response := manager.handleDNSRequest(t.Context(), "sandbox-a", helperproto.DNSRequest{
+		Network: "udp",
+		Payload: mustDNSQuery(t, 1, "denied.example.com."),
+	})
+
+	if response == nil || !strings.Contains(response.Error, stubErr.Error()) {
+		t.Fatalf("unexpected DNS response: %#v", response)
+	}
+	if strings.Contains(response.Error, "dns request denied") {
+		t.Fatalf("expected audit-mode DNS request to reach upstream, got %q", response.Error)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "dns" {
+		t.Fatalf("expected dns access kind, got %q", entry.Kind)
+	}
+	if !entry.Allowed {
+		t.Fatal("expected audit-mode DNS request to be allowed at runtime")
+	}
+	if entry.Result != "upstream_error" {
+		t.Fatalf("expected upstream_error result, got %q", entry.Result)
+	}
+	if entry.PolicyMode != PolicyModeAudit {
+		t.Fatalf("expected policy mode audit, got %q", entry.PolicyMode)
+	}
+	if entry.PolicyAllowed {
+		t.Fatal("expected DNS policy evaluation to be denied")
+	}
+	if len(entry.PolicyViolations) == 0 {
+		t.Fatal("expected policy violations to be recorded")
+	}
+	if !strings.Contains(entry.PolicyViolations[0], "hostname denied.example.com is not allowed by policy") {
+		t.Fatalf("expected DNS denial reason, got %#v", entry.PolicyViolations)
 	}
 }

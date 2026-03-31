@@ -14,6 +14,7 @@ import (
 
 	"github.com/moolen/bbox"
 	"github.com/moolen/bbox/internal/helperentrypoint"
+	"github.com/moolen/bbox/internal/launcherentrypoint"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -38,13 +39,24 @@ type cliOptions struct {
 	allowConnectPorts   []string
 	allowPaths          []string
 	denyPaths           []string
+	policyMode          string
+	reportPolicy        bool
+	reportAccess        bool
+	reportRequests      bool
+	accessLog           string
+	audit               bool
 }
 
 type runConfig struct {
-	manager     bbox.ProxyOptions
-	sandbox     bbox.SandboxOptions
-	argv        []string
-	printPolicy bool
+	manager       bbox.ProxyOptions
+	sandbox       bbox.SandboxOptions
+	argv          []string
+	printPolicy   bool
+	policyMode    bbox.PolicyMode
+	reporting     bbox.ReportingOptions
+	accessLogMode string
+	stdout        io.Writer
+	stderr        io.Writer
 }
 
 type commandDeps struct {
@@ -70,7 +82,7 @@ func main() {
 		getwd:   os.Getwd,
 		environ: os.Environ,
 		run:     runSandbox,
-	}, helperentrypoint.Run)
+	}, helperentrypoint.Run, launcherentrypoint.Run)
 	if err != nil {
 		var exitErr exitCodeError
 		if errors.As(err, &exitErr) {
@@ -81,9 +93,12 @@ func main() {
 	}
 }
 
-func dispatch(args []string, deps commandDeps, runHelper func([]string) error) error {
+func dispatch(args []string, deps commandDeps, runHelper func([]string) error, runLauncher func([]string) error) error {
 	if runHelper != nil && len(args) > 0 && args[0] == "internal-helper" {
 		return runHelper(args[1:])
+	}
+	if runLauncher != nil && len(args) > 0 && args[0] == "internal-launcher" {
+		return runLauncher(args[1:])
 	}
 
 	cmd := newRootCommand(deps)
@@ -130,6 +145,8 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cfg.stdout = deps.stdout
+			cfg.stderr = deps.stderr
 			if cfg.printPolicy {
 				if err := printPolicy(deps.stdout, cfg); err != nil {
 					return err
@@ -160,6 +177,12 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 	flags.StringArrayVar(&opts.allowConnectPorts, "allow-connect-port", nil, "allowed CONNECT destination port or range")
 	flags.StringArrayVar(&opts.allowPaths, "allow-path", nil, "allowed request path regex")
 	flags.StringArrayVar(&opts.denyPaths, "deny-path", nil, "denied request path regex")
+	flags.StringVar(&opts.policyMode, "policy-mode", "", "policy mode: enforce or audit")
+	flags.BoolVar(&opts.reportPolicy, "report-policy-violations", false, "render a policy-violations summary after execution")
+	flags.BoolVar(&opts.reportAccess, "report-access-summary", false, "render a host access summary after execution")
+	flags.BoolVar(&opts.reportRequests, "report-request-summary", false, "render a request summary after execution")
+	flags.StringVar(&opts.accessLog, "access-log", "json", "access log mode: json or off")
+	flags.BoolVar(&opts.audit, "audit", false, "shorthand for --policy-mode audit plus summary reporting")
 
 	return cmd
 }
@@ -243,10 +266,22 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 		}
 	}
 
+	policyMode, err := effectivePolicyMode(opts)
+	if err != nil {
+		return runConfig{}, err
+	}
+	reporting := effectiveReportingOptions(opts)
+	accessLogMode, err := normalizeAccessLogMode(opts.accessLog)
+	if err != nil {
+		return runConfig{}, err
+	}
+
 	return runConfig{
 		manager: bbox.ProxyOptions{
 			MaxRequestBodyBytes: opts.maxRequestBodyBytes,
 			MITM:                bbox.MITMOptions{Enabled: opts.mitm},
+			PolicyMode:          policyMode,
+			Reporting:           reporting,
 		},
 		sandbox: bbox.SandboxOptions{
 			Name:        strings.TrimSpace(opts.name),
@@ -265,9 +300,55 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 			},
 			WorkDir: workDir,
 		},
-		argv:        append([]string(nil), payload...),
-		printPolicy: opts.printPolicy,
+		argv:          append([]string(nil), payload...),
+		printPolicy:   opts.printPolicy,
+		policyMode:    policyMode,
+		reporting:     reporting,
+		accessLogMode: accessLogMode,
 	}, nil
+}
+
+func effectivePolicyMode(opts cliOptions) (bbox.PolicyMode, error) {
+	if opts.audit {
+		return bbox.PolicyModeAudit, nil
+	}
+
+	mode := bbox.PolicyMode(strings.ToLower(strings.TrimSpace(opts.policyMode)))
+	switch mode {
+	case "":
+		return bbox.PolicyModeEnforce, nil
+	case bbox.PolicyModeEnforce, bbox.PolicyModeAudit:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported policy mode %q", opts.policyMode)
+	}
+}
+
+func effectiveReportingOptions(opts cliOptions) bbox.ReportingOptions {
+	reporting := bbox.ReportingOptions{
+		PolicyViolations: opts.reportPolicy,
+		AccessSummary:    opts.reportAccess,
+		RequestSummary:   opts.reportRequests,
+	}
+	if opts.audit {
+		reporting.PolicyViolations = true
+		reporting.AccessSummary = true
+		reporting.RequestSummary = true
+	}
+	return reporting
+}
+
+func normalizeAccessLogMode(mode string) (string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "json"
+	}
+	switch mode {
+	case "json", "off":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported access log mode %q", mode)
+	}
 }
 
 func buildSandboxEnv(opts cliOptions, environ []string) ([]string, error) {
@@ -437,6 +518,18 @@ func runSandbox(cfg runConfig) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	stdout := cfg.stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := cfg.stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	accessLogger := newCLIAccessLogger(stdout, cfg.accessLogMode == "json")
+	cfg.manager.AccessLogger = accessLogger
+
 	manager, err := bbox.NewProxyManager(cfg.manager)
 	if err != nil {
 		return err
@@ -449,7 +542,7 @@ func runSandbox(cfg runConfig) error {
 	}
 	defer sandbox.Close()
 
-	runOpts, cleanup, err := buildInteractiveRunOptions()
+	runOpts, cleanup, err := buildInteractiveRunOptions(stdout, stderr)
 	if err != nil {
 		return err
 	}
@@ -459,18 +552,27 @@ func runSandbox(cfg runConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := renderRunSummary(stderr, sandbox.AccessSummary(), accessLogger.Entries(), cfg.reporting); err != nil {
+		return err
+	}
 	if result != nil && result.ExitCode != 0 {
 		return exitCodeError{code: result.ExitCode}
 	}
 	return nil
 }
 
-func buildInteractiveRunOptions() (bbox.RunOptions, func(), error) {
+func buildInteractiveRunOptions(stdout, stderr io.Writer) (bbox.RunOptions, func(), error) {
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
 	opts := bbox.RunOptions{
 		Interactive: true,
 		Stdin:       os.Stdin,
-		Stdout:      os.Stdout,
-		Stderr:      os.Stderr,
+		Stdout:      stdout,
+		Stderr:      stderr,
 	}
 
 	fd := int(os.Stdin.Fd())

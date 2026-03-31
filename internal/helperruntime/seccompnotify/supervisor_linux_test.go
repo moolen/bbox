@@ -41,6 +41,36 @@ func TestClassifyManagedSocketBypassesICMPDatagramProtocols(t *testing.T) {
 	}
 }
 
+func TestClassifyManagedSocketBypassesUnsupportedFamilies(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		family int
+	}{
+		{name: "unix", family: unix.AF_UNIX},
+		{name: "netlink", family: unix.AF_NETLINK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, managed, err := classifyManagedSocket(
+				RuntimeTargets{RawTCPAddr: "127.0.0.1:39001"},
+				tc.family,
+				unix.SOCK_DGRAM,
+				0,
+			)
+			if err != nil {
+				t.Fatalf("classifyManagedSocket() error = %v", err)
+			}
+			if managed {
+				t.Fatal("expected unsupported socket family to bypass seccomp management")
+			}
+			if kind != KindUnknown {
+				t.Fatalf("unexpected socket kind: got %q want %q", kind, KindUnknown)
+			}
+		})
+	}
+}
+
 func TestClassifyManagedSocketRequiresDNSRoundTripForUDP(t *testing.T) {
 	t.Parallel()
 
@@ -479,7 +509,7 @@ func TestSupervisorCloseRemovesManagedFDState(t *testing.T) {
 	}
 }
 
-func TestProcessNotificationRejectsUnsupportedSocketFamily(t *testing.T) {
+func TestProcessNotificationBypassesUnsupportedSocketFamily(t *testing.T) {
 	s, err := NewSupervisor(RuntimeTargets{})
 	if err != nil {
 		t.Fatalf("new supervisor: %v", err)
@@ -495,8 +525,8 @@ func TestProcessNotificationRejectsUnsupportedSocketFamily(t *testing.T) {
 	if resp == nil {
 		t.Fatal("processNotification() response = nil")
 	}
-	if resp.Flags == seccomp.NotifRespFlagContinue || resp.Error == 0 {
-		t.Fatalf("processNotification() = %#v, want fail-closed error", resp)
+	if resp.Flags != seccomp.NotifRespFlagContinue || resp.Error != 0 {
+		t.Fatalf("processNotification() = %#v, want kernel continue", resp)
 	}
 }
 

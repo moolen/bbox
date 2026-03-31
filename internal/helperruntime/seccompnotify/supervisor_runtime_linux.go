@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -20,6 +21,8 @@ import (
 const (
 	launcherSockFDEnv = "BBOX_SECCOMP_NOTIFY_SOCK_FD"
 	maxSockaddrBytes  = 128
+	sandboxBBoxPath   = "/app/bbox"
+	ioctlFIONREAD     = 0x541B
 )
 
 var (
@@ -27,6 +30,10 @@ var (
 	launcherFactory   = func() (embeddedlauncher.ExecTarget, error) {
 		return embeddedlauncher.OpenExecTarget()
 	}
+	launcherBootstrapFactory = func() (string, []string, error) {
+		return sandboxBBoxPath, []string{"internal-launcher"}, nil
+	}
+	notificationTraceHook func(*seccomp.ScmpNotifReq)
 )
 
 func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
@@ -84,8 +91,44 @@ func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
 
 	launcherPath := target.Path
 	if target.File != nil {
-		launcherPath = target.PathForChildFD(3 + len(cmd.ExtraFiles))
+		bootstrapPath, bootstrapArgs, err := resolveLauncherBootstrap()
+		if err != nil {
+			_ = closeTarget()
+			_ = parent.Close()
+			_ = child.Close()
+			return err
+		}
+
+		launcherFD := 3 + len(cmd.ExtraFiles)
 		cmd.ExtraFiles = append(cmd.ExtraFiles, target.File)
+		launcherPath = bootstrapPath
+		launcherArgv := []string{"bbox-seccomp-launcher"}
+		if s.payloadSeccompBPFPath != "" {
+			launcherArgv = append(launcherArgv, "--payload-seccomp-bpf", s.payloadSeccompBPFPath)
+		}
+		launcherArgv = append(launcherArgv, target.Args...)
+		launcherArgv = append(launcherArgv, targetPath, "--")
+		launcherArgv = append(launcherArgv, originalArgs...)
+		cmd.Args = append(
+			append(
+				append([]string{launcherPath}, bootstrapArgs...),
+				"--launcher-fd", strconv.Itoa(launcherFD), "--",
+			),
+			launcherArgv...,
+		)
+	} else {
+		launcherArgs := append([]string(nil), target.Args...)
+		if s.payloadSeccompBPFPath != "" {
+			launcherArgs = append(launcherArgs, "--payload-seccomp-bpf", s.payloadSeccompBPFPath)
+		}
+		cmd.Args = append(
+			append(
+				append([]string{launcherPath}, launcherArgs...),
+				targetPath,
+				"--",
+			),
+			originalArgs...,
+		)
 	}
 	extraFD := 3 + len(cmd.ExtraFiles)
 	env = append(env,
@@ -93,14 +136,6 @@ func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
 	)
 
 	cmd.Path = launcherPath
-	cmd.Args = append(
-		append(
-			append([]string{launcherPath}, target.Args...),
-			targetPath,
-			"--",
-		),
-		originalArgs...,
-	)
 	cmd.Env = env
 	cmd.ExtraFiles = append(cmd.ExtraFiles, child)
 
@@ -172,6 +207,16 @@ func resolveLauncherTarget() (embeddedlauncher.ExecTarget, error) {
 	launcherFactoryMu.Unlock()
 	if factory == nil {
 		return embeddedlauncher.ExecTarget{}, fmt.Errorf("launcher factory is not configured")
+	}
+	return factory()
+}
+
+func resolveLauncherBootstrap() (string, []string, error) {
+	launcherFactoryMu.Lock()
+	factory := launcherBootstrapFactory
+	launcherFactoryMu.Unlock()
+	if factory == nil {
+		return "", nil, fmt.Errorf("launcher bootstrap factory is not configured")
 	}
 	return factory()
 }
@@ -274,6 +319,9 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 	if req == nil {
 		return errorResp(0, unix.EINVAL)
 	}
+	if notificationTraceHook != nil {
+		notificationTraceHook(req)
+	}
 
 	switch int(req.Data.Syscall) {
 	case unix.SYS_SOCKET:
@@ -287,6 +335,15 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		return successResp(req.ID, uint64(fd))
 	case unix.SYS_CONNECT:
 		handled, err := s.redirectConnect(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, 0)
+	case unix.SYS_GETPEERNAME:
+		handled, err := s.emulateGetpeername(pid, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -357,6 +414,15 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 			return continueResp(req.ID)
 		}
 		return successResp(req.ID, uint64(n))
+	case unix.SYS_IOCTL:
+		handled, err := s.emulateDNSIoctl(pid, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, 0)
 	case unix.SYS_CLOSE:
 		fd := int(req.Data.Args[0])
 		if fd >= 0 {
@@ -463,6 +529,12 @@ func (s *Supervisor) redirectConnect(pid int, req *seccomp.ScmpNotifReq) (bool, 
 	if err != nil {
 		return false, err
 	}
+	if decoded.Family == unix.AF_UNSPEC {
+		if state.Kind == KindUDP {
+			return false, s.handleDNSDisconnect(childFD, state)
+		}
+		return false, nil
+	}
 
 	switch state.Kind {
 	case KindTCP:
@@ -481,6 +553,52 @@ func (s *Supervisor) redirectConnect(pid int, req *seccomp.ScmpNotifReq) (bool, 
 	}
 }
 
+func (s *Supervisor) emulateGetpeername(pid int, req *seccomp.ScmpNotifReq) (bool, error) {
+	if s == nil || req == nil {
+		return true, unix.EINVAL
+	}
+
+	childFD := int(req.Data.Args[0])
+	if childFD < 0 {
+		return true, unix.EBADF
+	}
+	state, ok := s.registry.Lookup(childFD)
+	if !ok {
+		return false, nil
+	}
+	if state.OriginalHost == "" || state.OriginalPort <= 0 {
+		return true, unix.ENOTCONN
+	}
+
+	return true, writeSockaddr(pid, uintptr(req.Data.Args[1]), uintptr(req.Data.Args[2]), DecodedSockaddr{
+		Family: peernameFamily(state.OriginalHost, state.Family),
+		Host:   state.OriginalHost,
+		Port:   state.OriginalPort,
+	})
+}
+
+func (s *Supervisor) emulateDNSIoctl(pid int, req *seccomp.ScmpNotifReq) (bool, error) {
+	state, ok := s.lookupManagedUDPSocket(req)
+	if !ok {
+		return false, nil
+	}
+
+	if uintptr(req.Data.Args[1]) != ioctlFIONREAD {
+		return false, nil
+	}
+
+	argPtr := uintptr(req.Data.Args[2])
+	if argPtr == 0 {
+		return true, unix.EFAULT
+	}
+
+	pendingBytes := int32(0)
+	if len(state.PendingDNSResponses) > 0 {
+		pendingBytes = int32(len(state.PendingDNSResponses[0].Payload))
+	}
+	return true, writeProcessValue(pid, argPtr, pendingBytes)
+}
+
 func (s *Supervisor) handleDNSConnect(childFD int, state SocketState, destination DecodedSockaddr) error {
 	if s == nil {
 		return unix.EINVAL
@@ -493,7 +611,6 @@ func (s *Supervisor) handleDNSConnect(childFD int, state SocketState, destinatio
 	state.DNSManaged = true
 	state.ConnectedHost = destination.Host
 	state.ConnectedPort = destination.Port
-	state.PendingDNSResponses = nil
 	state.OriginalHost = destination.Host
 	state.OriginalPort = destination.Port
 	state.RedirectAddr = ""
@@ -501,9 +618,25 @@ func (s *Supervisor) handleDNSConnect(childFD int, state SocketState, destinatio
 	return nil
 }
 
+func (s *Supervisor) handleDNSDisconnect(childFD int, state SocketState) error {
+	if s == nil {
+		return unix.EINVAL
+	}
+
+	state.ChildFD = childFD
+	state.DNSManaged = false
+	state.ConnectedHost = ""
+	state.ConnectedPort = 0
+	state.OriginalHost = ""
+	state.OriginalPort = 0
+	state.RedirectAddr = ""
+	s.registry.Insert(state)
+	return nil
+}
+
 func classifyManagedSocket(targets RuntimeTargets, family, socketType, protocol int) (SocketKind, bool, error) {
 	if !isManagedSocketFamily(family) {
-		return KindUnknown, false, unix.EAFNOSUPPORT
+		return KindUnknown, false, nil
 	}
 
 	switch baseSocketType(socketType) {

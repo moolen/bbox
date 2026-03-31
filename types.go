@@ -15,18 +15,21 @@ type AccessLogger interface {
 
 // AccessLogEntry describes a single access attempt.
 type AccessLogEntry struct {
-	Time        time.Time
-	SandboxID   string
-	TrafficMode TrafficMode
-	Kind        string
-	Host        string
-	Port        int
-	Method      string
-	Path        string
-	Allowed     bool
-	StatusCode  int
-	Result      string
-	Error       string
+	Time             time.Time
+	SandboxID        string
+	TrafficMode      TrafficMode
+	Kind             string
+	Host             string
+	Port             int
+	Method           string
+	Path             string
+	Allowed          bool
+	StatusCode       int
+	Result           string
+	Error            string
+	PolicyMode       PolicyMode
+	PolicyAllowed    bool
+	PolicyViolations []string
 }
 
 // AccessedDomain aggregates access attempts for a host.
@@ -43,6 +46,62 @@ type AccessedDomain struct {
 	MITMSeen    bool
 }
 
+// PolicyMode controls whether policy decisions are enforced or audited.
+type PolicyMode string
+
+const (
+	PolicyModeEnforce PolicyMode = "enforce"
+	PolicyModeAudit   PolicyMode = "audit"
+)
+
+// ReportingOptions controls optional policy reporting outputs.
+type ReportingOptions struct {
+	PolicyViolations bool
+	AccessSummary    bool
+	RequestSummary   bool
+}
+
+// AccessSummary contains aggregate access snapshots.
+type AccessSummary struct {
+	Hosts    []AccessedHostSummary
+	Requests []RequestAggregate
+}
+
+// AccessedHostSummary aggregates access attempts for a host.
+type AccessedHostSummary struct {
+	Host               string
+	TrafficMode        TrafficMode
+	Attempts           int
+	LastResult         string
+	LastError          string
+	LastSeenAt         time.Time
+	LastPort           int
+	ConnectSeen        bool
+	HTTPSeen           bool
+	MITMSeen           bool
+	DNSSeen            bool
+	PolicyViolations   int
+	PolicyAllowedCount int
+	PolicyDeniedCount  int
+}
+
+// RequestAggregate is a request-level aggregate reporting row.
+type RequestAggregate struct {
+	Kind               string
+	Host               string
+	Port               int
+	Method             string
+	Path               string
+	Attempts           int
+	AllowedCount       int
+	DeniedCount        int
+	PolicyAllowedCount int
+	PolicyDeniedCount  int
+	LastSeenAt         time.Time
+	LastStatusCode     int
+	LastError          string
+}
+
 type ProxyOptions struct {
 	// ListenAddr is the sandbox-local proxy listen address passed to each helper.
 	// If empty, bbox uses 127.0.0.1:31111. Use 127.0.0.1:0 to request an
@@ -57,6 +116,10 @@ type ProxyOptions struct {
 	// NetworkPolicy is the default policy inherited by sandboxes that do not
 	// supply their own SandboxOptions.Policy.
 	NetworkPolicy NetworkPolicy
+	// PolicyMode configures default manager policy behavior for sandboxes.
+	PolicyMode PolicyMode
+	// Reporting configures default manager reporting behavior for sandboxes.
+	Reporting ReportingOptions
 	// MITM configures proxy-wide man-in-the-middle handling.
 	MITM MITMOptions
 	// AccessLogger receives per-request access log entries.
@@ -103,6 +166,10 @@ type SandboxOptions struct {
 	TrafficMode TrafficMode
 	// Policy overrides the manager default for this sandbox when non-zero.
 	Policy NetworkPolicy
+	// PolicyMode overrides the manager default policy mode when non-zero.
+	PolicyMode PolicyMode
+	// Reporting overrides the manager default reporting behavior when non-zero.
+	Reporting ReportingOptions
 	// WorkDir is the default working directory for sandbox.Run.
 	WorkDir string
 	// Seccomp configures seccomp filtering for this sandbox. The zero value
@@ -201,6 +268,8 @@ type ProxyManager struct {
 	requestBodyLimitBytes  int64
 	responseBodyLimitBytes int64
 	mitm                   MITMOptions
+	policyMode             PolicyMode
+	reporting              ReportingOptions
 	mitmCA                 *mitmCA
 	caCertPEM              []byte
 	nextSandboxID          atomic.Uint64

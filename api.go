@@ -57,6 +57,10 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	if err != nil {
 		return nil, err
 	}
+	policyMode, err := normalizePolicyMode(opts.PolicyMode)
+	if err != nil {
+		return nil, err
+	}
 	if opts.MaxRequestBodyBytes < 0 {
 		return nil, fmt.Errorf("max request body bytes must be non-negative")
 	}
@@ -77,6 +81,8 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	manager.requestBodyLimitBytes = effectiveRequestBodyLimit(opts)
 	manager.responseBodyLimitBytes = effectiveResponseBodyLimit(opts)
 	manager.mitm = opts.MITM
+	manager.policyMode = policyMode
+	manager.reporting = opts.Reporting
 	if isNilAccessLogger(opts.AccessLogger) {
 		manager.accessLogger = sharedStdoutAccessLogger
 	} else {
@@ -104,4 +110,15 @@ func effectiveResponseBodyLimit(opts ProxyOptions) int64 {
 		return opts.MaxResponseBodyBytes
 	}
 	return defaultMaxResponseBodyBytes
+}
+
+func normalizePolicyMode(mode PolicyMode) (PolicyMode, error) {
+	switch mode {
+	case "":
+		return PolicyModeEnforce, nil
+	case PolicyModeEnforce, PolicyModeAudit:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid policy mode %q", mode)
+	}
 }

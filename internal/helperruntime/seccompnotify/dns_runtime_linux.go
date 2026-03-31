@@ -581,6 +581,33 @@ func writeSockaddr(pid int, addrPtr, addrLenPtr uintptr, source DecodedSockaddr)
 
 func encodeRawSockaddr(source DecodedSockaddr) ([]byte, int, error) {
 	ip := net.ParseIP(source.Host)
+	if ip == nil {
+		return nil, 0, unix.EINVAL
+	}
+
+	switch source.Family {
+	case unix.AF_INET:
+		ip4 := ip.To4()
+		if ip4 == nil {
+			return nil, 0, unix.EAFNOSUPPORT
+		}
+		raw := make([]byte, unix.SizeofSockaddrInet4)
+		putNativeUint16(raw[0:2], uint16(unix.AF_INET))
+		putBigEndianUint16(raw[2:4], uint16(source.Port))
+		copy(raw[4:8], ip4)
+		return raw, len(raw), nil
+	case unix.AF_INET6:
+		ip6 := ip.To16()
+		if ip6 == nil {
+			return nil, 0, unix.EAFNOSUPPORT
+		}
+		raw := make([]byte, unix.SizeofSockaddrInet6)
+		putNativeUint16(raw[0:2], uint16(unix.AF_INET6))
+		putBigEndianUint16(raw[2:4], uint16(source.Port))
+		copy(raw[8:24], ip6)
+		return raw, len(raw), nil
+	}
+
 	if ip4 := ip.To4(); ip4 != nil {
 		raw := make([]byte, unix.SizeofSockaddrInet4)
 		putNativeUint16(raw[0:2], uint16(unix.AF_INET))

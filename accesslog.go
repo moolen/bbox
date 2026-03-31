@@ -9,39 +9,52 @@ import (
 )
 
 type accessEvent struct {
-	Time        time.Time
-	SandboxID   string
-	TrafficMode TrafficMode
-	Kind        string
-	Host        string
-	Port        int
-	Method      string
-	Path        string
-	Allowed     bool
-	StatusCode  int
-	Result      string
-	Error       string
+	Time             time.Time
+	SandboxID        string
+	TrafficMode      TrafficMode
+	Kind             string
+	Host             string
+	Port             int
+	Method           string
+	Path             string
+	Allowed          bool
+	StatusCode       int
+	Result           string
+	Error            string
+	PolicyMode       PolicyMode
+	PolicyAllowed    bool
+	PolicyViolations []string
 }
 
 func (e accessEvent) toAccessLogEntry() AccessLogEntry {
 	return AccessLogEntry{
-		Time:        e.Time,
-		SandboxID:   e.SandboxID,
-		TrafficMode: e.TrafficMode,
-		Kind:        e.Kind,
-		Host:        e.Host,
-		Port:        e.Port,
-		Method:      e.Method,
-		Path:        e.Path,
-		Allowed:     e.Allowed,
-		StatusCode:  e.StatusCode,
-		Result:      e.Result,
-		Error:       e.Error,
+		Time:             e.Time,
+		SandboxID:        e.SandboxID,
+		TrafficMode:      e.TrafficMode,
+		Kind:             e.Kind,
+		Host:             e.Host,
+		Port:             e.Port,
+		Method:           e.Method,
+		Path:             e.Path,
+		Allowed:          e.Allowed,
+		StatusCode:       e.StatusCode,
+		Result:           e.Result,
+		Error:            e.Error,
+		PolicyMode:       e.PolicyMode,
+		PolicyAllowed:    e.PolicyAllowed,
+		PolicyViolations: append([]string(nil), e.PolicyViolations...),
 	}
 }
 
+func eventWithPolicyMetadata(event accessEvent, mode PolicyMode, eval policyEvaluation) accessEvent {
+	event.PolicyMode = normalizedPolicyModeOrDefault(mode)
+	event.PolicyAllowed = eval.Allowed
+	event.PolicyViolations = append([]string(nil), eval.Reasons...)
+	return event
+}
+
 type managerAuditState struct {
-	sandboxes map[string]map[string]*AccessedDomain
+	sandboxes map[string]*sandboxAuditState
 }
 
 var auditStateByManager sync.Map
@@ -53,7 +66,7 @@ func auditStateLocked(m *ProxyManager) *managerAuditState {
 	if state, ok := auditStateByManager.Load(m); ok {
 		return state.(*managerAuditState)
 	}
-	state := &managerAuditState{sandboxes: make(map[string]map[string]*AccessedDomain)}
+	state := &managerAuditState{sandboxes: make(map[string]*sandboxAuditState)}
 	actual, _ := auditStateByManager.LoadOrStore(m, state)
 	return actual.(*managerAuditState)
 }
@@ -67,10 +80,10 @@ func initAuditStateLocked(m *ProxyManager, sandboxID string) {
 		return
 	}
 	if state.sandboxes == nil {
-		state.sandboxes = make(map[string]map[string]*AccessedDomain)
+		state.sandboxes = make(map[string]*sandboxAuditState)
 	}
 	if _, exists := state.sandboxes[sandboxID]; !exists {
-		state.sandboxes[sandboxID] = make(map[string]*AccessedDomain)
+		state.sandboxes[sandboxID] = newSandboxAuditState()
 	}
 }
 
@@ -115,23 +128,36 @@ func updateAuditStateLocked(state *managerAuditState, event accessEvent) {
 		return
 	}
 	if state.sandboxes == nil {
-		state.sandboxes = make(map[string]map[string]*AccessedDomain)
+		state.sandboxes = make(map[string]*sandboxAuditState)
 	}
 	sandboxState, ok := state.sandboxes[event.SandboxID]
 	if !ok {
-		sandboxState = make(map[string]*AccessedDomain)
+		sandboxState = newSandboxAuditState()
+		state.sandboxes[event.SandboxID] = sandboxState
+	}
+	if sandboxState == nil {
+		sandboxState = newSandboxAuditState()
 		state.sandboxes[event.SandboxID] = sandboxState
 	}
 
+	recordAccessedDomain(sandboxState.domains, event)
+	recordHostSummaryAggregate(sandboxState.hosts, event)
+	recordRequestAggregate(sandboxState.requests, event)
+}
+
+func recordAccessedDomain(state map[string]*AccessedDomain, event accessEvent) {
+	if state == nil {
+		return
+	}
 	host, port := normalizeHostPort(event.Host, event.Port)
 	if host == "" {
 		host = strings.ToLower(event.Host)
 	}
 
-	entry, ok := sandboxState[host]
+	entry, ok := state[host]
 	if !ok {
 		entry = &AccessedDomain{Host: host}
-		sandboxState[host] = entry
+		state[host] = entry
 	}
 
 	entry.TrafficMode = normalizeTrafficMode(event.TrafficMode)

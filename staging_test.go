@@ -233,14 +233,21 @@ func TestWriteSandboxConfigMirrorsHostResolvConfNameservers(t *testing.T) {
 
 func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
 	args := buildBwrapArgs(bwrapArgsConfig{
-		root:            "/tmp/root",
-		helperPath:      "/app/bbox",
-		proxyListenAddr: "127.0.0.1:31111",
-		bridgeFD:        3,
-		trafficMode:     TrafficModeTransparent,
+		root:                  "/tmp/root",
+		helperPath:            "/app/bbox",
+		proxyListenAddr:       "127.0.0.1:31111",
+		bridgeFD:              3,
+		trafficMode:           TrafficModeTransparent,
+		payloadSeccompBPFPath: "/app/bbox-payload-seccomp.bpf",
 	})
 	if !containsArgSequence(args, []string{"--traffic-mode", "transparent"}) {
 		t.Fatalf("expected args to include --traffic-mode transparent, got %v", args)
+	}
+	if !containsArgSequence(args, []string{"--payload-seccomp-bpf", "/app/bbox-payload-seccomp.bpf"}) {
+		t.Fatalf("expected args to include payload seccomp bpf path, got %v", args)
+	}
+	if containsArgSequence(args, []string{"--seccomp", "4"}) {
+		t.Fatalf("expected transparent helper launch to avoid bwrap-level seccomp, got %v", args)
 	}
 	wantTail := []string{"/app/bbox", "internal-helper", "--bridge-fd", "3"}
 	if !containsArgSequence(args, wantTail) {

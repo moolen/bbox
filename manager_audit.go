@@ -60,11 +60,11 @@ func (m *ProxyManager) accessedDomainsSnapshot(sandboxID string) []AccessedDomai
 	}
 	state := stateValue.(*managerAuditState)
 	sandboxState, ok := state.sandboxes[sandboxID]
-	if !ok {
+	if !ok || sandboxState == nil {
 		m.mu.RUnlock()
 		return []AccessedDomain{}
 	}
-	snapshot := snapshotAccessedDomains(sandboxState)
+	snapshot := snapshotAccessedDomains(sandboxState.domains)
 	m.mu.RUnlock()
 	return snapshot
 }

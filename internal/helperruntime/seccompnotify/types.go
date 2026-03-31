@@ -47,10 +47,11 @@ type dnsPacketResponse struct {
 // RuntimeTargets describes the helper endpoints and callbacks that seccomp
 // socket emulation can hand traffic to.
 type RuntimeTargets struct {
-	DNSRoundTrip       func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error)
-	RawTCPAddr         string
-	RawTCPAddrV6       string
-	RecordRawTCPOrigin func(localAddr, host string, port int)
+	DNSRoundTrip          func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error)
+	RawTCPAddr            string
+	RawTCPAddrV6          string
+	RecordRawTCPOrigin    func(localAddr, host string, port int)
+	PayloadSeccompBPFPath string
 }
 
 // DecodedSockaddr is the normalized form used after copying a sockaddr out of
@@ -106,13 +107,14 @@ type getpeernameRequest struct {
 // Supervisor owns the seccomp notify control channel and the per-FD state used
 // to emulate socket syscalls on behalf of the sandboxed process.
 type Supervisor struct {
-	targets       RuntimeTargets
-	registry      *FDRegistry
-	notifySock    *os.File
-	notifyChild   *os.File
-	notifyFD      int
-	launcherError error
-	launcherClose func() error
+	targets               RuntimeTargets
+	registry              *FDRegistry
+	notifySock            *os.File
+	notifyChild           *os.File
+	notifyFD              int
+	launcherError         error
+	launcherClose         func() error
+	payloadSeccompBPFPath string
 }
 
 func NewSupervisor(targets RuntimeTargets) (*Supervisor, error) {
@@ -134,4 +136,11 @@ func (s *Supervisor) Targets() RuntimeTargets {
 		return RuntimeTargets{}
 	}
 	return s.targets
+}
+
+func (s *Supervisor) SetPayloadSeccompBPFPath(path string) {
+	if s == nil {
+		return
+	}
+	s.payloadSeccompBPFPath = path
 }

@@ -8,7 +8,8 @@
 //   - UDP DNS sockets targeting port 53, which are emulated across the helper
 //     bridge so DNS can be forwarded to the host resolver path.
 //
-// Other AF_INET/AF_INET6 socket types are intentionally left unmanaged so they
-// continue through the kernel's normal networking behavior instead of being
-// rewritten by the helper.
+// All other socket families and AF_INET/AF_INET6 socket types are left
+// unmanaged so libc resolver internals and unrelated local sockets continue
+// through the kernel's normal behavior instead of being rewritten by the
+// helper.
 package seccompnotify

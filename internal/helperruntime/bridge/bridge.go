@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/moolen/bbox/internal/helperproto"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 // RuntimeBridge is the helper-side view of the gob control channel. It
@@ -156,6 +157,7 @@ func (b *RuntimeBridge) ProxyRoundTrip(ctx context.Context, req helperproto.Prox
 func (b *RuntimeBridge) DNSRoundTrip(ctx context.Context, req helperproto.DNSRequest) ([]byte, error) {
 	id := b.nextID.Add(1)
 	ch := make(chan helperproto.Envelope, 1)
+	b.logger.Printf("dns request id=%d network=%s host=%s port=%d payload=%d summary=%s", id, req.Network, req.Host, req.Port, len(req.Payload), summarizeDNSPayload(req.Payload))
 
 	b.pendMu.Lock()
 	b.pending[id] = ch
@@ -182,10 +184,37 @@ func (b *RuntimeBridge) DNSRoundTrip(ctx context.Context, req helperproto.DNSReq
 			return nil, fmt.Errorf("bridge response %d did not contain a dns response", id)
 		}
 		if env.DNSResponse.Error != "" {
+			b.logger.Printf("dns response id=%d error=%s", id, env.DNSResponse.Error)
 			return nil, errors.New(env.DNSResponse.Error)
 		}
+		b.logger.Printf("dns response id=%d payload=%d summary=%s", id, len(env.DNSResponse.Payload), summarizeDNSPayload(env.DNSResponse.Payload))
 		return append([]byte(nil), env.DNSResponse.Payload...), nil
 	}
+}
+
+func summarizeDNSPayload(payload []byte) string {
+	var parser dnsmessage.Parser
+	header, err := parser.Start(payload)
+	if err != nil {
+		return fmt.Sprintf("parse_header=%v", err)
+	}
+	questions, err := parser.AllQuestions()
+	if err != nil {
+		return fmt.Sprintf("id=%d parse_questions=%v", header.ID, err)
+	}
+	answers, err := parser.AllAnswers()
+	if err != nil {
+		return fmt.Sprintf("id=%d parse_answers=%v", header.ID, err)
+	}
+	questionTypes := make([]string, 0, len(questions))
+	for _, question := range questions {
+		questionTypes = append(questionTypes, question.Type.String())
+	}
+	answerTypes := make([]string, 0, len(answers))
+	for _, answer := range answers {
+		answerTypes = append(answerTypes, answer.Header.Type.String())
+	}
+	return fmt.Sprintf("id=%d q=%v a=%v", header.ID, questionTypes, answerTypes)
 }
 
 func (b *RuntimeBridge) Connect(ctx context.Context, host string, port int) (uint64, <-chan helperproto.Envelope, *helperproto.ConnectResponse, error) {

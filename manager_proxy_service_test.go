@@ -27,7 +27,7 @@ func TestProxyServiceRejectsOversizedMITMBody(t *testing.T) {
 }
 
 func TestConnectServiceRejectsDeniedRequest(t *testing.T) {
-	svc := newManagerConnectService(nil)
+	svc := newManagerConnectService(nil, PolicyModeEnforce)
 	resp := svc.HandleConnectRequest(context.Background(), mustCompilePolicy(t, NetworkPolicy{
 		AllowHostPatterns: []string{`^example[.]com$`},
 	}), "sandbox-a", helperproto.ConnectRequest{

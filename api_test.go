@@ -124,3 +124,22 @@ func TestProxyManagerCACertPEM(t *testing.T) {
 		t.Fatalf("expected empty CA PEM when MITM disabled, got %q", string(got))
 	}
 }
+
+func TestNewProxyManagerDefaultsPolicyModeToEnforce(t *testing.T) {
+	manager, err := NewProxyManager(ProxyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	if manager.policyMode != PolicyModeEnforce {
+		t.Fatalf("expected default policy mode enforce, got %q", manager.policyMode)
+	}
+}
+
+func TestNewProxyManagerRejectsUnknownPolicyMode(t *testing.T) {
+	_, err := NewProxyManager(ProxyOptions{PolicyMode: PolicyMode("broken")})
+	if err == nil {
+		t.Fatal("expected invalid policy mode to fail")
+	}
+}

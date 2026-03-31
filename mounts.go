@@ -64,15 +64,16 @@ func targetsOverlap(a, b string) bool {
 }
 
 type bwrapArgsConfig struct {
-	root                string
-	helperPath          string
-	proxyListenAddr     string
-	mitm                MITMOptions
-	maxRequestBodyBytes int64
-	mounts              []Mount
-	trafficMode         TrafficMode
-	bridgeFD            int
-	seccompFD           int
+	root                  string
+	helperPath            string
+	proxyListenAddr       string
+	mitm                  MITMOptions
+	maxRequestBodyBytes   int64
+	mounts                []Mount
+	trafficMode           TrafficMode
+	payloadSeccompBPFPath string
+	bridgeFD              int
+	seccompFD             int
 }
 
 func buildBwrapArgs(cfg bwrapArgsConfig) []string {
@@ -118,8 +119,11 @@ func buildBwrapArgs(cfg bwrapArgsConfig) []string {
 		"--traffic-mode", string(normalizedMode),
 		"--mitm-enabled="+fmt.Sprintf("%t", cfg.mitm.Enabled),
 		"--max-request-body-bytes", fmt.Sprintf("%d", cfg.maxRequestBodyBytes),
-		"child-proxy",
 	)
+	if cfg.payloadSeccompBPFPath != "" {
+		args = append(args, "--payload-seccomp-bpf", cfg.payloadSeccompBPFPath)
+	}
+	args = append(args, "child-proxy")
 
 	return args
 }

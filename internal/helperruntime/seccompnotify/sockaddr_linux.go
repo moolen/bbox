@@ -19,6 +19,8 @@ func DecodeSockaddr(raw []byte) (DecodedSockaddr, error) {
 	}
 
 	switch family {
+	case unix.AF_UNSPEC:
+		return DecodedSockaddr{Family: unix.AF_UNSPEC}, nil
 	case unix.AF_INET:
 		if len(raw) < unix.SizeofSockaddrInet4 {
 			return DecodedSockaddr{}, fmt.Errorf("sockaddr_in buffer too short: %d", len(raw))
@@ -49,13 +51,13 @@ func decodeFamily(raw []byte) (int, error) {
 
 	familyLE := binary.LittleEndian.Uint16(raw[0:2])
 	switch familyLE {
-	case unix.AF_INET, unix.AF_INET6:
+	case unix.AF_UNSPEC, unix.AF_INET, unix.AF_INET6:
 		return int(familyLE), nil
 	}
 
 	familyBE := binary.BigEndian.Uint16(raw[0:2])
 	switch familyBE {
-	case unix.AF_INET, unix.AF_INET6:
+	case unix.AF_UNSPEC, unix.AF_INET, unix.AF_INET6:
 		return int(familyBE), nil
 	}
 

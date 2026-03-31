@@ -169,6 +169,14 @@ func TestValidateSandboxOptionsRejectsTransparentModeWithoutMITM(t *testing.T) {
 	}
 }
 
+func TestValidateSandboxOptionsRejectsUnknownPolicyMode(t *testing.T) {
+	opts := SandboxOptions{PolicyMode: PolicyMode("broken")}
+
+	if err := validateSandboxOptions(opts, true); err == nil {
+		t.Fatal("expected unknown policy mode to fail validation")
+	}
+}
+
 func TestRunEnvForTrafficModeSkipsProxyEnvInTransparentMode(t *testing.T) {
 	env := runEnvForTrafficMode(TrafficModeTransparent, "127.0.0.1:40123", []string{
 		"FOO=bar",

@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/moolen/bbox"
 )
 
 func TestReadDomainListFile(t *testing.T) {
@@ -112,6 +114,34 @@ func TestRootCommandRejectsMissingPayload(t *testing.T) {
 	}
 }
 
+func TestRootCommandAuditFlagPassesAuditReportingToRunner(t *testing.T) {
+	var got runConfig
+
+	cmd := newRootCommand(commandDeps{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getwd: func() (string, error) {
+			return t.TempDir(), nil
+		},
+		environ: func() []string { return nil },
+		run: func(cfg runConfig) error {
+			got = cfg
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"--audit", "--", "bash"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got.manager.PolicyMode != bbox.PolicyModeAudit {
+		t.Fatalf("expected audit mode, got %q", got.manager.PolicyMode)
+	}
+	if !got.reporting.PolicyViolations || !got.reporting.AccessSummary || !got.reporting.RequestSummary {
+		t.Fatalf("expected audit reporting to be enabled, got %#v", got.reporting)
+	}
+}
+
 func TestBuildConfigTransparentModeRequiresMITM(t *testing.T) {
 	_, err := buildConfig(cliOptions{trafficMode: "transparent"}, []string{"curl"}, t.TempDir(), nil)
 	if err == nil {
@@ -138,20 +168,60 @@ func TestBuildConfigClearEnvSkipsInheritedEnv(t *testing.T) {
 	}
 }
 
+func TestBuildConfigAuditShorthandEnablesAuditModeAndReporting(t *testing.T) {
+	cfg, err := buildConfig(cliOptions{audit: true}, []string{"bash"}, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
+		t.Fatalf("expected audit mode, got %q", cfg.manager.PolicyMode)
+	}
+	if !cfg.manager.Reporting.PolicyViolations || !cfg.manager.Reporting.AccessSummary || !cfg.manager.Reporting.RequestSummary {
+		t.Fatalf("expected audit shorthand to enable reporting, got %#v", cfg.manager.Reporting)
+	}
+}
+
 func TestDispatchRunsInternalHelperWithoutCobra(t *testing.T) {
 	helperCalled := false
-	err := dispatch([]string{"internal-helper", "--bridge-fd", "3"}, commandDeps{}, func(args []string) error {
-		helperCalled = true
-		if len(args) == 0 || args[0] != "--bridge-fd" {
-			t.Fatalf("args = %v", args)
-		}
-		return nil
-	})
+	err := dispatch(
+		[]string{"internal-helper", "--bridge-fd", "3"},
+		commandDeps{},
+		func(args []string) error {
+			helperCalled = true
+			if len(args) == 0 || args[0] != "--bridge-fd" {
+				t.Fatalf("args = %v", args)
+			}
+			return nil
+		},
+		nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !helperCalled {
 		t.Fatal("expected internal helper dispatch")
+	}
+}
+
+func TestDispatchRunsInternalLauncherWithoutCobra(t *testing.T) {
+	launcherCalled := false
+	err := dispatch(
+		[]string{"internal-launcher", "--launcher-fd", "7", "--", "bbox-seccomp-launcher", "/bin/true"},
+		commandDeps{},
+		nil,
+		func(args []string) error {
+			launcherCalled = true
+			if len(args) < 4 || args[0] != "--launcher-fd" {
+				t.Fatalf("args = %v", args)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !launcherCalled {
+		t.Fatal("expected internal launcher dispatch")
 	}
 }
 

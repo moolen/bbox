@@ -26,7 +26,8 @@ type Config struct {
 	Logger      *log.Logger
 	MITMEnabled bool
 
-	MaxRequestBodyBytes int64
+	MaxRequestBodyBytes   int64
+	PayloadSeccompBPFPath string
 }
 
 func withDefaults(cfg Config) Config {

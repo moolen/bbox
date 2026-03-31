@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	defaultSandboxBBoxPath = "/app/bbox"
+	defaultSandboxBBoxPath           = "/app/bbox"
+	defaultSandboxPayloadSeccompPath = "/app/bbox-payload-seccomp.bpf"
 )
 
 var mitmTrustBundlePaths = []string{
@@ -280,6 +281,28 @@ func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
 		}
 	}
 	return nil
+}
+
+func stageTransparentPayloadSeccompProgram(root string, opts SeccompOptions) (string, error) {
+	program, err := compileSeccompProgram(opts)
+	if err != nil {
+		return "", err
+	}
+	if len(program) == 0 {
+		return "", nil
+	}
+
+	dest, err := sandboxPathInRoot(root, defaultSandboxPayloadSeccompPath)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", filepath.Dir(dest), err)
+	}
+	if err := os.WriteFile(dest, program, 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", dest, err)
+	}
+	return defaultSandboxPayloadSeccompPath, nil
 }
 
 func transparentResolvConfContent() (string, error) {

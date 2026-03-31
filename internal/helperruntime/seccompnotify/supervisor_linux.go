@@ -217,6 +217,11 @@ func writeOriginalPeername(req getpeernameRequest, host string, port int, fallba
 }
 
 func peernameFamily(host string, fallbackFamily int) int {
+	switch fallbackFamily {
+	case unix.AF_INET, unix.AF_INET6:
+		return fallbackFamily
+	}
+
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return fallbackFamily

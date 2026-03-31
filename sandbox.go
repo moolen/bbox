@@ -27,6 +27,8 @@ type Sandbox struct {
 	done    chan error
 
 	trafficMode TrafficMode
+	policyMode  PolicyMode
+	reporting   ReportingOptions
 	proxyAddr   string
 	baseEnv     []string
 	workDir     string
@@ -55,6 +57,18 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, err
 	}
 	mode := normalizeTrafficMode(opts.TrafficMode)
+	effectivePolicyMode := m.policyMode
+	if opts.PolicyMode != "" {
+		effectivePolicyMode = opts.PolicyMode
+	}
+	policyMode, err := normalizePolicyMode(effectivePolicyMode)
+	if err != nil {
+		return nil, err
+	}
+	reporting := m.reporting
+	if opts.Reporting != (ReportingOptions{}) {
+		reporting = opts.Reporting
+	}
 
 	policy, err := compilePolicy(opts.Policy)
 	if err != nil {
@@ -85,7 +99,15 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		return nil, fmt.Errorf("create helper log file: %w", err)
 	}
 
-	seccompProgram, err := prepareSeccompProgram(opts.Seccomp)
+	var (
+		payloadSeccompBPFPath string
+		seccompProgram        *preparedSeccompProgram
+	)
+	if mode == TrafficModeTransparent {
+		payloadSeccompBPFPath, err = stageTransparentPayloadSeccompProgram(root, opts.Seccomp)
+	} else {
+		seccompProgram, err = prepareSeccompProgram(opts.Seccomp)
+	}
 	if err != nil {
 		_ = helperLog.Close()
 		_ = os.Remove(helperLog.Name())
@@ -104,15 +126,16 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	}
 
 	cmd := exec.Command("bwrap", buildBwrapArgs(bwrapArgsConfig{
-		root:                root,
-		helperPath:          defaultSandboxBBoxPath,
-		proxyListenAddr:     m.listenAddr,
-		mitm:                m.mitm,
-		maxRequestBodyBytes: m.requestBodyLimitBytes,
-		mounts:              opts.Mounts,
-		trafficMode:         mode,
-		bridgeFD:            bridgeFD,
-		seccompFD:           seccompFD,
+		root:                  root,
+		helperPath:            defaultSandboxBBoxPath,
+		proxyListenAddr:       m.listenAddr,
+		mitm:                  m.mitm,
+		maxRequestBodyBytes:   m.requestBodyLimitBytes,
+		mounts:                opts.Mounts,
+		trafficMode:           mode,
+		payloadSeccompBPFPath: payloadSeccompBPFPath,
+		bridgeFD:              bridgeFD,
+		seccompFD:             seccompFD,
 	})...)
 	cmd.Stderr = helperLog
 	cmd.Stdout = helperLog
@@ -144,6 +167,8 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		cmd:           cmd,
 		done:          make(chan error, 1),
 		trafficMode:   mode,
+		policyMode:    policyMode,
+		reporting:     reporting,
 		workDir:       opts.WorkDir,
 		helperLogFile: helperLog,
 		helperLogPath: helperLog.Name(),
@@ -247,6 +272,17 @@ func (s *Sandbox) AccessedDomains() []AccessedDomain {
 	return s.manager.accessedDomainsSnapshot(s.id)
 }
 
+// AccessSummary returns a richer access audit snapshot.
+func (s *Sandbox) AccessSummary() AccessSummary {
+	if s == nil || s.manager == nil {
+		return AccessSummary{
+			Hosts:    []AccessedHostSummary{},
+			Requests: []RequestAggregate{},
+		}
+	}
+	return s.manager.accessSummarySnapshot(s.id)
+}
+
 // Close stops the sandbox helper, unregisters the sandbox, and removes the
 // staged root filesystem.
 func (s *Sandbox) Close() error {
@@ -317,6 +353,9 @@ func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {
 	}
 	if mode == TrafficModeTransparent && !mitmEnabled {
 		return errors.New("transparent traffic mode requires MITM to be enabled")
+	}
+	if _, err := normalizePolicyMode(opts.PolicyMode); err != nil {
+		return err
 	}
 	if err := validateSeccompOptions(opts.Seccomp); err != nil {
 		return err

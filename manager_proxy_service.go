@@ -18,6 +18,7 @@ type managerProxyConfig struct {
 	transport            *http.Transport
 	maxRequestBodyBytes  int64
 	maxResponseBodyBytes int64
+	policyMode           PolicyMode
 	record               func(accessEvent)
 }
 
@@ -25,6 +26,7 @@ type managerProxyService struct {
 	transport            *http.Transport
 	maxRequestBodyBytes  int64
 	maxResponseBodyBytes int64
+	policyMode           PolicyMode
 	record               func(accessEvent)
 }
 
@@ -37,6 +39,7 @@ func newManagerProxyService(cfg managerProxyConfig) *managerProxyService {
 		transport:            transport,
 		maxRequestBodyBytes:  cfg.maxRequestBodyBytes,
 		maxResponseBodyBytes: cfg.maxResponseBodyBytes,
+		policyMode:           normalizedPolicyModeOrDefault(cfg.policyMode),
 		record:               cfg.record,
 	}
 }
@@ -64,20 +67,22 @@ func (s *managerProxyService) HandleProxyRequest(ctx context.Context, policy *co
 		}
 	}
 	host, port := normalizeHostPort(targetURL.Host, port)
+	policyEval := policy.evaluate(req.Method, targetURL.Host, req.Method == http.MethodConnect)
+	event := eventWithPolicyMetadata(accessEvent{
+		SandboxID: sandboxID,
+		Kind:      "http",
+		Host:      host,
+		Port:      port,
+		Method:    req.Method,
+		Path:      path,
+	}, s.policyMode, policyEval)
 	if s.maxRequestBodyBytes > 0 && int64(len(req.Body)) > s.maxRequestBodyBytes {
 		err := "request body exceeds inspection limit"
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "http",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusRequestEntityTooLarge,
-			Result:     "denied",
-			Error:      err,
-		})
+		event.Allowed = false
+		event.StatusCode = http.StatusRequestEntityTooLarge
+		event.Result = "denied"
+		event.Error = err
+		s.recordEvent(event)
 		return &helperproto.ProxyResponse{
 			StatusCode: http.StatusRequestEntityTooLarge,
 			Header: http.Header{
@@ -86,19 +91,13 @@ func (s *managerProxyService) HandleProxyRequest(ctx context.Context, policy *co
 			Body: []byte("proxy request denied: " + err + "\n"),
 		}
 	}
-	if err := policy.Check(req.Method, targetURL.Host, req.Method == http.MethodConnect); err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "http",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusForbidden,
-			Result:     "denied",
-			Error:      err.Error(),
-		})
+	if !policyEval.Allowed && s.policyMode != PolicyModeAudit {
+		err := policyEval.firstReasonAsError()
+		event.Allowed = false
+		event.StatusCode = http.StatusForbidden
+		event.Result = "denied"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.ProxyResponse{
 			StatusCode: http.StatusForbidden,
 			Header: http.Header{
@@ -110,17 +109,10 @@ func (s *managerProxyService) HandleProxyRequest(ctx context.Context, policy *co
 
 	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL.String(), bytes.NewReader(req.Body))
 	if err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID: sandboxID,
-			Kind:      "http",
-			Host:      host,
-			Port:      port,
-			Method:    req.Method,
-			Path:      path,
-			Allowed:   true,
-			Result:    "upstream_error",
-			Error:     err.Error(),
-		})
+		event.Allowed = true
+		event.Result = "upstream_error"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("build outbound request: %v", err)}
 	}
 	outReq.Header = req.Header.Clone()
@@ -128,63 +120,36 @@ func (s *managerProxyService) HandleProxyRequest(ctx context.Context, policy *co
 
 	resp, err := s.transport.RoundTrip(outReq)
 	if err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID: sandboxID,
-			Kind:      "http",
-			Host:      host,
-			Port:      port,
-			Method:    req.Method,
-			Path:      path,
-			Allowed:   true,
-			Result:    "upstream_error",
-			Error:     err.Error(),
-		})
+		event.Allowed = true
+		event.Result = "upstream_error"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.ProxyResponse{Error: err.Error()}
 	}
 	body, tooLarge, err := readBoundedResponse(resp.Body, s.maxResponseBodyBytes)
 	if err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "http",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    true,
-			StatusCode: resp.StatusCode,
-			Result:     "upstream_error",
-			Error:      err.Error(),
-		})
+		event.Allowed = true
+		event.StatusCode = resp.StatusCode
+		event.Result = "upstream_error"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.ProxyResponse{Error: fmt.Sprintf("read outbound response body: %v", err)}
 	}
 	if tooLarge {
 		err := "upstream response body exceeds configured limit"
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "http",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    true,
-			StatusCode: resp.StatusCode,
-			Result:     "upstream_error",
-			Error:      err,
-		})
+		event.Allowed = true
+		event.StatusCode = resp.StatusCode
+		event.Result = "upstream_error"
+		event.Error = err
+		s.recordEvent(event)
 		return &helperproto.ProxyResponse{Error: err}
 	}
 
-	s.recordEvent(accessEvent{
-		SandboxID:  sandboxID,
-		Kind:       "http",
-		Host:       host,
-		Port:       port,
-		Method:     req.Method,
-		Path:       path,
-		Allowed:    true,
-		StatusCode: resp.StatusCode,
-		Result:     "allowed",
-	})
+	event.Allowed = true
+	event.StatusCode = resp.StatusCode
+	event.Result = "allowed"
+	event.Error = ""
+	s.recordEvent(event)
 	return &helperproto.ProxyResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header.Clone(),
@@ -210,19 +175,28 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 		path = "/"
 	}
 	host, port := mitmHostPort(req.Host, authority, scheme)
+	policyEval := policy.evaluateRequest(PolicyRequest{
+		Method:       req.Method,
+		Host:         policyHost,
+		Path:         req.Path,
+		Header:       req.Header,
+		Body:         req.Body,
+		BodyTooLarge: req.BodyTooLarge,
+	})
+	event := eventWithPolicyMetadata(accessEvent{
+		SandboxID: sandboxID,
+		Kind:      "mitm",
+		Host:      host,
+		Port:      port,
+		Method:    req.Method,
+		Path:      path,
+	}, s.policyMode, policyEval)
 	if req.BodyTooLarge {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusRequestEntityTooLarge,
-			Result:     "denied",
-			Error:      "request body exceeds inspection limit",
-		})
+		event.Allowed = false
+		event.StatusCode = http.StatusRequestEntityTooLarge
+		event.Result = "denied"
+		event.Error = "request body exceeds inspection limit"
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusRequestEntityTooLarge,
 			Header: http.Header{
@@ -233,18 +207,11 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 	}
 
 	if err := validateMITMHostAuthority(policyHost, authority); err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusForbidden,
-			Result:     "denied",
-			Error:      err.Error(),
-		})
+		event.Allowed = false
+		event.StatusCode = http.StatusForbidden
+		event.Result = "denied"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusForbidden,
 			Header: http.Header{
@@ -255,18 +222,11 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 	}
 
 	if s.maxRequestBodyBytes > 0 && int64(len(req.Body)) > s.maxRequestBodyBytes {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusRequestEntityTooLarge,
-			Result:     "denied",
-			Error:      "request body exceeds inspection limit",
-		})
+		event.Allowed = false
+		event.StatusCode = http.StatusRequestEntityTooLarge
+		event.Result = "denied"
+		event.Error = "request body exceeds inspection limit"
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusRequestEntityTooLarge,
 			Header: http.Header{
@@ -276,26 +236,13 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 		}
 	}
 
-	if err := policy.CheckRequest(PolicyRequest{
-		Method:       req.Method,
-		Host:         policyHost,
-		Path:         req.Path,
-		Header:       req.Header,
-		Body:         req.Body,
-		BodyTooLarge: req.BodyTooLarge,
-	}); err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusForbidden,
-			Result:     "denied",
-			Error:      err.Error(),
-		})
+	if !policyEval.Allowed && s.policyMode != PolicyModeAudit {
+		err := policyEval.firstReasonAsError()
+		event.Allowed = false
+		event.StatusCode = http.StatusForbidden
+		event.Result = "denied"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusForbidden,
 			Header: http.Header{
@@ -305,18 +252,11 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 		}
 	}
 	if authority == "" {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    false,
-			StatusCode: http.StatusBadRequest,
-			Result:     "denied",
-			Error:      "MITM request authority is required",
-		})
+		event.Allowed = false
+		event.StatusCode = http.StatusBadRequest
+		event.Result = "denied"
+		event.Error = "MITM request authority is required"
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadRequest,
 			Error:      "MITM request authority is required",
@@ -331,17 +271,10 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 	}
 	outReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL.String(), bytes.NewReader(req.Body))
 	if err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID: sandboxID,
-			Kind:      "mitm",
-			Host:      host,
-			Port:      port,
-			Method:    req.Method,
-			Path:      path,
-			Allowed:   true,
-			Result:    "upstream_error",
-			Error:     err.Error(),
-		})
+		event.Allowed = true
+		event.Result = "upstream_error"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadGateway,
 			Error:      fmt.Sprintf("build outbound MITM request: %v", err),
@@ -357,17 +290,10 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 
 	resp, err := s.transport.RoundTrip(outReq)
 	if err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID: sandboxID,
-			Kind:      "mitm",
-			Host:      host,
-			Port:      port,
-			Method:    req.Method,
-			Path:      path,
-			Allowed:   true,
-			Result:    "upstream_error",
-			Error:     err.Error(),
-		})
+		event.Allowed = true
+		event.Result = "upstream_error"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadGateway,
 			Error:      err.Error(),
@@ -375,18 +301,11 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 	}
 	body, tooLarge, err := readBoundedResponse(resp.Body, s.maxResponseBodyBytes)
 	if err != nil {
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    true,
-			StatusCode: resp.StatusCode,
-			Result:     "upstream_error",
-			Error:      err.Error(),
-		})
+		event.Allowed = true
+		event.StatusCode = resp.StatusCode
+		event.Result = "upstream_error"
+		event.Error = err.Error()
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadGateway,
 			Error:      fmt.Sprintf("read outbound MITM response body: %v", err),
@@ -394,35 +313,22 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 	}
 	if tooLarge {
 		err := "upstream response body exceeds configured limit"
-		s.recordEvent(accessEvent{
-			SandboxID:  sandboxID,
-			Kind:       "mitm",
-			Host:       host,
-			Port:       port,
-			Method:     req.Method,
-			Path:       path,
-			Allowed:    true,
-			StatusCode: resp.StatusCode,
-			Result:     "upstream_error",
-			Error:      err,
-		})
+		event.Allowed = true
+		event.StatusCode = resp.StatusCode
+		event.Result = "upstream_error"
+		event.Error = err
+		s.recordEvent(event)
 		return &helperproto.MITMResponse{
 			StatusCode: http.StatusBadGateway,
 			Error:      err,
 		}
 	}
 
-	s.recordEvent(accessEvent{
-		SandboxID:  sandboxID,
-		Kind:       "mitm",
-		Host:       host,
-		Port:       port,
-		Method:     req.Method,
-		Path:       path,
-		Allowed:    true,
-		StatusCode: resp.StatusCode,
-		Result:     "allowed",
-	})
+	event.Allowed = true
+	event.StatusCode = resp.StatusCode
+	event.Result = "allowed"
+	event.Error = ""
+	s.recordEvent(event)
 	return &helperproto.MITMResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header.Clone(),
