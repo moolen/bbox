@@ -11,7 +11,9 @@ import (
 func TestProxyServiceRejectsOversizedMITMBody(t *testing.T) {
 	svc := newManagerProxyService(managerProxyConfig{maxRequestBodyBytes: 3})
 	resp := svc.HandleMITMRequest(context.Background(), mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^example[.]com$`}},
+		},
 	}), "sandbox-a", helperproto.MITMRequest{
 		Scheme:    "https",
 		Authority: "example.com",
@@ -29,7 +31,9 @@ func TestProxyServiceRejectsOversizedMITMBody(t *testing.T) {
 func TestConnectServiceRejectsDeniedRequest(t *testing.T) {
 	svc := newManagerConnectService(nil, PolicyModeEnforce)
 	resp := svc.HandleConnectRequest(context.Background(), mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^example[.]com$`}},
+		},
 	}), "sandbox-a", helperproto.ConnectRequest{
 		Host: "example.com",
 		Port: 443,

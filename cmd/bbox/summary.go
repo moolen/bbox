@@ -14,15 +14,11 @@ import (
 type cliAccessLogger struct {
 	mu      sync.Mutex
 	entries []bbox.AccessLogEntry
-	enc     *json.Encoder
+	emitJSON bool
 }
 
-func newCLIAccessLogger(w io.Writer, emitJSON bool) *cliAccessLogger {
-	logger := &cliAccessLogger{}
-	if emitJSON && w != nil {
-		logger.enc = json.NewEncoder(w)
-	}
-	return logger
+func newCLIAccessLogger(_ io.Writer, emitJSON bool) *cliAccessLogger {
+	return &cliAccessLogger{emitJSON: emitJSON}
 }
 
 func (l *cliAccessLogger) LogAccess(entry bbox.AccessLogEntry) {
@@ -34,9 +30,6 @@ func (l *cliAccessLogger) LogAccess(entry bbox.AccessLogEntry) {
 	defer l.mu.Unlock()
 
 	l.entries = append(l.entries, entry)
-	if l.enc != nil {
-		_ = l.enc.Encode(entry)
-	}
 }
 
 func (l *cliAccessLogger) Entries() []bbox.AccessLogEntry {
@@ -50,6 +43,35 @@ func (l *cliAccessLogger) Entries() []bbox.AccessLogEntry {
 	entries := make([]bbox.AccessLogEntry, len(l.entries))
 	copy(entries, l.entries)
 	return entries
+}
+
+func finalizeRunOutput(cleanup func(), w io.Writer, accessLogger *cliAccessLogger, summary bbox.AccessSummary, reporting bbox.ReportingOptions) error {
+	if cleanup != nil {
+		cleanup()
+	}
+
+	entries := accessLogger.Entries()
+	if accessLogger != nil && accessLogger.emitJSON {
+		if err := renderAccessLogEntries(w, entries); err != nil {
+			return err
+		}
+	}
+
+	return renderRunSummary(w, summary, entries, reporting)
+}
+
+func renderAccessLogEntries(w io.Writer, entries []bbox.AccessLogEntry) error {
+	if w == nil || len(entries) == 0 {
+		return nil
+	}
+
+	enc := json.NewEncoder(w)
+	for _, entry := range entries {
+		if err := enc.Encode(entry); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderRunSummary(w io.Writer, summary bbox.AccessSummary, entries []bbox.AccessLogEntry, reporting bbox.ReportingOptions) error {

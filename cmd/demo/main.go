@@ -95,8 +95,12 @@ func main() {
 			Name:     cfg.name,
 			Binaries: append([]string(nil), binaries...),
 			Policy: bbox.NetworkPolicy{
-				AllowHostPatterns: []string{cfg.allowHostExpr},
-				AllowHTTPMethods:  []string{"GET"},
+				Rules: []bbox.PolicyRule{
+					{
+						HostPatterns: []string{cfg.allowHostExpr},
+						HTTPMethods:  []string{"GET"},
+					},
+				},
 			},
 		})
 		if err != nil {

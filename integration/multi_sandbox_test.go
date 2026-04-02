@@ -55,8 +55,12 @@ func TestTwoSandboxesUseDifferentPolicies(t *testing.T) {
 		Name:     "allowed",
 		Binaries: []string{curlPath},
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{"GET"},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{"GET"},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -72,8 +76,12 @@ func TestTwoSandboxesUseDifferentPolicies(t *testing.T) {
 		Name:     "denied",
 		Binaries: []string{curlPath},
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^example[.]com$`},
-			AllowHTTPMethods:  []string{"GET"},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^example[.]com$`},
+					HTTPMethods:  []string{"GET"},
+				},
+			},
 		},
 	})
 	if err != nil {

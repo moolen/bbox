@@ -32,7 +32,9 @@ func TestSystemDNSServersReadsHostResolvConf(t *testing.T) {
 
 func TestProxyManagerHandleDNSRequestAppliesPolicyAndAudit(t *testing.T) {
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{"^allowed\\.example\\.com$"},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{"^allowed\\.example\\.com$"}},
+		},
 	})
 
 	manager := newProxyManager(policy)

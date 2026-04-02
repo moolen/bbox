@@ -39,10 +39,16 @@ func ExampleNewProxyManager() {
 	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
 		ListenAddr: "127.0.0.1:0",
 		NetworkPolicy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^example[.]com$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowConnect:      true,
-			AllowConnectPorts: []string{"443"},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^example[.]com$`},
+					HTTPMethods:  []string{"GET"},
+				},
+				{
+					HostPatterns: []string{`^example[.]com$`},
+					ConnectPorts: []string{"443"},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -60,21 +66,27 @@ func ExampleProxyOptions() {
 		MaxRequestBodyBytes: 64 << 10,
 		MITM:                bbox.MITMOptions{Enabled: true},
 		NetworkPolicy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^api[.]github[.]com$`, `^github[.]com$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowConnect:      true,
-			AllowConnectPorts: []string{"443"},
-			AllowPathPatterns: []string{`^/repos/`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^api[.]github[.]com$`, `^github[.]com$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/repos/`},
+				},
+				{
+					HostPatterns: []string{`^api[.]github[.]com$`, `^github[.]com$`},
+					ConnectPorts: []string{"443"},
+				},
+			},
 		},
 	}
 
 	fmt.Println(opts.ListenAddr)
 	fmt.Println(opts.MITM.Enabled)
-	fmt.Println(opts.NetworkPolicy.AllowConnect)
+	fmt.Println(opts.NetworkPolicy.Rules[1].ConnectPorts[0])
 	// Output:
 	// 127.0.0.1:0
 	// true
-	// true
+	// 443
 }
 
 func ExampleProxyManager_NewSandbox() {
@@ -104,8 +116,12 @@ func ExampleProxyManager_NewSandbox() {
 			{Source: "/tmp", Target: "/workspace"},
 		},
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^example[.]com$`},
-			AllowHTTPMethods:  []string{"GET"},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^example[.]com$`},
+					HTTPMethods:  []string{"GET"},
+				},
+			},
 		},
 		WorkDir: "/workspace",
 	})
@@ -135,10 +151,16 @@ func ExampleProxyModeSandbox() {
 	opts := bbox.SandboxOptions{
 		TrafficMode: bbox.TrafficModeProxy,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^example[.]com$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowConnect:      true,
-			AllowConnectPorts: []string{"443"},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^example[.]com$`},
+					HTTPMethods:  []string{"GET"},
+				},
+				{
+					HostPatterns: []string{`^example[.]com$`},
+					ConnectPorts: []string{"443"},
+				},
+			},
 		},
 	}
 
@@ -171,9 +193,13 @@ func ExampleTransparentModeSandbox() {
 	sandboxOpts := bbox.SandboxOptions{
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^api[.]github[.]com$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/repos/`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^api[.]github[.]com$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/repos/`},
+				},
+			},
 		},
 	}
 

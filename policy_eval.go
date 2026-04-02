@@ -2,7 +2,6 @@ package bbox
 
 import (
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 )
@@ -39,7 +38,6 @@ func evaluationFromError(err error) policyEvaluation {
 
 func (p compiledPolicy) evaluate(method, hostname string, connect bool) policyEvaluation {
 	method = strings.ToUpper(strings.TrimSpace(method))
-
 	if method == "" {
 		return deniedEvaluation("request method is required")
 	}
@@ -48,12 +46,6 @@ func (p compiledPolicy) evaluate(method, hostname string, connect bool) policyEv
 	}
 	if method == http.MethodConnect && !connect {
 		return deniedEvaluation("CONNECT method requires connect request type")
-	}
-
-	if !connect && len(p.allowMethods) > 0 {
-		if _, ok := p.allowMethods[method]; !ok {
-			return deniedEvaluation(fmt.Sprintf("method %s is not allowed", method))
-		}
 	}
 
 	if connect {
@@ -68,33 +60,99 @@ func (p compiledPolicy) evaluate(method, hostname string, connect bool) policyEv
 	if err != nil {
 		return evaluationFromError(err)
 	}
-	return p.evaluateHost(normalizedHost)
+
+	var firstReason string
+	for _, rule := range p.rules {
+		if rule.hasConnectPorts() || rule.hasPathPatterns() || rule.hasHeaderPatterns() || rule.hasBodyPatterns() {
+			continue
+		}
+		if !rule.matchesMethod(method) {
+			if firstReason == "" {
+				firstReason = fmt.Sprintf("method %s is not allowed by policy", method)
+			}
+			continue
+		}
+		if matched, reason := rule.matchesHostDetailed(normalizedHost); !matched {
+			if firstReason == "" {
+				firstReason = reason
+			}
+			continue
+		}
+		return allowedEvaluation()
+	}
+
+	if firstReason != "" {
+		return deniedEvaluation(firstReason)
+	}
+	return deniedEvaluation("no policy rule matched request")
 }
 
 func (p compiledPolicy) evaluateRequest(req PolicyRequest) policyEvaluation {
-	eval := p.evaluate(req.Method, req.Host, false)
-	if !eval.Allowed {
-		return eval
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+	if method == "" {
+		return deniedEvaluation("request method is required")
 	}
-	if req.BodyTooLarge {
-		return deniedEvaluation("request body exceeds inspection limit")
+
+	normalizedHost, err := normalizePolicyHostname(req.Host)
+	if err != nil {
+		return evaluationFromError(err)
 	}
 
 	path := strings.TrimSpace(req.Path)
 	if path == "" {
 		path = "/"
 	}
-	eval = evaluationFromError(matchPolicyPatterns("path", path, p.denyPaths, p.allowPaths))
-	if !eval.Allowed {
-		return eval
+
+	bodyTooLarge := false
+	var firstReason string
+	for _, rule := range p.rules {
+		if rule.hasConnectPorts() {
+			continue
+		}
+		if !rule.matchesMethod(method) {
+			if firstReason == "" {
+				firstReason = fmt.Sprintf("method %s is not allowed by policy", method)
+			}
+			continue
+		}
+		if matched, reason := rule.matchesHostDetailed(normalizedHost); !matched {
+			if firstReason == "" {
+				firstReason = reason
+			}
+			continue
+		}
+		if !rule.matchesPath(path) {
+			if firstReason == "" {
+				firstReason = fmt.Sprintf("path %q is not allowed by policy", path)
+			}
+			continue
+		}
+		if matched, reason := rule.matchesHeadersDetailed(req.Header); !matched {
+			if firstReason == "" {
+				firstReason = reason
+			}
+			continue
+		}
+		if req.BodyTooLarge && rule.hasBodyPatterns() {
+			bodyTooLarge = true
+			continue
+		}
+		if matched, reason := rule.matchesBodyDetailed(req.Body); !matched {
+			if firstReason == "" {
+				firstReason = reason
+			}
+			continue
+		}
+		return allowedEvaluation()
 	}
 
-	eval = evaluationFromError(p.checkHeaders(req.Header))
-	if !eval.Allowed {
-		return eval
+	if bodyTooLarge {
+		return deniedEvaluation("request body exceeds inspection limit")
 	}
-
-	return evaluationFromError(matchPolicyPatterns("request body", string(req.Body), p.denyBodies, p.allowBodies))
+	if firstReason != "" {
+		return deniedEvaluation(firstReason)
+	}
+	return deniedEvaluation("no policy rule matched request")
 }
 
 func (p compiledPolicy) evaluateDNS(host string) policyEvaluation {
@@ -103,20 +161,24 @@ func (p compiledPolicy) evaluateDNS(host string) policyEvaluation {
 		return deniedEvaluation("dns hostname is required")
 	}
 
-	for _, re := range p.denyHosts {
-		if re.MatchString(normalized) {
-			return deniedEvaluation(fmt.Sprintf("hostname %s is denied by policy", normalized))
+	var firstReason string
+	for _, rule := range p.rules {
+		if rule.hasIPCIDRs() || rule.hasHTTPMethods() || rule.hasConnectPorts() || rule.hasPathPatterns() || rule.hasHeaderPatterns() || rule.hasBodyPatterns() {
+			continue
 		}
-	}
-	if len(p.allowHosts) == 0 {
+		if matched, reason := rule.matchesHostDetailed(normalized); !matched {
+			if firstReason == "" {
+				firstReason = reason
+			}
+			continue
+		}
 		return allowedEvaluation()
 	}
-	for _, re := range p.allowHosts {
-		if re.MatchString(normalized) {
-			return allowedEvaluation()
-		}
+
+	if firstReason != "" {
+		return deniedEvaluation(firstReason)
 	}
-	return deniedEvaluation(fmt.Sprintf("hostname %s is not allowed by policy", normalized))
+	return deniedEvaluation("no policy rule matched dns hostname")
 }
 
 func (p compiledPolicy) evaluateConnect(host string, port int, transparent bool) policyEvaluation {
@@ -133,48 +195,37 @@ func (p compiledPolicy) evaluateConnect(host string, port int, transparent bool)
 			return deniedEvaluation("CONNECT target host is required")
 		}
 	}
-	if !transparent {
-		if !p.allowConnect {
-			return deniedEvaluation("CONNECT requests are not allowed")
-		}
-		if len(p.connectPorts) == 0 {
-			return deniedEvaluation("CONNECT port allowlist is empty")
-		}
-		if !matchConnectPort(p.connectPorts, port) {
-			return deniedEvaluation(fmt.Sprintf("CONNECT port %d is not allowed", port))
-		}
-	}
-	return p.evaluateHost(normalizedHost)
-}
 
-func (p compiledPolicy) evaluateHost(normalizedHost string) policyEvaluation {
-	if ip := net.ParseIP(normalizedHost); ip != nil {
-		for _, network := range p.denyIPCIDRs {
-			if network.Contains(ip) {
-				return deniedEvaluation(fmt.Sprintf("ip literal %s is denied by policy", normalizedHost))
+	var firstReason string
+	for _, rule := range p.rules {
+		if rule.hasHTTPMethods() || rule.hasPathPatterns() || rule.hasHeaderPatterns() || rule.hasBodyPatterns() {
+			continue
+		}
+		if transparent && rule.hasConnectPorts() {
+			continue
+		}
+		if matched, reason := rule.matchesHostDetailed(normalizedHost); !matched {
+			if firstReason == "" {
+				firstReason = reason
+			}
+			continue
+		}
+		if !transparent {
+			if len(rule.connectPorts) == 0 || !matchConnectPort(rule.connectPorts, port) {
+				if firstReason == "" {
+					firstReason = fmt.Sprintf("CONNECT port %d is not allowed", port)
+				}
+				continue
 			}
 		}
-		for _, network := range p.allowIPCIDRs {
-			if network.Contains(ip) {
-				return allowedEvaluation()
-			}
-		}
+		return allowedEvaluation()
 	}
 
-	for _, re := range p.denyHosts {
-		if re.MatchString(normalizedHost) {
-			return deniedEvaluation(fmt.Sprintf("hostname %s is denied by policy", normalizedHost))
-		}
+	if firstReason != "" {
+		return deniedEvaluation(firstReason)
 	}
-
-	allowListConfigured := len(p.allowHosts) > 0 || len(p.allowIPCIDRs) > 0
-	for _, re := range p.allowHosts {
-		if re.MatchString(normalizedHost) {
-			return allowedEvaluation()
-		}
+	if transparent {
+		return deniedEvaluation("no policy rule matched connect target")
 	}
-	if allowListConfigured {
-		return deniedEvaluation(fmt.Sprintf("hostname %s is not allowed by policy", normalizedHost))
-	}
-	return allowedEvaluation()
+	return deniedEvaluation("no policy rule matched CONNECT target")
 }

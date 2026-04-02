@@ -62,8 +62,10 @@ func TestTransparentSandboxLibcGetaddrinfoUsesManagedDNS(t *testing.T) {
 		TrafficMode: TrafficModeTransparent,
 		WorkDir:     "/tmp",
 		Policy: NetworkPolicy{
-			AllowHostPatterns: []string{`^example[.]com$`},
-			AllowIPCIDRs:      []string{"127.0.0.0/8", "::1/128"},
+			Rules: []PolicyRule{
+				{HostPatterns: []string{`^example[.]com$`}},
+				{IPCIDRs: []string{"127.0.0.0/8", "::1/128"}},
+			},
 		},
 	})
 	if err != nil {
@@ -122,7 +124,9 @@ func TestTransparentSandboxAuditModeAllowsPolicyDeniedDNS(t *testing.T) {
 		TrafficMode: TrafficModeTransparent,
 		PolicyMode:  PolicyModeAudit,
 		Policy: NetworkPolicy{
-			AllowHostPatterns: []string{`^allowed[.]test$`},
+			Rules: []PolicyRule{
+				{HostPatterns: []string{`^allowed[.]test$`}},
+			},
 		},
 	})
 	if err != nil {
@@ -139,13 +143,13 @@ func TestTransparentSandboxAuditModeAllowsPolicyDeniedDNS(t *testing.T) {
 	if err != nil {
 		waitErr := "pending"
 		select {
-		case doneErr := <-sandbox.done:
+		case doneErr := <-sandbox.runtimeDone():
 			waitErr = fmt.Sprintf("%v", doneErr)
 		default:
 		}
 		processState := "<nil>"
-		if sandbox.cmd != nil && sandbox.cmd.ProcessState != nil {
-			processState = sandbox.cmd.ProcessState.String()
+		if state := sandbox.runtimeProcessState(); state != nil {
+			processState = state.String()
 		}
 		t.Fatalf("run audit dns client: %v helperlog=%q helperwait=%s helperstate=%s", err, sandbox.helperLogContents(), waitErr, processState)
 	}

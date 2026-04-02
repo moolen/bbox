@@ -70,7 +70,7 @@ func TestFindConfigFileReturnsEmptyWhenMissing(t *testing.T) {
 	}
 }
 
-func TestLoadCLIFileConfigDecodesFlatYAML(t *testing.T) {
+func TestLoadCLIFileConfigDecodesRuleYAML(t *testing.T) {
 	path := fixturePath(t, "flat_config.yaml")
 	got, err := loadCLIFileConfig(path)
 	if err != nil {
@@ -110,11 +110,14 @@ func TestLoadCLIFileConfigDecodesFlatYAML(t *testing.T) {
 	if !got.ReportPolicyViolations || !got.ReportAccessSummary || got.ReportRequestSummary {
 		t.Fatalf("unexpected reporting flags: %#v", got)
 	}
-	if !reflect.DeepEqual(got.Policy.AllowHostPatterns, []string{"^api[.]example[.]com$"}) {
-		t.Fatalf("got policy allow_host_patterns %v", got.Policy.AllowHostPatterns)
+	if len(got.Policy.Rules) != 1 {
+		t.Fatalf("expected one policy rule, got %#v", got.Policy.Rules)
 	}
-	if got.Policy.AllowConnect {
-		t.Fatal("expected policy.allow_connect=false")
+	if !reflect.DeepEqual(got.Policy.Rules[0].HostPatterns, []string{"^api[.]example[.]com$"}) {
+		t.Fatalf("got policy host_patterns %v", got.Policy.Rules[0].HostPatterns)
+	}
+	if !reflect.DeepEqual(got.Policy.Rules[0].HTTPMethods, []string{"post"}) {
+		t.Fatalf("got policy http_methods %v", got.Policy.Rules[0].HTTPMethods)
 	}
 }
 
@@ -161,16 +164,36 @@ func TestLoadCLIFileConfigRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestLoadCLIFileConfigAcceptsEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bbox.yaml")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loadCLIFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, cliFileConfig{}) {
+		t.Fatalf("expected empty config, got %#v", got)
+	}
+}
+
 func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 	defaults := defaultCLIFileConfig()
 	fileCfg := cliFileConfig{
-		TrafficMode:               "transparent",
-		ReportPolicyViolations:    false,
-		ReportAccessSummary:       false,
-		ReportRequestSummary:      false,
-		AccessLog:                 "off",
-		MaxRequestBodyBytes:       999,
-		Policy:                    cliPolicyConfig{AllowHostPatterns: []string{"^file[.]example[.]com$"}},
+		TrafficMode:            "transparent",
+		ReportPolicyViolations: false,
+		ReportAccessSummary:    false,
+		ReportRequestSummary:   false,
+		AccessLog:              "off",
+		MaxRequestBodyBytes:    999,
+		Policy: cliPolicyConfig{
+			Rules: []cliPolicyRuleConfig{
+				{HostPatterns: []string{"^file[.]example[.]com$"}},
+			},
+		},
 		hasTrafficMode:            true,
 		hasAccessLog:              true,
 		hasMaxRequestBodyBytes:    true,
@@ -178,7 +201,7 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 		hasReportAccessSummary:    true,
 		hasReportRequestSummary:   true,
 	}
-	fileCfg.Policy.hasAllowHostPatterns = true
+	fileCfg.Policy.hasRules = true
 	flags := cliFlagOverrides{
 		TrafficMode:         stringPtr("proxy"),
 		ReportAccessSummary: boolPtr(false),
@@ -199,8 +222,8 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 	if got.MaxRequestBodyBytes != 999 {
 		t.Fatalf("got max_request_body_bytes %d", got.MaxRequestBodyBytes)
 	}
-	if !reflect.DeepEqual(got.Policy.AllowHostPatterns, []string{"^file[.]example[.]com$"}) {
-		t.Fatalf("got policy allow_host_patterns %v", got.Policy.AllowHostPatterns)
+	if !reflect.DeepEqual(got.Policy.Rules, []cliPolicyRuleConfig{{HostPatterns: []string{"^file[.]example[.]com$"}}}) {
+		t.Fatalf("got policy rules %v", got.Policy.Rules)
 	}
 }
 
@@ -213,12 +236,14 @@ func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testin
 		hasMaxRequestBodyBytes: true,
 		hasBin:                 true,
 		Policy: cliPolicyConfig{
-			AllowConnect:         true,
-			AllowHostPatterns:    []string{"^example[.]com$"},
-			AllowHeaderPatterns:  map[string][]string{"x-test": []string{"one"}},
-			hasAllowConnect:      true,
-			hasAllowHostPatterns: true,
-			hasAllowHeaders:      true,
+			Rules: []cliPolicyRuleConfig{
+				{
+					HostPatterns:   []string{"^example[.]com$"},
+					ConnectPorts:   []string{"443"},
+					HeaderPatterns: map[string][]string{"x-test": {"one"}},
+				},
+			},
+			hasRules: true,
 		},
 	}
 
@@ -230,12 +255,8 @@ func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testin
 		hasMaxRequestBodyBytes: true,
 		hasBin:                 true,
 		Policy: cliPolicyConfig{
-			AllowConnect:         false,
-			AllowHostPatterns:    []string{},
-			AllowHeaderPatterns:  map[string][]string{},
-			hasAllowConnect:      true,
-			hasAllowHostPatterns: true,
-			hasAllowHeaders:      true,
+			Rules:    []cliPolicyRuleConfig{},
+			hasRules: true,
 		},
 	}
 
@@ -249,14 +270,8 @@ func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testin
 	if len(got.Bin) != 0 {
 		t.Fatalf("expected bin to be cleared, got %v", got.Bin)
 	}
-	if got.Policy.AllowConnect {
-		t.Fatal("expected policy.allow_connect override to false")
-	}
-	if len(got.Policy.AllowHostPatterns) != 0 {
-		t.Fatalf("expected allow_host_patterns to be cleared, got %v", got.Policy.AllowHostPatterns)
-	}
-	if len(got.Policy.AllowHeaderPatterns) != 0 {
-		t.Fatalf("expected allow_header_patterns to be cleared, got %v", got.Policy.AllowHeaderPatterns)
+	if len(got.Policy.Rules) != 0 {
+		t.Fatalf("expected policy rules to be cleared, got %v", got.Policy.Rules)
 	}
 }
 

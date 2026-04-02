@@ -34,6 +34,9 @@ func validateMounts(mounts []Mount) error {
 
 		target := filepath.Clean(m.Target)
 		for _, reservedTarget := range reservedSandboxTargets {
+			if reservedTarget == "/usr" && m.ReadOnly && filepath.Clean(m.Source) == target && target == "/usr" {
+				continue
+			}
 			if targetsOverlap(target, reservedTarget) {
 				return fmt.Errorf("mount target %q overlaps reserved sandbox path %q", m.Target, reservedTarget)
 			}
@@ -68,6 +71,7 @@ type bwrapArgsConfig struct {
 	helperPath            string
 	proxyListenAddr       string
 	mitm                  MITMOptions
+	unshareUser           bool
 	maxRequestBodyBytes   int64
 	mounts                []Mount
 	trafficMode           TrafficMode
@@ -79,7 +83,6 @@ type bwrapArgsConfig struct {
 func buildBwrapArgs(cfg bwrapArgsConfig) []string {
 	normalizedMode := normalizeTrafficMode(cfg.trafficMode)
 	args := []string{
-		"--unshare-user",
 		"--unshare-pid",
 		"--unshare-net",
 		"--die-with-parent",
@@ -87,11 +90,14 @@ func buildBwrapArgs(cfg bwrapArgsConfig) []string {
 		"--clearenv",
 		"--setenv", "PATH", "/usr/bin",
 	}
+	if cfg.unshareUser {
+		args = append([]string{"--unshare-user"}, args...)
+	}
 	if cfg.seccompFD >= 0 {
 		args = append(args, "--seccomp", strconv.Itoa(cfg.seccompFD))
 	}
 
-	for _, dir := range []string{"app", "usr", "etc", "lib", "lib64"} {
+	for _, dir := range []string{"app", "usr", "etc", "lib", "lib64", "bin", "sbin"} {
 		hostDir := filepath.Join(cfg.root, dir)
 		if info, err := os.Stat(hostDir); err == nil && info.IsDir() {
 			args = append(args, "--ro-bind", hostDir, "/"+dir)

@@ -76,11 +76,35 @@ func TestWriteSandboxConfigWritesFilesUnderRoot(t *testing.T) {
 	for _, relPath := range []string{
 		filepath.Join("etc", "hosts"),
 		filepath.Join("etc", "nsswitch.conf"),
+		filepath.Join("etc", "resolv.conf"),
 	} {
 		path := filepath.Join(root, relPath)
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected config file at %q: %v", path, err)
 		}
+	}
+}
+
+func TestWriteSandboxConfigWritesDNSLookupConfigInProxyMode(t *testing.T) {
+	root := t.TempDir()
+	if err := writeSandboxConfig(root, nil, TrafficModeProxy); err != nil {
+		t.Fatalf("writeSandboxConfig failed: %v", err)
+	}
+
+	nsswitchContent, err := os.ReadFile(filepath.Join(root, "etc", "nsswitch.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(nsswitchContent) != "hosts: files dns\n" {
+		t.Fatalf("unexpected nsswitch.conf content: got %q", string(nsswitchContent))
+	}
+
+	resolvContent, err := os.ReadFile(filepath.Join(root, "etc", "resolv.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(resolvContent), "nameserver ") {
+		t.Fatalf("expected resolv.conf to contain nameservers, got %q", string(resolvContent))
 	}
 }
 
@@ -260,6 +284,7 @@ func TestBuildBwrapArgsPassesBridgeAndSeccompFDs(t *testing.T) {
 		root:            "/tmp/root",
 		helperPath:      "/app/bbox",
 		proxyListenAddr: "127.0.0.1:31111",
+		unshareUser:     true,
 		bridgeFD:        3,
 		seccompFD:       4,
 		trafficMode:     TrafficModeProxy,
@@ -274,6 +299,58 @@ func TestBuildBwrapArgsPassesBridgeAndSeccompFDs(t *testing.T) {
 	wantTail := []string{"/app/bbox", "internal-helper", "--bridge-fd", "3"}
 	if !containsArgSequence(args, wantTail) {
 		t.Fatalf("expected args to include %v, got %v", wantTail, args)
+	}
+}
+
+func TestBuildBwrapArgsMountsStagedBinDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"bin", "sbin"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	args := buildBwrapArgs(bwrapArgsConfig{
+		root:            root,
+		helperPath:      "/app/bbox",
+		proxyListenAddr: "127.0.0.1:31111",
+		unshareUser:     true,
+		bridgeFD:        3,
+		trafficMode:     TrafficModeProxy,
+	})
+	if !containsArgSequence(args, []string{"--ro-bind", filepath.Join(root, "bin"), "/bin"}) {
+		t.Fatalf("expected args to mount staged /bin, got %v", args)
+	}
+	if !containsArgSequence(args, []string{"--ro-bind", filepath.Join(root, "sbin"), "/sbin"}) {
+		t.Fatalf("expected args to mount staged /sbin, got %v", args)
+	}
+}
+
+func TestBuildBwrapArgsSkipsUserNamespaceWhenDisabled(t *testing.T) {
+	args := buildBwrapArgs(bwrapArgsConfig{
+		root:            "/tmp/root",
+		helperPath:      "/app/bbox",
+		proxyListenAddr: "127.0.0.1:31111",
+		unshareUser:     false,
+		bridgeFD:        3,
+		trafficMode:     TrafficModeProxy,
+	})
+	if containsString(args, "--unshare-user") {
+		t.Fatalf("did not expect --unshare-user in %v", args)
+	}
+}
+
+func TestBuildBwrapArgsIncludesUserNamespaceWhenEnabled(t *testing.T) {
+	args := buildBwrapArgs(bwrapArgsConfig{
+		root:            "/tmp/root",
+		helperPath:      "/app/bbox",
+		proxyListenAddr: "127.0.0.1:31111",
+		unshareUser:     true,
+		bridgeFD:        3,
+		trafficMode:     TrafficModeProxy,
+	})
+	if !containsString(args, "--unshare-user") {
+		t.Fatalf("expected --unshare-user in %v", args)
 	}
 }
 
@@ -304,6 +381,25 @@ func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
 		if _, err := os.Stat(staged); err != nil {
 			t.Fatalf("expected staged dependency %q: %v", staged, err)
 		}
+	}
+}
+
+func TestStageSandboxRootStagesNSSDNSInProxyModeWhenAvailable(t *testing.T) {
+	libPath, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2"))
+	if !ok {
+		t.Skip("skip: libnss_dns.so.2 not available")
+	}
+
+	bboxPath := writeBBoxFixture(t)
+	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeProxy)
+	if err != nil {
+		t.Fatalf("stageSandboxRoot failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	expected := filepath.Join(root, strings.TrimPrefix(libPath, string(filepath.Separator)))
+	if _, err := os.Stat(expected); err != nil {
+		t.Fatalf("expected staged libnss_dns at %q: %v", expected, err)
 	}
 }
 

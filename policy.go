@@ -6,24 +6,23 @@ import (
 	"net/http"
 	"net/textproto"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
 
 type compiledPolicy struct {
-	allowMethods map[string]struct{}
-	allowHosts   []*regexp.Regexp
-	denyHosts    []*regexp.Regexp
-	allowIPCIDRs []*net.IPNet
-	denyIPCIDRs  []*net.IPNet
-	allowConnect bool
-	connectPorts []portRange
-	allowPaths   []*regexp.Regexp
-	denyPaths    []*regexp.Regexp
-	allowHeaders map[string][]*regexp.Regexp
-	denyHeaders  map[string][]*regexp.Regexp
-	allowBodies  []*regexp.Regexp
-	denyBodies   []*regexp.Regexp
+	rules []compiledPolicyRule
+}
+
+type compiledPolicyRule struct {
+	hostPatterns   []*regexp.Regexp
+	ipCIDRs        []*net.IPNet
+	httpMethods    map[string]struct{}
+	connectPorts   []portRange
+	pathPatterns   []*regexp.Regexp
+	headerPatterns map[string][]*regexp.Regexp
+	bodyPatterns   []*regexp.Regexp
 }
 
 type portRange struct {
@@ -42,93 +41,91 @@ type PolicyRequest struct {
 
 func compilePolicy(policy NetworkPolicy) (*compiledPolicy, error) {
 	compiled := &compiledPolicy{
-		allowMethods: make(map[string]struct{}),
-		allowConnect: policy.AllowConnect,
+		rules: make([]compiledPolicyRule, 0, len(policy.Rules)),
 	}
 
-	for _, method := range policy.AllowHTTPMethods {
+	for idx, rule := range policy.Rules {
+		compiledRule, err := compilePolicyRule(idx, rule)
+		if err != nil {
+			return nil, err
+		}
+		compiled.rules = append(compiled.rules, compiledRule)
+	}
+
+	return compiled, nil
+}
+
+func compilePolicyRule(index int, rule PolicyRule) (compiledPolicyRule, error) {
+	compiled := compiledPolicyRule{
+		httpMethods: make(map[string]struct{}),
+	}
+
+	for _, method := range rule.HTTPMethods {
 		normalized := strings.ToUpper(strings.TrimSpace(method))
 		if normalized == "" {
-			return nil, fmt.Errorf("allow HTTP method cannot be empty")
+			return compiledPolicyRule{}, fmt.Errorf("rule %d HTTP method cannot be empty", index)
 		}
-		compiled.allowMethods[normalized] = struct{}{}
+		compiled.httpMethods[normalized] = struct{}{}
 	}
 
-	for _, pattern := range policy.AllowHostPatterns {
-		re, err := regexp.Compile(pattern)
+	hostPatterns, err := compileRegexps(rule.HostPatterns, func(pattern string, compileErr error) error {
+		return fmt.Errorf("compile rule %d host pattern %q: %w", index, pattern, compileErr)
+	})
+	if err != nil {
+		return compiledPolicyRule{}, err
+	}
+	compiled.hostPatterns = hostPatterns
+
+	for _, cidr := range rule.IPCIDRs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
 		if err != nil {
-			return nil, fmt.Errorf("compile allow host pattern %q: %w", pattern, err)
+			return compiledPolicyRule{}, fmt.Errorf("parse rule %d IP CIDR %q: %w", index, cidr, err)
 		}
-		compiled.allowHosts = append(compiled.allowHosts, re)
+		compiled.ipCIDRs = append(compiled.ipCIDRs, network)
 	}
 
-	for _, pattern := range policy.DenyHostPatterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("compile deny host pattern %q: %w", pattern, err)
-		}
-		compiled.denyHosts = append(compiled.denyHosts, re)
-	}
-	for _, cidr := range policy.AllowIPCIDRs {
-		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
-		if err != nil {
-			return nil, fmt.Errorf("parse allow IP CIDR %q: %w", cidr, err)
-		}
-		compiled.allowIPCIDRs = append(compiled.allowIPCIDRs, network)
-	}
-	for _, cidr := range policy.DenyIPCIDRs {
-		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
-		if err != nil {
-			return nil, fmt.Errorf("parse deny IP CIDR %q: %w", cidr, err)
-		}
-		compiled.denyIPCIDRs = append(compiled.denyIPCIDRs, network)
-	}
-	for _, pattern := range policy.AllowPathPatterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("compile allow path pattern %q: %w", pattern, err)
-		}
-		compiled.allowPaths = append(compiled.allowPaths, re)
-	}
-	for _, pattern := range policy.DenyPathPatterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("compile deny path pattern %q: %w", pattern, err)
-		}
-		compiled.denyPaths = append(compiled.denyPaths, re)
-	}
-	allowHeaders, err := compileHeaderPatterns("allow", policy.AllowHeaderPatterns)
-	if err != nil {
-		return nil, err
-	}
-	compiled.allowHeaders = allowHeaders
-	denyHeaders, err := compileHeaderPatterns("deny", policy.DenyHeaderPatterns)
-	if err != nil {
-		return nil, err
-	}
-	compiled.denyHeaders = denyHeaders
-	for _, pattern := range policy.AllowBodyPatterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("compile allow body pattern %q: %w", pattern, err)
-		}
-		compiled.allowBodies = append(compiled.allowBodies, re)
-	}
-	for _, pattern := range policy.DenyBodyPatterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("compile deny body pattern %q: %w", pattern, err)
-		}
-		compiled.denyBodies = append(compiled.denyBodies, re)
-	}
-	for _, spec := range policy.AllowConnectPorts {
+	for _, spec := range rule.ConnectPorts {
 		parsed, err := parseConnectPortSpec(spec)
 		if err != nil {
-			return nil, fmt.Errorf("parse connect port spec %q: %w", spec, err)
+			return compiledPolicyRule{}, fmt.Errorf("parse rule %d connect port spec %q: %w", index, spec, err)
 		}
 		compiled.connectPorts = append(compiled.connectPorts, parsed)
 	}
 
+	pathPatterns, err := compileRegexps(rule.PathPatterns, func(pattern string, compileErr error) error {
+		return fmt.Errorf("compile rule %d path pattern %q: %w", index, pattern, compileErr)
+	})
+	if err != nil {
+		return compiledPolicyRule{}, err
+	}
+	compiled.pathPatterns = pathPatterns
+
+	headerPatterns, err := compileHeaderPatterns(index, rule.HeaderPatterns)
+	if err != nil {
+		return compiledPolicyRule{}, err
+	}
+	compiled.headerPatterns = headerPatterns
+
+	bodyPatterns, err := compileRegexps(rule.BodyPatterns, func(pattern string, compileErr error) error {
+		return fmt.Errorf("compile rule %d body pattern %q: %w", index, pattern, compileErr)
+	})
+	if err != nil {
+		return compiledPolicyRule{}, err
+	}
+	compiled.bodyPatterns = bodyPatterns
+
+	return compiled, nil
+}
+
+func compileRegexps(patterns []string, wrap func(string, error) error) ([]*regexp.Regexp, error) {
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, wrap(pattern, err)
+		}
+		compiled = append(compiled, re)
+	}
 	return compiled, nil
 }
 
@@ -284,21 +281,21 @@ func isIPv6Literal(host string) bool {
 	return ip != nil && strings.Contains(host, ":")
 }
 
-func compileHeaderPatterns(label string, patterns map[string][]string) (map[string][]*regexp.Regexp, error) {
+func compileHeaderPatterns(ruleIndex int, patterns map[string][]string) (map[string][]*regexp.Regexp, error) {
 	if len(patterns) == 0 {
 		return nil, nil
 	}
 
 	compiled := make(map[string][]*regexp.Regexp, len(patterns))
 	for headerName, values := range patterns {
-		normalizedName := strings.ToLower(strings.TrimSpace(headerName))
+		normalizedName := strings.ToLower(strings.TrimSpace(textproto.CanonicalMIMEHeaderKey(headerName)))
 		if normalizedName == "" {
-			return nil, fmt.Errorf("%s header pattern name cannot be empty", label)
+			return nil, fmt.Errorf("rule %d header pattern name cannot be empty", ruleIndex)
 		}
 		for _, pattern := range values {
 			re, err := regexp.Compile(pattern)
 			if err != nil {
-				return nil, fmt.Errorf("compile %s header pattern %q for %q: %w", label, pattern, headerName, err)
+				return nil, fmt.Errorf("compile rule %d header pattern %q for %q: %w", ruleIndex, pattern, headerName, err)
 			}
 			compiled[normalizedName] = append(compiled[normalizedName], re)
 		}
@@ -306,40 +303,106 @@ func compileHeaderPatterns(label string, patterns map[string][]string) (map[stri
 	return compiled, nil
 }
 
-func matchPolicyPatterns(label, value string, deny, allow []*regexp.Regexp) error {
-	for _, re := range deny {
-		if re.MatchString(value) {
-			return fmt.Errorf("%s %q is denied by policy", label, value)
-		}
-	}
-	if len(allow) == 0 {
-		return nil
-	}
-	for _, re := range allow {
-		if re.MatchString(value) {
-			return nil
-		}
-	}
-	return fmt.Errorf("%s %q is not allowed by policy", label, value)
+func (r compiledPolicyRule) hasHTTPMethods() bool {
+	return len(r.httpMethods) > 0
 }
 
-func (p compiledPolicy) checkHeaders(headers http.Header) error {
+func (r compiledPolicyRule) hasConnectPorts() bool {
+	return len(r.connectPorts) > 0
+}
+
+func (r compiledPolicyRule) hasPathPatterns() bool {
+	return len(r.pathPatterns) > 0
+}
+
+func (r compiledPolicyRule) hasHeaderPatterns() bool {
+	return len(r.headerPatterns) > 0
+}
+
+func (r compiledPolicyRule) hasBodyPatterns() bool {
+	return len(r.bodyPatterns) > 0
+}
+
+func (r compiledPolicyRule) hasIPCIDRs() bool {
+	return len(r.ipCIDRs) > 0
+}
+
+func (r compiledPolicyRule) matchesHost(normalizedHost string) bool {
+	matched, _ := r.matchesHostDetailed(normalizedHost)
+	return matched
+}
+
+func (r compiledPolicyRule) matchesHostDetailed(normalizedHost string) (bool, string) {
+	hostMatched := len(r.hostPatterns) == 0
+	if len(r.hostPatterns) > 0 {
+		for _, re := range r.hostPatterns {
+			if re.MatchString(normalizedHost) {
+				hostMatched = true
+				break
+			}
+		}
+	}
+	if !hostMatched {
+		return false, hostnameDeniedReason(normalizedHost)
+	}
+
+	if len(r.ipCIDRs) == 0 {
+		return true, ""
+	}
+	ip := net.ParseIP(normalizedHost)
+	if ip == nil {
+		return false, hostnameDeniedReason(normalizedHost)
+	}
+	for _, network := range r.ipCIDRs {
+		if network.Contains(ip) {
+			return true, ""
+		}
+	}
+	return false, fmt.Sprintf("ip literal %s is not allowed by policy", normalizedHost)
+}
+
+func (r compiledPolicyRule) matchesMethod(method string) bool {
+	if len(r.httpMethods) == 0 {
+		return true
+	}
+	_, ok := r.httpMethods[method]
+	return ok
+}
+
+func (r compiledPolicyRule) matchesPath(path string) bool {
+	if len(r.pathPatterns) == 0 {
+		return true
+	}
+	for _, re := range r.pathPatterns {
+		if re.MatchString(path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r compiledPolicyRule) matchesHeaders(headers http.Header) bool {
+	matched, _ := r.matchesHeadersDetailed(headers)
+	return matched
+}
+
+func (r compiledPolicyRule) matchesHeadersDetailed(headers http.Header) (bool, string) {
+	if len(r.headerPatterns) == 0 {
+		return true, ""
+	}
+
 	normalized := make(map[string][]string, len(headers))
 	for headerName, values := range headers {
 		normalized[strings.ToLower(textproto.CanonicalMIMEHeaderKey(headerName))] = values
 	}
 
-	for headerName, rules := range p.denyHeaders {
-		for _, value := range normalized[headerName] {
-			for _, re := range rules {
-				if re.MatchString(value) {
-					return fmt.Errorf("header %s is denied by policy", headerName)
-				}
-			}
-		}
+	headerNames := make([]string, 0, len(r.headerPatterns))
+	for headerName := range r.headerPatterns {
+		headerNames = append(headerNames, headerName)
 	}
-
-	for headerName, rules := range p.allowHeaders {
+	sort.Strings(headerNames)
+	for _, headerName := range headerNames {
+		rules := r.headerPatterns[headerName]
 		matched := false
 		for _, value := range normalized[headerName] {
 			for _, re := range rules {
@@ -353,9 +416,31 @@ func (p compiledPolicy) checkHeaders(headers http.Header) error {
 			}
 		}
 		if !matched {
-			return fmt.Errorf("header %s is not allowed by policy", headerName)
+			return false, fmt.Sprintf("header %s is not allowed by policy", headerName)
 		}
 	}
 
-	return nil
+	return true, ""
+}
+
+func (r compiledPolicyRule) matchesBody(body []byte) bool {
+	matched, _ := r.matchesBodyDetailed(body)
+	return matched
+}
+
+func (r compiledPolicyRule) matchesBodyDetailed(body []byte) (bool, string) {
+	if len(r.bodyPatterns) == 0 {
+		return true, ""
+	}
+	bodyText := string(body)
+	for _, re := range r.bodyPatterns {
+		if re.MatchString(bodyText) {
+			return true, ""
+		}
+	}
+	return false, "request body is not allowed by policy"
+}
+
+func hostnameDeniedReason(normalizedHost string) string {
+	return fmt.Sprintf("hostname %s is not allowed by policy", normalizedHost)
 }

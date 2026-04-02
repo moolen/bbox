@@ -1,0 +1,53 @@
+# Copy this file to `bbox.yaml` to activate it.
+
+name: demo-sandbox
+workdir: ./workspace
+
+bin:
+  - curl
+
+mount_ro:
+  - ./certs:/etc/ssl/certs
+  # Linux only. Remove on macOS.
+
+mount_rw:
+  - ../shared:/workspace/shared
+  # Linux only. Remove on macOS.
+
+env:
+  - API_TOKEN=redacted
+  - PATH=/usr/local/bin:/usr/bin:/bin
+
+clear_env: false
+traffic_mode: proxy
+# macOS currently supports only proxy mode.
+max_request_body_bytes: 65536
+access_log: json
+report_policy_violations: true
+report_access_summary: true
+report_request_summary: true
+
+policy:
+  rules:
+    - host_patterns:
+        - "^api[.]github[.]com$"
+      http_methods:
+        - GET
+      path_patterns:
+        - "^/repos/"
+
+    - host_patterns:
+        - "^api[.]github[.]com$"
+      connect_ports:
+        - "443"
+
+    - host_patterns:
+        - "^foo[.]example[.]org$"
+      http_methods:
+        - GET
+        - POST
+      header_patterns:
+        x-trace-id:
+          - "^trace-[0-9]+$"
+      body_patterns:
+        - "^safe="

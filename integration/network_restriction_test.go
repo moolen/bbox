@@ -81,6 +81,43 @@ func TestTransparentBlockedProbeSpecsIncludeICMPWhenHostAvailable(t *testing.T) 
 	t.Fatalf("expected ICMP probe to be present when an ICMP host is available: %#v", probes)
 }
 
+func TestListenLoopbackTCPAndUDPOnSamePortRetriesWhenUDPPortIsBusy(t *testing.T) {
+	busyUDP, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen busy UDP port: %v", err)
+	}
+	defer busyUDP.Close()
+
+	blockedPort := busyUDP.LocalAddr().(*net.UDPAddr).Port
+	prevListenTCP := listenLoopbackTCPForDNS
+	attempts := 0
+	listenLoopbackTCPForDNS = func() (net.Listener, error) {
+		attempts++
+		addr := "127.0.0.1:0"
+		if attempts == 1 {
+			addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(blockedPort))
+		}
+		return net.Listen("tcp", addr)
+	}
+	defer func() {
+		listenLoopbackTCPForDNS = prevListenTCP
+	}()
+
+	tcpListener, udpConn, err := listenLoopbackTCPAndUDPOnSamePort()
+	if err != nil {
+		t.Fatalf("listenLoopbackTCPAndUDPOnSamePort() error = %v", err)
+	}
+	defer tcpListener.Close()
+	defer udpConn.Close()
+
+	if attempts < 2 {
+		t.Fatalf("expected retry after busy UDP port, got %d attempts", attempts)
+	}
+	if tcpListener.Addr().(*net.TCPAddr).Port != udpConn.LocalAddr().(*net.UDPAddr).Port {
+		t.Fatalf("expected shared port, got tcp=%d udp=%d", tcpListener.Addr().(*net.TCPAddr).Port, udpConn.LocalAddr().(*net.UDPAddr).Port)
+	}
+}
+
 func TestNetworkRestrictionsProxyMode(t *testing.T) {
 	requireSandboxPrereqs(t)
 	tools := mustRequireNetworkTools(t)
@@ -116,8 +153,12 @@ func TestNetworkRestrictionsProxyMode(t *testing.T) {
 		Binaries:    []string{tools.curl, tools.ping, tools.dns, tools.nc, shellPath},
 		TrafficMode: bbox.TrafficModeProxy,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{"GET"},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{"GET"},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -211,9 +252,13 @@ func TestNetworkRestrictionsTransparentMode(t *testing.T) {
 		Binaries:    []string{tools.curl, tools.ping, tools.dns, tools.nc, shellPath},
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^allowed[.]localhost$`, `^secure[.]localhost$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/ok$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^allowed[.]localhost$`, `^secure[.]localhost$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/ok$`},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -586,20 +631,41 @@ type loopbackDNSServer struct {
 	tcp  net.Listener
 }
 
+var listenLoopbackTCPForDNS = func() (net.Listener, error) {
+	return net.Listen("tcp", "127.0.0.1:0")
+}
+
+func listenLoopbackTCPAndUDPOnSamePort() (net.Listener, net.PacketConn, error) {
+	var lastErr error
+	for range 32 {
+		tcpListener, err := listenLoopbackTCPForDNS()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		port := tcpListener.Addr().(*net.TCPAddr).Port
+		udpConn, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err == nil {
+			return tcpListener, udpConn, nil
+		}
+
+		lastErr = err
+		_ = tcpListener.Close()
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("exhausted loopback TCP/UDP port attempts")
+	}
+	return nil, nil, lastErr
+}
+
 func startLoopbackDNSTestServer(t *testing.T) *loopbackDNSServer {
 	t.Helper()
 
-	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	tcpListener, udpConn, err := listenLoopbackTCPAndUDPOnSamePort()
 	if err != nil {
-		t.Fatalf("listen TCP DNS probe: %v", err)
+		t.Fatalf("listen TCP+UDP DNS probe: %v", err)
 	}
-
 	port := tcpListener.Addr().(*net.TCPAddr).Port
-	udpConn, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-	if err != nil {
-		_ = tcpListener.Close()
-		t.Fatalf("listen UDP DNS probe: %v", err)
-	}
 
 	server := &loopbackDNSServer{
 		host: "127.0.0.1",

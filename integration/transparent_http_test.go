@@ -52,9 +52,13 @@ func TestTransparentHTTPWithCurl(t *testing.T) {
 		Binaries:    []string{curlPath},
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^allowed[.]localhost$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/allowed$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^allowed[.]localhost$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/allowed$`},
+				},
+			},
 		},
 	})
 	if err != nil {

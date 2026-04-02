@@ -53,11 +53,17 @@ func TestSandboxMITMHTTPSWithCurl(t *testing.T) {
 	targetBase := server.URL
 
 	allowPolicy := bbox.NetworkPolicy{
-		AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-		AllowHTTPMethods:  []string{"GET", "POST"},
-		AllowConnect:      true,
-		AllowConnectPorts: []string{port},
-		AllowPathPatterns: []string{`^/allowed$`},
+		Rules: []bbox.PolicyRule{
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				ConnectPorts: []string{port},
+			},
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				HTTPMethods:  []string{"GET", "POST"},
+				PathPatterns: []string{`^/allowed$`},
+			},
+		},
 	}
 
 	allowSandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
@@ -113,15 +119,21 @@ func TestSandboxMITMHTTPSWithCurl(t *testing.T) {
 	}
 
 	requestPolicy := bbox.NetworkPolicy{
-		AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-		AllowHTTPMethods:  []string{"POST"},
-		AllowConnect:      true,
-		AllowConnectPorts: []string{port},
-		AllowPathPatterns: []string{`^/submit$`},
-		DenyHeaderPatterns: map[string][]string{
-			"X-Mode": {`^blocked$`},
+		Rules: []bbox.PolicyRule{
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				ConnectPorts: []string{port},
+			},
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				HTTPMethods:  []string{"POST"},
+				PathPatterns: []string{`^/submit$`},
+				HeaderPatterns: map[string][]string{
+					"X-Mode": {`^safe$`},
+				},
+				BodyPatterns: []string{`^safe=`},
+			},
 		},
-		AllowBodyPatterns: []string{`^safe=`},
 	}
 
 	requestSandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
@@ -155,7 +167,7 @@ func TestSandboxMITMHTTPSWithCurl(t *testing.T) {
 		t.Fatalf("expected blocked header to return HTTP response, exit=%d stderr=%q", deniedHeaderResult.ExitCode, string(deniedHeaderResult.Stderr))
 	}
 	deniedHeaderOutput := strings.TrimSpace(string(deniedHeaderResult.Stdout))
-	if !strings.Contains(deniedHeaderOutput, "proxy request denied: header x-mode is denied by policy") {
+	if !strings.Contains(deniedHeaderOutput, "proxy request denied: header x-mode is not allowed by policy") {
 		t.Fatalf("unexpected blocked header output: %q", deniedHeaderOutput)
 	}
 	if !strings.HasSuffix(deniedHeaderOutput, "403") {
@@ -222,11 +234,17 @@ func TestMITMSharedManagerServesMultipleSandboxes(t *testing.T) {
 	}()
 
 	policy := bbox.NetworkPolicy{
-		AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-		AllowHTTPMethods:  []string{"GET"},
-		AllowConnect:      true,
-		AllowConnectPorts: []string{mustPortForServer(t, server)},
-		AllowPathPatterns: []string{`^/shared$`},
+		Rules: []bbox.PolicyRule{
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				ConnectPorts: []string{mustPortForServer(t, server)},
+			},
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				HTTPMethods:  []string{"GET"},
+				PathPatterns: []string{`^/shared$`},
+			},
+		},
 	}
 
 	alpha, err := manager.NewSandbox(ctx, bbox.SandboxOptions{

@@ -67,7 +67,13 @@ func (s *managerProxyService) HandleProxyRequest(ctx context.Context, policy *co
 		}
 	}
 	host, port := normalizeHostPort(targetURL.Host, port)
-	policyEval := policy.evaluate(req.Method, targetURL.Host, req.Method == http.MethodConnect)
+	policyEval := policy.evaluateRequest(PolicyRequest{
+		Method: req.Method,
+		Host:   targetURL.Host,
+		Path:   path,
+		Header: req.Header,
+		Body:   req.Body,
+	})
 	event := eventWithPolicyMetadata(accessEvent{
 		SandboxID: sandboxID,
 		Kind:      "http",

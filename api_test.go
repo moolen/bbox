@@ -5,42 +5,52 @@ import (
 	"testing"
 )
 
-func TestNewProxyManagerRejectsInvalidRegex(t *testing.T) {
+func TestNewProxyManagerRejectsInvalidRuleHostRegex(t *testing.T) {
 	_, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowHostPatterns: []string{"["},
+			Rules: []PolicyRule{
+				{HostPatterns: []string{"["}},
+			},
 		},
 	})
 	if err == nil {
 		t.Fatal("expected constructor to reject invalid policy regex")
 	}
-	if !strings.Contains(err.Error(), "allow host pattern") {
-		t.Fatalf("expected allow host pattern context, got %q", err.Error())
+	if !strings.Contains(err.Error(), "host pattern") {
+		t.Fatalf("expected host pattern context, got %q", err.Error())
 	}
 }
 
-func TestNewProxyManagerRejectsInvalidDenyRegex(t *testing.T) {
+func TestNewProxyManagerRejectsInvalidRuleHeaderRegex(t *testing.T) {
 	_, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			DenyHostPatterns: []string{"["},
+			Rules: []PolicyRule{
+				{
+					HeaderPatterns: map[string][]string{
+						"X-Test": {"["},
+					},
+				},
+			},
 		},
 	})
 	if err == nil {
-		t.Fatal("expected constructor to reject invalid deny regex")
+		t.Fatal("expected constructor to reject invalid header regex")
 	}
-	if !strings.Contains(err.Error(), "deny host pattern") {
-		t.Fatalf("expected deny host pattern context, got %q", err.Error())
+	if !strings.Contains(err.Error(), "header") {
+		t.Fatalf("expected header pattern context, got %q", err.Error())
 	}
 }
 
 func TestNewProxyManagerAcceptsPolicyOptions(t *testing.T) {
 	manager, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowHTTPMethods: []string{"GET"},
+			Rules: []PolicyRule{
+				{HTTPMethods: []string{"GET"}},
+			},
 		},
 	})
 	if err != nil {
-		t.Fatalf("expected AllowHTTPMethods policy option to be accepted: %v", err)
+		t.Fatalf("expected HTTPMethods policy option to be accepted: %v", err)
 	}
 	if manager == nil {
 		t.Fatal("expected non-nil manager")
@@ -48,11 +58,13 @@ func TestNewProxyManagerAcceptsPolicyOptions(t *testing.T) {
 
 	manager, err = NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowConnect: true,
+			Rules: []PolicyRule{
+				{ConnectPorts: []string{"443"}},
+			},
 		},
 	})
 	if err != nil {
-		t.Fatalf("expected AllowConnect policy option to be accepted: %v", err)
+		t.Fatalf("expected ConnectPorts policy option to be accepted: %v", err)
 	}
 	if manager == nil {
 		t.Fatal("expected non-nil manager")
@@ -62,8 +74,12 @@ func TestNewProxyManagerAcceptsPolicyOptions(t *testing.T) {
 func TestNewProxyManagerAcceptsValidPolicy(t *testing.T) {
 	manager, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowHostPatterns: []string{`^example\.com$`},
-			DenyHostPatterns:  []string{`^internal\.example\.com$`},
+			Rules: []PolicyRule{
+				{
+					HostPatterns: []string{`^example\.com$`},
+					HTTPMethods:  []string{"GET"},
+				},
+			},
 		},
 	})
 	if err != nil {

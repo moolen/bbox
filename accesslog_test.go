@@ -1,6 +1,9 @@
 package bbox
 
 import (
+	"io"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,7 +52,7 @@ func TestNewProxyManagerPreservesInjectedAccessLogger(t *testing.T) {
 	}
 }
 
-func TestNewProxyManagerSharesDefaultAccessLogger(t *testing.T) {
+func TestNewProxyManagerCreatesDistinctDefaultAccessLoggers(t *testing.T) {
 	managerA, err := NewProxyManager(ProxyOptions{})
 	if err != nil {
 		t.Fatalf("create manager A: %v", err)
@@ -62,8 +65,90 @@ func TestNewProxyManagerSharesDefaultAccessLogger(t *testing.T) {
 	}
 	defer managerB.Close()
 
-	if managerA.accessLogger != managerB.accessLogger {
-		t.Fatal("expected default access logger to be shared across managers")
+	if managerA.accessLogger == managerB.accessLogger {
+		t.Fatal("expected default access logger instances to be manager-local")
+	}
+}
+
+func TestNewProxyManagerDefaultAccessLoggerWritesToStderr(t *testing.T) {
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	os.Stdout = stdoutW
+	os.Stderr = stderrW
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
+	}()
+
+	manager, err := NewProxyManager(ProxyOptions{})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	defer manager.Close()
+	if err := manager.registerSandbox("sandbox-stderr", mustCompilePolicy(t, NetworkPolicy{})); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	manager.recordAccessEvent(accessEvent{
+		SandboxID:     "sandbox-stderr",
+		Kind:          "http",
+		Host:          "example.com",
+		Port:          443,
+		Result:        "allowed",
+		Allowed:       true,
+		PolicyAllowed: true,
+	})
+
+	os.Stdout = origStdout
+	os.Stderr = origStderr
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
+
+	stdoutBytes, err := io.ReadAll(stdoutR)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stderrBytes, err := io.ReadAll(stderrR)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+
+	if len(stdoutBytes) != 0 {
+		t.Fatalf("expected default access logger to avoid stdout, got %q", string(stdoutBytes))
+	}
+	if !strings.Contains(string(stderrBytes), "\"SandboxID\":\"sandbox-stderr\"") {
+		t.Fatalf("expected default access logger output on stderr, got %q", string(stderrBytes))
+	}
+}
+
+func TestDefaultJSONAccessLoggerDefersWritesUntilFlush(t *testing.T) {
+	var buf strings.Builder
+	logger := newDefaultJSONAccessLoggerWithMode(&buf, true)
+
+	logger.LogAccess(AccessLogEntry{
+		SandboxID: "sandbox-tty",
+		Kind:      "http",
+		Host:      "example.com",
+		Port:      443,
+	})
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected deferred logger to avoid writes before flush, got %q", buf.String())
+	}
+
+	logger.Flush()
+	if !strings.Contains(buf.String(), "\"SandboxID\":\"sandbox-tty\"") {
+		t.Fatalf("expected deferred logger output after flush, got %q", buf.String())
 	}
 }
 
@@ -84,8 +169,31 @@ func TestNewProxyManagerTreatsTypedNilAccessLoggerAsNil(t *testing.T) {
 	if manager.accessLogger == logger {
 		t.Fatal("expected typed-nil access logger to be replaced")
 	}
-	if manager.accessLogger != sharedStdoutAccessLogger {
+	if manager.accessLogger == nil {
 		t.Fatal("expected default access logger for typed-nil input")
+	}
+}
+
+type stubFlushAccessLogger struct {
+	flushed bool
+}
+
+func (s *stubFlushAccessLogger) LogAccess(AccessLogEntry) {}
+
+func (s *stubFlushAccessLogger) Flush() {
+	s.flushed = true
+}
+
+func TestProxyManagerCloseFlushesAccessLogger(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	logger := &stubFlushAccessLogger{}
+	manager.accessLogger = logger
+
+	if err := manager.Close(); err != nil {
+		t.Fatalf("close manager: %v", err)
+	}
+	if !logger.flushed {
+		t.Fatal("expected manager close to flush access logger")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -59,6 +60,15 @@ type commandDeps struct {
 	environ func() []string
 	run     func(runConfig) error
 }
+
+var (
+	cliIsTerminal   = func(fd int) bool { return term.IsTerminal(fd) }
+	cliMakeRaw      = term.MakeRaw
+	cliGetSize      = term.GetSize
+	cliSignalNotify = signal.Notify
+	cliSignalStop   = signal.Stop
+	cliPlatform     = runtime.GOOS
+)
 
 type exitCodeError struct {
 	code int
@@ -265,7 +275,7 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 	}
 
 	mounts := make([]bbox.Mount, 0, 1+len(mergedCfg.MountRO)+len(mergedCfg.MountRW))
-	if !hasMount(absCWD, absCWD, append(mergedCfg.MountRO, mergedCfg.MountRW...)) {
+	if cliPlatform != "darwin" && !hasMount(absCWD, absCWD, append(mergedCfg.MountRO, mergedCfg.MountRW...)) {
 		mounts = append(mounts, bbox.Mount{
 			Source:   absCWD,
 			Target:   absCWD,
@@ -303,13 +313,18 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 	if err != nil {
 		return runConfig{}, err
 	}
+	if cliPlatform != "darwin" {
+		pathMounts, err := pathAvailabilityMounts(envEntries, absCWD, mounts)
+		if err != nil {
+			return runConfig{}, err
+		}
+		mounts = append(mounts, pathMounts...)
+	}
 
 	binaries := make([]string, 0, 1+len(mergedCfg.Bin))
-	binaries = append(binaries, payload[0])
-	for _, binary := range mergedCfg.Bin {
-		if !contains(binaries, binary) {
-			binaries = append(binaries, binary)
-		}
+	binaries, err = resolveRequestedBinaries(append([]string{payload[0]}, mergedCfg.Bin...), envEntries, absCWD)
+	if err != nil {
+		return runConfig{}, err
 	}
 
 	policyMode := bbox.PolicyModeAudit
@@ -326,7 +341,7 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 	return runConfig{
 		manager: bbox.ProxyOptions{
 			MaxRequestBodyBytes: mergedCfg.MaxRequestBodyBytes,
-			MITM:                bbox.MITMOptions{Enabled: true},
+			MITM:                bbox.MITMOptions{Enabled: trafficMode == bbox.TrafficModeTransparent},
 			PolicyMode:          policyMode,
 			Reporting:           reporting,
 		},
@@ -336,22 +351,8 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 			Mounts:      mounts,
 			Env:         envEntries,
 			TrafficMode: trafficMode,
-			Policy: bbox.NetworkPolicy{
-				AllowHostPatterns:   append([]string(nil), mergedCfg.Policy.AllowHostPatterns...),
-				DenyHostPatterns:    append([]string(nil), mergedCfg.Policy.DenyHostPatterns...),
-				AllowIPCIDRs:        append([]string(nil), mergedCfg.Policy.AllowIPCIDRs...),
-				DenyIPCIDRs:         append([]string(nil), mergedCfg.Policy.DenyIPCIDRs...),
-				AllowHTTPMethods:    normalizeHTTPMethods(mergedCfg.Policy.AllowHTTPMethods),
-				AllowConnect:        mergedCfg.Policy.AllowConnect,
-				AllowConnectPorts:   append([]string(nil), mergedCfg.Policy.AllowConnectPorts...),
-				AllowPathPatterns:   append([]string(nil), mergedCfg.Policy.AllowPathPatterns...),
-				DenyPathPatterns:    append([]string(nil), mergedCfg.Policy.DenyPathPatterns...),
-				AllowHeaderPatterns: cloneStringSliceMap(mergedCfg.Policy.AllowHeaderPatterns),
-				DenyHeaderPatterns:  cloneStringSliceMap(mergedCfg.Policy.DenyHeaderPatterns),
-				AllowBodyPatterns:   append([]string(nil), mergedCfg.Policy.AllowBodyPatterns...),
-				DenyBodyPatterns:    append([]string(nil), mergedCfg.Policy.DenyBodyPatterns...),
-			},
-			WorkDir: workDir,
+			Policy:      buildNetworkPolicy(mergedCfg.Policy),
+			WorkDir:     workDir,
 		},
 		argv:          append([]string(nil), payload...),
 		printPolicy:   opts.printPolicy,
@@ -385,6 +386,197 @@ func buildSandboxEnv(opts cliOptions, environ []string) ([]string, error) {
 		envEntries = append(envEntries, entry)
 	}
 	return envEntries, nil
+}
+
+func resolveRequestedBinaries(requested []string, envEntries []string, cwd string) ([]string, error) {
+	pathValue, hasPATH := lastEnvValue(envEntries, "PATH")
+	binaries := make([]string, 0, len(requested))
+	for _, binary := range requested {
+		resolved := binary
+		var err error
+		if hasPATH || strings.Contains(binary, string(filepath.Separator)) {
+			resolved, err = resolveBinaryForPATH(binary, pathValue, cwd)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !contains(binaries, resolved) {
+			binaries = append(binaries, resolved)
+		}
+	}
+	return binaries, nil
+}
+
+func resolveBinaryForPATH(nameOrPath string, pathValue string, cwd string) (string, error) {
+	if strings.TrimSpace(nameOrPath) == "" {
+		return "", fmt.Errorf("binary path is required")
+	}
+	if strings.Contains(nameOrPath, string(filepath.Separator)) {
+		absPath, err := absPathFromCWD(nameOrPath, cwd)
+		if err != nil {
+			return "", fmt.Errorf("resolve absolute binary path %q: %w", nameOrPath, err)
+		}
+		if _, err := os.Stat(absPath); err != nil {
+			return "", fmt.Errorf("binary %q: %w", absPath, err)
+		}
+		return absPath, nil
+	}
+
+	for _, dir := range splitPATH(pathValue, cwd) {
+		candidate := filepath.Join(dir, nameOrPath)
+		info, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("resolve binary %q in PATH %q: executable not found", nameOrPath, pathValue)
+}
+
+func splitPATH(pathValue string, cwd string) []string {
+	if strings.TrimSpace(pathValue) == "" {
+		return nil
+	}
+	parts := strings.Split(pathValue, string(os.PathListSeparator))
+	dirs := make([]string, 0, len(parts))
+	for _, part := range parts {
+		dir, err := normalizePATHDir(part, cwd)
+		if err != nil {
+			continue
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+func normalizePATHDir(dir string, cwd string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return absPathFromCWD(".", cwd)
+	}
+	return absPathFromCWD(dir, cwd)
+}
+
+func absPathFromCWD(path string, cwd string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	base := cwd
+	if strings.TrimSpace(base) == "" {
+		var err error
+		base, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Clean(filepath.Join(base, path)), nil
+}
+
+func lastEnvValue(env []string, key string) (string, bool) {
+	for i := len(env) - 1; i >= 0; i-- {
+		entryKey, value, ok := strings.Cut(env[i], "=")
+		if !ok {
+			continue
+		}
+		if entryKey == key {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func pathAvailabilityMounts(envEntries []string, cwd string, existing []bbox.Mount) ([]bbox.Mount, error) {
+	pathValue, ok := lastEnvValue(envEntries, "PATH")
+	if !ok {
+		return nil, nil
+	}
+	mounts := make([]bbox.Mount, 0)
+	for _, dir := range splitPATH(pathValue, cwd) {
+		mount, ok, err := pathMountForDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || mountOverlapsAny(mount, append(existing, mounts...)) {
+			continue
+		}
+		if !containsMountSpec(mounts, mount) {
+			mounts = append(mounts, mount)
+		}
+	}
+	return mounts, nil
+}
+
+func pathMountForDir(dir string) (bbox.Mount, bool, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return bbox.Mount{}, false, nil
+		}
+		return bbox.Mount{}, false, fmt.Errorf("stat PATH dir %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return bbox.Mount{}, false, nil
+	}
+
+	target := dir
+	resolved := dir
+	if eval, err := filepath.EvalSymlinks(dir); err == nil && strings.TrimSpace(eval) != "" {
+		resolved = filepath.Clean(eval)
+	}
+
+	switch {
+	case resolved == "/usr" || strings.HasPrefix(resolved, "/usr/"):
+		target = "/usr"
+	case filepath.Base(dir) == "bin" || filepath.Base(dir) == "sbin":
+		target = filepath.Dir(dir)
+	}
+
+	info, err = os.Stat(target)
+	if err != nil {
+		return bbox.Mount{}, false, fmt.Errorf("stat PATH mount root %q: %w", target, err)
+	}
+	if !info.IsDir() {
+		return bbox.Mount{}, false, nil
+	}
+
+	return bbox.Mount{
+		Source:   target,
+		Target:   target,
+		ReadOnly: true,
+	}, true, nil
+}
+
+func mountOverlapsAny(want bbox.Mount, existing []bbox.Mount) bool {
+	for _, mount := range existing {
+		if mountTargetsOverlap(mount.Target, want.Target) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsMountSpec(values []bbox.Mount, want bbox.Mount) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func mountTargetsOverlap(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	if a == b {
+		return true
+	}
+	if a == "/" || b == "/" {
+		return true
+	}
+	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
 func parseMountSpec(spec string, readOnly bool) (bbox.Mount, error) {
@@ -428,7 +620,26 @@ func normalizeHTTPMethods(values []string) []string {
 		}
 		methods = append(methods, value)
 	}
+	if len(methods) == 0 {
+		return nil
+	}
 	return methods
+}
+
+func buildNetworkPolicy(cfg cliPolicyConfig) bbox.NetworkPolicy {
+	rules := make([]bbox.PolicyRule, 0, len(cfg.Rules))
+	for _, rule := range cfg.Rules {
+		rules = append(rules, bbox.PolicyRule{
+			HostPatterns:   cloneStringSlice(rule.HostPatterns),
+			IPCIDRs:        cloneStringSlice(rule.IPCIDRs),
+			HTTPMethods:    normalizeHTTPMethods(rule.HTTPMethods),
+			ConnectPorts:   cloneStringSlice(rule.ConnectPorts),
+			PathPatterns:   cloneStringSlice(rule.PathPatterns),
+			HeaderPatterns: cloneStringSliceMap(rule.HeaderPatterns),
+			BodyPatterns:   cloneStringSlice(rule.BodyPatterns),
+		})
+	}
+	return bbox.NetworkPolicy{Rules: rules}
 }
 
 func printPolicy(w io.Writer, cfg runConfig) error {
@@ -464,6 +675,10 @@ func runSandbox(cfg runConfig) error {
 	accessLogger := newCLIAccessLogger(stdout, cfg.accessLogMode == "json")
 	cfg.manager.AccessLogger = accessLogger
 
+	if err := validateRunConfigPlatform(cfg); err != nil {
+		return err
+	}
+
 	manager, err := bbox.NewProxyManager(cfg.manager)
 	if err != nil {
 		return err
@@ -476,7 +691,7 @@ func runSandbox(cfg runConfig) error {
 	}
 	defer sandbox.Close()
 
-	runOpts, cleanup, err := buildInteractiveRunOptions(stdout, stderr)
+	runOpts, interactive, cleanup, err := buildCLIProcessRunOptions(os.Stdin, stdout, stderr)
 	if err != nil {
 		return err
 	}
@@ -486,9 +701,19 @@ func runSandbox(cfg runConfig) error {
 	}
 	defer cleanupRun()
 
-	result, err := sandbox.RunInteractive(ctx, cfg.argv, runOpts)
+	var result *bbox.RunResult
+	if interactive {
+		result, err = sandbox.RunInteractive(ctx, cfg.argv, runOpts)
+	} else {
+		result, err = sandbox.Run(ctx, cfg.argv, runOpts)
+	}
 	if err != nil {
 		return err
+	}
+	if !interactive {
+		if err := writeBufferedRunResult(stdout, stderr, result); err != nil {
+			return err
+		}
 	}
 	if err := finalizeRunOutput(cleanupRun, stderr, accessLogger, sandbox.AccessSummary(), cfg.reporting); err != nil {
 		return err
@@ -499,31 +724,51 @@ func runSandbox(cfg runConfig) error {
 	return nil
 }
 
-func buildInteractiveRunOptions(stdout, stderr io.Writer) (bbox.RunOptions, func(), error) {
+func validateRunConfigPlatform(cfg runConfig) error {
+	if cliPlatform != "darwin" {
+		return nil
+	}
+	if cfg.sandbox.TrafficMode == bbox.TrafficModeTransparent {
+		return fmt.Errorf("transparent traffic mode is not supported on darwin")
+	}
+	for _, mount := range cfg.sandbox.Mounts {
+		if mount.ReadOnly {
+			return fmt.Errorf("mount_ro is not supported on darwin")
+		}
+		return fmt.Errorf("mount_rw is not supported on darwin")
+	}
+	return nil
+}
+
+func buildCLIProcessRunOptions(stdin *os.File, stdout, stderr io.Writer) (bbox.RunOptions, bool, func(), error) {
+	if stdin == nil {
+		stdin = os.Stdin
+	}
 	if stdout == nil {
 		stdout = os.Stdout
 	}
 	if stderr == nil {
 		stderr = os.Stderr
 	}
+
+	fd := int(stdin.Fd())
+	if !cliIsTerminal(fd) {
+		return bbox.RunOptions{}, false, func() {}, nil
+	}
+
 	opts := bbox.RunOptions{
 		Interactive: true,
-		Stdin:       os.Stdin,
+		Stdin:       stdin,
 		Stdout:      stdout,
 		Stderr:      stderr,
 	}
 
-	fd := int(os.Stdin.Fd())
-	if !term.IsTerminal(fd) {
-		return opts, func() {}, nil
-	}
-
-	state, err := term.MakeRaw(fd)
+	state, err := cliMakeRaw(fd)
 	if err != nil {
-		return bbox.RunOptions{}, nil, fmt.Errorf("configure terminal: %w", err)
+		return bbox.RunOptions{}, false, nil, fmt.Errorf("configure terminal: %w", err)
 	}
 
-	width, height, err := term.GetSize(fd)
+	width, height, err := cliGetSize(fd)
 	if err != nil || width <= 0 || height <= 0 {
 		width = 80
 		height = 24
@@ -534,14 +779,14 @@ func buildInteractiveRunOptions(stdout, stderr io.Writer) (bbox.RunOptions, func
 	resizeCh := make(chan bbox.TerminalSize, 1)
 	done := make(chan struct{})
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
+	cliSignalNotify(sigCh, syscall.SIGWINCH)
 	go func() {
 		for {
 			select {
 			case <-done:
 				return
 			case <-sigCh:
-				width, height, err := term.GetSize(fd)
+				width, height, err := cliGetSize(fd)
 				if err != nil || width <= 0 || height <= 0 {
 					continue
 				}
@@ -557,11 +802,28 @@ func buildInteractiveRunOptions(stdout, stderr io.Writer) (bbox.RunOptions, func
 
 	cleanup := func() {
 		close(done)
-		signal.Stop(sigCh)
+		cliSignalStop(sigCh)
 		close(sigCh)
 		_ = term.Restore(fd, state)
 	}
-	return opts, cleanup, nil
+	return opts, true, cleanup, nil
+}
+
+func writeBufferedRunResult(stdout, stderr io.Writer, result *bbox.RunResult) error {
+	if result == nil {
+		return nil
+	}
+	if stdout != nil && len(result.Stdout) > 0 {
+		if _, err := stdout.Write(result.Stdout); err != nil {
+			return fmt.Errorf("write buffered stdout: %w", err)
+		}
+	}
+	if stderr != nil && len(result.Stderr) > 0 {
+		if _, err := stderr.Write(result.Stderr); err != nil {
+			return fmt.Errorf("write buffered stderr: %w", err)
+		}
+	}
+	return nil
 }
 
 func contains(values []string, want string) bool {

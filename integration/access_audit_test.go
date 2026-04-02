@@ -160,8 +160,12 @@ func TestSandboxAuditMode(t *testing.T) {
 			Binaries:   []string{curlPath},
 			PolicyMode: bbox.PolicyModeAudit,
 			Policy: bbox.NetworkPolicy{
-				AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-				AllowHTTPMethods:  []string{http.MethodGet},
+				Rules: []bbox.PolicyRule{
+					{
+						HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+						HTTPMethods:  []string{http.MethodGet},
+					},
+				},
 			},
 		})
 		if err != nil {
@@ -285,7 +289,9 @@ func main() {
 			TrafficMode: bbox.TrafficModeTransparent,
 			PolicyMode:  bbox.PolicyModeAudit,
 			Policy: bbox.NetworkPolicy{
-				AllowHostPatterns: []string{`^allowed[.]test$`},
+				Rules: []bbox.PolicyRule{
+					{HostPatterns: []string{`^allowed[.]test$`}},
+				},
 			},
 		})
 		if err != nil {
@@ -394,9 +400,12 @@ func main() {
 			Binaries:   []string{curlPath},
 			PolicyMode: bbox.PolicyModeAudit,
 			Policy: bbox.NetworkPolicy{
-				AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-				AllowConnect:      true,
-				AllowConnectPorts: []string{"443"},
+				Rules: []bbox.PolicyRule{
+					{
+						HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+						ConnectPorts: []string{"443"},
+					},
+				},
 			},
 		})
 		if err != nil {
@@ -500,8 +509,12 @@ func main() {
 			Binaries:   []string{curlPath},
 			PolicyMode: bbox.PolicyModeEnforce,
 			Policy: bbox.NetworkPolicy{
-				AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-				AllowHTTPMethods:  []string{http.MethodGet},
+				Rules: []bbox.PolicyRule{
+					{
+						HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+						HTTPMethods:  []string{http.MethodGet},
+					},
+				},
 			},
 		})
 		if err != nil {
@@ -598,8 +611,12 @@ func TestSandboxAccessSummary(t *testing.T) {
 		Binaries:   []string{curlPath},
 		PolicyMode: bbox.PolicyModeAudit,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{http.MethodGet},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{http.MethodGet},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -752,8 +769,12 @@ func TestSandboxAccessedDomainsTracksAllowedAndDeniedHTTPRequests(t *testing.T) 
 		Name:     "audit-http",
 		Binaries: []string{curlPath},
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{http.MethodGet},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{http.MethodGet},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -871,8 +892,12 @@ func TestSandboxAuditModeAllowsDeniedHTTPRequestButLogsViolation(t *testing.T) {
 
 	portStr := mustPortForServer(t, server)
 	policy := bbox.NetworkPolicy{
-		AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-		AllowHTTPMethods:  []string{http.MethodGet},
+		Rules: []bbox.PolicyRule{
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				HTTPMethods:  []string{http.MethodGet},
+			},
+		},
 	}
 
 	enforceSandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
@@ -1075,11 +1100,17 @@ func TestSandboxAccessedDomainsTracksConnectWhenMITMDenied(t *testing.T) {
 		Name:     "audit-mitm",
 		Binaries: []string{curlPath},
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{http.MethodGet},
-			AllowConnect:      true,
-			AllowConnectPorts: []string{portStr},
-			AllowPathPatterns: []string{`^/ok$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					ConnectPorts: []string{portStr},
+				},
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{http.MethodGet},
+					PathPatterns: []string{`^/ok$`},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -1186,11 +1217,17 @@ func TestSandboxInjectedAccessLoggerReceivesConnectAndMITMEntries(t *testing.T) 
 		Name:     "audit-logger",
 		Binaries: []string{curlPath},
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{http.MethodGet},
-			AllowConnect:      true,
-			AllowConnectPorts: []string{portStr},
-			AllowPathPatterns: []string{`^/ok$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					ConnectPorts: []string{portStr},
+				},
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{http.MethodGet},
+					PathPatterns: []string{`^/ok$`},
+				},
+			},
 		},
 	})
 	if err != nil {

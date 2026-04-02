@@ -181,7 +181,6 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 	if err != nil {
 		return "", err
 	}
-	normalizedMode := normalizeTrafficMode(mode)
 
 	var files []string
 	for _, requested := range opts.Binaries {
@@ -213,15 +212,13 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 		}
 		files = append(files, deps...)
 	}
-	if normalizedMode == TrafficModeTransparent {
-		if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2")); ok {
-			extras = append(extras, path)
-			deps, err := runtimeFilesForBinary(path)
-			if err != nil {
-				return "", err
-			}
-			files = append(files, deps...)
+	if path, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2")); ok {
+		extras = append(extras, path)
+		deps, err := runtimeFilesForBinary(path)
+		if err != nil {
+			return "", err
 		}
+		files = append(files, deps...)
 	}
 	for _, extra := range extras {
 		if _, err := os.Stat(extra); err == nil {
@@ -248,21 +245,16 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 }
 
 func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
-	nsswitchContent := "hosts: files\n"
-	if normalizeTrafficMode(mode) == TrafficModeTransparent {
-		nsswitchContent = "hosts: files dns\n"
-	}
+	nsswitchContent := "hosts: files dns\n"
 	files := map[string]string{
 		"/etc/hosts":         "127.0.0.1 localhost\n::1 localhost\n",
 		"/etc/nsswitch.conf": nsswitchContent,
 	}
-	if normalizeTrafficMode(mode) == TrafficModeTransparent {
-		content, err := transparentResolvConfContent()
-		if err != nil {
-			return err
-		}
-		files["/etc/resolv.conf"] = content
+	content, err := transparentResolvConfContent()
+	if err != nil {
+		return err
 	}
+	files["/etc/resolv.conf"] = content
 	if len(mitmCAPEM) > 0 {
 		for _, path := range mitmTrustBundlePaths {
 			files[path] = string(mitmCAPEM)

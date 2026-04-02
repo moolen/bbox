@@ -91,6 +91,25 @@ func TestSandboxUsesHelperReportedProxyEnv(t *testing.T) {
 	}
 }
 
+func TestSandboxUsesProvidedPATHInProxyMode(t *testing.T) {
+	env := runEnvForProxyAddr("127.0.0.1:40123", []string{
+		"PATH=/custom/bin:/custom/sbin",
+	})
+
+	got := make(map[string]string, len(env))
+	for _, entry := range env {
+		key, value, ok := splitEnv(entry)
+		if !ok {
+			t.Fatalf("invalid env entry %q", entry)
+		}
+		got[key] = value
+	}
+
+	if got["PATH"] != "/custom/bin:/custom/sbin" {
+		t.Fatalf("unexpected PATH: got %q", got["PATH"])
+	}
+}
+
 func TestSandboxProxyAccessors(t *testing.T) {
 	sandbox := &Sandbox{proxyAddr: "127.0.0.1:40123"}
 
@@ -210,5 +229,24 @@ func TestRunEnvForTrafficModeSkipsProxyEnvInTransparentMode(t *testing.T) {
 	}
 	if got["FOO"] != "bar" {
 		t.Fatalf("unexpected FOO: got %q", got["FOO"])
+	}
+}
+
+func TestRunEnvForTrafficModePreservesPATHOverrideInTransparentMode(t *testing.T) {
+	env := runEnvForTrafficMode(TrafficModeTransparent, "127.0.0.1:40123", []string{
+		"PATH=/custom/bin:/custom/sbin",
+	})
+
+	got := make(map[string]string, len(env))
+	for _, entry := range env {
+		key, value, ok := splitEnv(entry)
+		if !ok {
+			t.Fatalf("invalid env entry %q", entry)
+		}
+		got[key] = value
+	}
+
+	if got["PATH"] != "/custom/bin:/custom/sbin" {
+		t.Fatalf("unexpected PATH: got %q", got["PATH"])
 	}
 }

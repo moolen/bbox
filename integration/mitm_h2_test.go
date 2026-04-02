@@ -205,11 +205,17 @@ func TestSandboxMITMHTTP2ConcurrentStreams(t *testing.T) {
 			{Source: filepath.Dir(clientBinary), Target: "/workspace", ReadOnly: true},
 		},
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowConnect:      true,
-			AllowConnectPorts: []string{mustPortForServer(t, server)},
-			AllowPathPatterns: []string{`^/warmup$`, `^/stream/[0-9]+$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					ConnectPorts: []string{mustPortForServer(t, server)},
+				},
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/warmup$`, `^/stream/[0-9]+$`},
+				},
+			},
 		},
 	})
 	if err != nil {

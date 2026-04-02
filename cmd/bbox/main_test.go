@@ -50,6 +50,33 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestBuildCLIProcessRunOptionsUsesBufferedModeWithoutTTY(t *testing.T) {
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+
+	opts, interactive, cleanup, err := buildCLIProcessRunOptions(stdin, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if interactive {
+		t.Fatal("expected non-tty stdin to disable interactive execution")
+	}
+	if opts.Interactive {
+		t.Fatalf("expected non-tty run options to stay buffered, got %#v", opts)
+	}
+	if opts.Stdin != nil || opts.Stdout != nil || opts.Stderr != nil {
+		t.Fatalf("expected non-tty run options to avoid live stdio forwarding, got %#v", opts)
+	}
+	if opts.Terminal || opts.Resize != nil {
+		t.Fatalf("expected non-tty run options to avoid terminal plumbing, got %#v", opts)
+	}
+}
+
 func TestRootCommandRejectsMissingPayload(t *testing.T) {
 	cmd := newRootCommand(commandDeps{
 		stdout: io.Discard,
@@ -102,8 +129,13 @@ func TestRootCommandDoesNotRegisterRemovedPolicyFlags(t *testing.T) {
 	cmd := newRootCommand(commandDeps{stdout: io.Discard, stderr: io.Discard})
 	for _, flag := range []string{
 		"allowed-domain",
+		"allowed-domains-file",
 		"deny-domain",
+		"allow-connect",
+		"allow-connect-port",
 		"allow-http-method",
+		"allow-path",
+		"deny-path",
 		"policy-mode",
 		"mitm",
 	} {
@@ -126,6 +158,21 @@ func TestBuildConfigDefaultsToAuditReportingWithoutConfigFile(t *testing.T) {
 	}
 }
 
+func TestBuildConfigDefaultsAllowHTTPSConnectWithoutConfigFile(t *testing.T) {
+	cfg, err := buildConfig(cliOptions{}, []string{"bash"}, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bbox.NetworkPolicy{
+		Rules: []bbox.PolicyRule{
+			{ConnectPorts: []string{"443"}},
+		},
+	}
+	if !reflect.DeepEqual(cfg.sandbox.Policy, want) {
+		t.Fatalf("expected default CONNECT rule %#v, got %#v", want, cfg.sandbox.Policy)
+	}
+}
+
 func TestBuildConfigUsesBBoxYAMLWhenPresent(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "nested")
@@ -137,10 +184,11 @@ traffic_mode: transparent
 access_log: off
 max_request_body_bytes: 123
 policy:
-  allow_host_patterns:
-    - "^api[.]example[.]com$"
-  allow_http_methods:
-    - post
+  rules:
+    - host_patterns:
+        - "^api[.]example[.]com$"
+      http_methods:
+        - post
 `)
 
 	cfg, err := buildConfig(cliOptions{}, []string{"bash"}, child, nil)
@@ -156,11 +204,16 @@ policy:
 	if cfg.manager.MaxRequestBodyBytes != 123 {
 		t.Fatalf("expected max request body bytes from config file, got %d", cfg.manager.MaxRequestBodyBytes)
 	}
-	if !reflect.DeepEqual(cfg.sandbox.Policy.AllowHostPatterns, []string{"^api[.]example[.]com$"}) {
-		t.Fatalf("unexpected allow host patterns: %v", cfg.sandbox.Policy.AllowHostPatterns)
+	wantPolicy := bbox.NetworkPolicy{
+		Rules: []bbox.PolicyRule{
+			{
+				HostPatterns: []string{"^api[.]example[.]com$"},
+				HTTPMethods:  []string{"POST"},
+			},
+		},
 	}
-	if !reflect.DeepEqual(cfg.sandbox.Policy.AllowHTTPMethods, []string{"POST"}) {
-		t.Fatalf("unexpected allow methods: %v", cfg.sandbox.Policy.AllowHTTPMethods)
+	if !reflect.DeepEqual(cfg.sandbox.Policy, wantPolicy) {
+		t.Fatalf("unexpected policy: %#v", cfg.sandbox.Policy)
 	}
 }
 
@@ -204,6 +257,42 @@ report_request_summary: false
 	}
 	if !cfg.reporting.PolicyViolations || !cfg.reporting.AccessSummary || !cfg.reporting.RequestSummary {
 		t.Fatalf("expected reporting overrides from CLI, got %#v", cfg.reporting)
+	}
+}
+
+func TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime(t *testing.T) {
+	prevPlatform := cliPlatform
+	cliPlatform = "darwin"
+	t.Cleanup(func() {
+		cliPlatform = prevPlatform
+	})
+
+	cwd := t.TempDir()
+	mountSource := t.TempDir()
+
+	cfg, err := buildConfig(cliOptions{
+		mountRO: []string{mountSource + ":/workspace"},
+	}, []string{"/bin/sh"}, cwd, nil)
+	if err != nil {
+		t.Fatalf("buildConfig() error = %v", err)
+	}
+
+	if cfg.sandbox.WorkDir != cwd {
+		t.Fatalf("unexpected workdir: got %q want %q", cfg.sandbox.WorkDir, cwd)
+	}
+	if len(cfg.sandbox.Binaries) == 0 || cfg.sandbox.Binaries[0] != "/bin/sh" {
+		t.Fatalf("unexpected binaries: %#v", cfg.sandbox.Binaries)
+	}
+	if len(cfg.sandbox.Mounts) != 1 {
+		t.Fatalf("expected only the explicit mount on darwin, got %#v", cfg.sandbox.Mounts)
+	}
+
+	err = validateRunConfigPlatform(cfg)
+	if err == nil {
+		t.Fatal("expected explicit mount to fail on darwin")
+	}
+	if !strings.Contains(err.Error(), "mount_ro is not supported on darwin") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -340,12 +429,13 @@ clear_env: true
 
 func TestBuildConfigTrafficModesDoNotRequireMITMFlag(t *testing.T) {
 	tests := []struct {
-		name string
-		mode string
-		want bbox.TrafficMode
+		name     string
+		mode     string
+		want     bbox.TrafficMode
+		wantMITM bool
 	}{
-		{name: "proxy", mode: "proxy", want: bbox.TrafficModeProxy},
-		{name: "transparent", mode: "transparent", want: bbox.TrafficModeTransparent},
+		{name: "proxy", mode: "proxy", want: bbox.TrafficModeProxy, wantMITM: false},
+		{name: "transparent", mode: "transparent", want: bbox.TrafficModeTransparent, wantMITM: true},
 	}
 
 	for _, tt := range tests {
@@ -363,8 +453,8 @@ func TestBuildConfigTrafficModesDoNotRequireMITMFlag(t *testing.T) {
 			if cfg.sandbox.TrafficMode != tt.want {
 				t.Fatalf("unexpected traffic mode: %q", cfg.sandbox.TrafficMode)
 			}
-			if !cfg.manager.MITM.Enabled {
-				t.Fatalf("expected %s mode to enable mitm internally", tt.mode)
+			if cfg.manager.MITM.Enabled != tt.wantMITM {
+				t.Fatalf("expected %s mode mitm=%v, got %v", tt.mode, tt.wantMITM, cfg.manager.MITM.Enabled)
 			}
 		})
 	}
@@ -379,8 +469,9 @@ func TestRootCommandPrintPolicyShowsMergedConfigAndFlagState(t *testing.T) {
 	writeBBoxYAML(t, root, `
 traffic_mode: transparent
 policy:
-  allow_host_patterns:
-    - "^api[.]example[.]com$"
+  rules:
+    - host_patterns:
+        - "^api[.]example[.]com$"
 `)
 
 	var got runConfig
@@ -420,8 +511,13 @@ policy:
 	if printed.Sandbox.TrafficMode != bbox.TrafficModeTransparent {
 		t.Fatalf("expected print-policy to show merged file traffic mode, got %q", printed.Sandbox.TrafficMode)
 	}
-	if !reflect.DeepEqual(printed.Sandbox.Policy.AllowHostPatterns, []string{"^api[.]example[.]com$"}) {
-		t.Fatalf("expected print-policy to include merged file policy, got %v", printed.Sandbox.Policy.AllowHostPatterns)
+	wantPolicy := bbox.NetworkPolicy{
+		Rules: []bbox.PolicyRule{
+			{HostPatterns: []string{"^api[.]example[.]com$"}},
+		},
+	}
+	if !reflect.DeepEqual(printed.Sandbox.Policy, wantPolicy) {
+		t.Fatalf("expected print-policy to include merged file policy, got %#v", printed.Sandbox.Policy)
 	}
 	if printed.Manager.Reporting.AccessSummary {
 		t.Fatalf("expected print-policy to include CLI override state, got %#v", printed.Manager.Reporting)
@@ -480,6 +576,105 @@ func TestBuildConfigAuditShorthandEnablesAuditModeAndReporting(t *testing.T) {
 	}
 }
 
+func TestBuildConfigResolvesRequestedBinariesAgainstEffectivePATHAndAddsPathMounts(t *testing.T) {
+	cwd := t.TempDir()
+	pathRoot := filepath.Join(t.TempDir(), "toolchain")
+	pathDir := filepath.Join(pathRoot, "bin")
+	if err := os.MkdirAll(pathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payloadPath := writeExecutableFixture(t, pathDir, "tool-a")
+	explicitPath := writeExecutableFixture(t, pathDir, "tool-b")
+	if err := os.WriteFile(filepath.Join(pathDir, "tool-c"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := buildConfig(cliOptions{
+		binaries:    []string{"tool-b"},
+		env:         []string{"PATH=" + pathDir},
+		clearEnv:    true,
+		clearEnvSet: true,
+	}, []string{"tool-a"}, cwd, []string{"PATH=/does/not/matter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(cfg.sandbox.Binaries, []string{payloadPath, explicitPath}) {
+		t.Fatalf("unexpected staged binaries: got %v want %v", cfg.sandbox.Binaries, []string{payloadPath, explicitPath})
+	}
+	if got := envValue(cfg.sandbox.Env, "PATH"); got != pathDir {
+		t.Fatalf("expected sandbox PATH %q, got %q", pathDir, got)
+	}
+	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{Source: pathRoot, Target: pathRoot, ReadOnly: true}) {
+		t.Fatalf("expected PATH root mount for %q in %v", pathRoot, cfg.sandbox.Mounts)
+	}
+}
+
+func TestBuildConfigEnvPATHOverrideWinsOverInheritedPATHForMounts(t *testing.T) {
+	cwd := t.TempDir()
+	inheritedRoot := filepath.Join(t.TempDir(), "inherited")
+	inheritedDir := filepath.Join(inheritedRoot, "bin")
+	if err := os.MkdirAll(inheritedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	overrideRoot := filepath.Join(t.TempDir(), "override")
+	overrideDir := filepath.Join(overrideRoot, "bin")
+	if err := os.MkdirAll(overrideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inheritedOnly := writeExecutableFixture(t, inheritedDir, "tool-old")
+	overridePayload := writeExecutableFixture(t, overrideDir, "tool-new")
+	overrideExtra := writeExecutableFixture(t, overrideDir, "tool-extra")
+
+	cfg, err := buildConfig(cliOptions{
+		env: []string{"PATH=" + overrideDir},
+	}, []string{"tool-new"}, cwd, []string{"PATH=" + inheritedDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(cfg.sandbox.Binaries, []string{overridePayload}) {
+		t.Fatalf("unexpected staged binaries: got %v want %v", cfg.sandbox.Binaries, []string{overridePayload})
+	}
+	if containsString(cfg.sandbox.Binaries, overrideExtra) || containsString(cfg.sandbox.Binaries, inheritedOnly) {
+		t.Fatalf("did not expect inherited PATH binary %q in %v", inheritedOnly, cfg.sandbox.Binaries)
+	}
+	if got := envValue(cfg.sandbox.Env, "PATH"); got != overrideDir {
+		t.Fatalf("expected sandbox PATH %q, got %q", overrideDir, got)
+	}
+	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{Source: overrideRoot, Target: overrideRoot, ReadOnly: true}) {
+		t.Fatalf("expected override PATH root mount in %v", cfg.sandbox.Mounts)
+	}
+	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Source: inheritedRoot, Target: inheritedRoot, ReadOnly: true}) {
+		t.Fatalf("did not expect inherited PATH root mount in %v", cfg.sandbox.Mounts)
+	}
+}
+
+func TestBuildConfigCollapsesUsrPathEntriesIntoSingleUsrMount(t *testing.T) {
+	cwd := t.TempDir()
+	cfg, err := buildConfig(cliOptions{
+		env:         []string{"PATH=/usr/local/bin:/usr/bin"},
+		clearEnv:    true,
+		clearEnvSet: true,
+	}, []string{"/bin/true"}, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bbox.Mount{Source: "/usr", Target: "/usr", ReadOnly: true}
+	if !containsMount(cfg.sandbox.Mounts, want) {
+		t.Fatalf("expected /usr PATH mount in %v", cfg.sandbox.Mounts)
+	}
+	count := 0
+	for _, mount := range cfg.sandbox.Mounts {
+		if mount == want {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one /usr PATH mount, got %d in %v", count, cfg.sandbox.Mounts)
+	}
+}
+
 func TestDispatchRunsInternalHelperWithoutCobra(t *testing.T) {
 	helperCalled := false
 	err := dispatch(
@@ -531,6 +726,35 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func containsMount(values []bbox.Mount, want bbox.Mount) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func envValue(values []string, key string) string {
+	for i := len(values) - 1; i >= 0; i-- {
+		entry := values[i]
+		prefix := key + "="
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
+}
+
+func writeExecutableFixture(t *testing.T, dir string, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write executable %s: %v", path, err)
+	}
+	return path
 }
 
 func writeBBoxYAML(t *testing.T, dir string, content string) {

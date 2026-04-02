@@ -56,9 +56,13 @@ func TestTransparentHTTPSWithCurl(t *testing.T) {
 		Binaries:    []string{curlPath},
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^secure[.]localhost$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/allowed$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^secure[.]localhost$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/allowed$`},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -156,9 +160,13 @@ func TestTransparentModeSupportsNonDefaultHTTPSPorts(t *testing.T) {
 		Binaries:    []string{curlPath},
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^secure[.]localhost$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/allowed$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^secure[.]localhost$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/allowed$`},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -224,9 +232,13 @@ func TestTransparentModeRejectsIPLiteralWithoutCIDRPolicy(t *testing.T) {
 		Binaries:    []string{curlPath},
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^secure[.]localhost$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/allowed$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^secure[.]localhost$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/allowed$`},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -305,9 +317,13 @@ func TestTransparentModeAllowsIPLiteralWithinCIDRPolicy(t *testing.T) {
 		Binaries:    []string{curlPath},
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
-			AllowIPCIDRs:      []string{"127.0.0.0/8"},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/allowed$`},
+			Rules: []bbox.PolicyRule{
+				{
+					IPCIDRs:      []string{"127.0.0.0/8"},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/allowed$`},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -387,9 +403,13 @@ func TestProxyAndTransparentSandboxesCanRunConcurrently(t *testing.T) {
 		Name:     "proxy-concurrent",
 		Binaries: []string{curlPath},
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/proxy$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/proxy$`},
+				},
+			},
 		},
 	})
 	if err != nil {
@@ -406,9 +426,13 @@ func TestProxyAndTransparentSandboxesCanRunConcurrently(t *testing.T) {
 		Binaries:    []string{curlPath},
 		TrafficMode: bbox.TrafficModeTransparent,
 		Policy: bbox.NetworkPolicy{
-			AllowHostPatterns: []string{`^allowed[.]localhost$`},
-			AllowHTTPMethods:  []string{"GET"},
-			AllowPathPatterns: []string{`^/transparent$`},
+			Rules: []bbox.PolicyRule{
+				{
+					HostPatterns: []string{`^allowed[.]localhost$`},
+					HTTPMethods:  []string{"GET"},
+					PathPatterns: []string{`^/transparent$`},
+				},
+			},
 		},
 	})
 	if err != nil {

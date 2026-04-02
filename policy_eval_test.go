@@ -7,9 +7,13 @@ import (
 
 func TestEvaluateHTTPRequestReturnsViolationReasons(t *testing.T) {
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
-		AllowHTTPMethods:  []string{http.MethodGet},
-		AllowPathPatterns: []string{`^/ok$`},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^example[.]com$`},
+				HTTPMethods:  []string{http.MethodGet},
+				PathPatterns: []string{`^/ok$`},
+			},
+		},
 	})
 
 	eval := policy.evaluateRequest(PolicyRequest{
@@ -28,7 +32,9 @@ func TestEvaluateHTTPRequestReturnsViolationReasons(t *testing.T) {
 
 func TestEvaluateDNSRequestReturnsViolationReasons(t *testing.T) {
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^allowed[.]example[.]com$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^allowed[.]example[.]com$`}},
+		},
 	})
 
 	eval := policy.evaluateDNS("denied.example.com")
@@ -41,22 +47,28 @@ func TestEvaluateDNSRequestReturnsViolationReasons(t *testing.T) {
 	}
 }
 
-func TestEvaluateDNSIgnoresCIDRRules(t *testing.T) {
+func TestEvaluateDNSIgnoresCIDROnlyRules(t *testing.T) {
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		DenyIPCIDRs: []string{"127.0.0.0/8"},
+		Rules: []PolicyRule{
+			{IPCIDRs: []string{"127.0.0.0/8"}},
+		},
 	})
 
 	eval := policy.evaluateDNS("127.0.0.1")
 
-	if !eval.Allowed {
-		t.Fatalf("expected DNS evaluation to ignore CIDR deny rules, got reasons: %v", eval.Reasons)
+	if eval.Allowed {
+		t.Fatal("expected DNS evaluation to deny when no hostname rule matches")
+	}
+	if len(eval.Reasons) == 0 {
+		t.Fatal("expected denial reasons")
 	}
 }
 
 func TestEvaluateConnectReturnsViolationReasons(t *testing.T) {
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		AllowConnect:      true,
-		AllowConnectPorts: []string{"443"},
+		Rules: []PolicyRule{
+			{ConnectPorts: []string{"443"}},
+		},
 	})
 
 	eval := policy.evaluateConnect("example.com", 8443, false)
@@ -71,9 +83,12 @@ func TestEvaluateConnectReturnsViolationReasons(t *testing.T) {
 
 func TestEvaluateConnectAllowsIPv6LiteralFromConnectTarget(t *testing.T) {
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^::1$`},
-		AllowConnect:      true,
-		AllowConnectPorts: []string{"443"},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^::1$`},
+				ConnectPorts: []string{"443"},
+			},
+		},
 	})
 
 	eval := policy.evaluate(http.MethodConnect, "[::1]:443", true)

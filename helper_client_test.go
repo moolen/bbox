@@ -288,7 +288,9 @@ func TestHelperClientReadLoopDispatchesDNSRequest(t *testing.T) {
 	defer serverSide.Close()
 
 	policy, err := compilePolicy(NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^example[.]com$`}},
+		},
 	})
 	if err != nil {
 		t.Fatalf("compile policy: %v", err)
@@ -454,9 +456,12 @@ func TestHelperClientHandlesConnectRequest(t *testing.T) {
 	t.Cleanup(func() { dialTunnelFn = prevDialTunnel })
 
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
-		AllowConnect:      true,
-		AllowConnectPorts: []string{"443"},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^example[.]com$`},
+				ConnectPorts: []string{"443"},
+			},
+		},
 	}))
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
 		t.Fatalf("register sandbox: %v", err)
@@ -505,9 +510,12 @@ func TestHostTunnelDoesNotShutdownOnOutboundEOF(t *testing.T) {
 	t.Cleanup(func() { dialTunnelFn = prevDialTunnel })
 
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
-		AllowConnect:      true,
-		AllowConnectPorts: []string{"443"},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^example[.]com$`},
+				ConnectPorts: []string{"443"},
+			},
+		},
 	}))
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
 		t.Fatalf("register sandbox: %v", err)
@@ -618,9 +626,12 @@ func TestHelperClientBuffersTunnelFramesUntilTunnelActivation(t *testing.T) {
 	t.Cleanup(func() { dialTunnelFn = prevDialTunnel })
 
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
-		AllowConnect:      true,
-		AllowConnectPorts: []string{"443"},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^example[.]com$`},
+				ConnectPorts: []string{"443"},
+			},
+		},
 	}))
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
 		t.Fatalf("register sandbox: %v", err)
@@ -665,9 +676,12 @@ func TestHelperClientCloseCancelsInFlightConnectRequest(t *testing.T) {
 	t.Cleanup(func() { dialTunnelFn = prevDialTunnel })
 
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
-		AllowConnect:      true,
-		AllowConnectPorts: []string{"443"},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^example[.]com$`},
+				ConnectPorts: []string{"443"},
+			},
+		},
 	}))
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
 		t.Fatalf("register sandbox: %v", err)

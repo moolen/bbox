@@ -52,3 +52,24 @@ jobs:
 
       - name: Verify multi-arch release archives
         run: ./scripts/verify-release-archives.sh --run-native amd64 linux_amd64 linux_arm64
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build bbox
+        run: go build -o ./bin/bbox ./cmd/bbox
+
+      - name: Run Darwin backend smoke tests
+        run: |
+          go test . ./cmd/bbox -count=1 -run '^(TestNewSandboxDarwinRejectsTransparentMode|TestNewSandboxDarwinRejectsMounts|TestNewSandboxDarwinRejectsSeccomp|TestDarwinLaunchEnvStripsDYLDVars|TestGenerateDarwinProfileAllowsOnlyProxyLoopbackEndpoints|TestGenerateDarwinProfileTreatsBinAsExecAllowlist|TestDarwinRuntimeRunUsesSandboxExecWithSanitizedEnv|TestDarwinRuntimeInteractiveRunUsesSameSandboxLaunchPath|TestDarwinRuntimeProxyURLUsesManagerProxyAddr|TestNewSandboxDarwinProxyModeRoutesHTTPViaHostHelper|TestDarwinSandboxAllowsLoopbackHTTPViaProxy|TestDarwinSandboxBlocksDirectLoopbackHTTP|TestDarwinSandboxDeniesLoopbackHTTPViaProxyWithoutRule|TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime)$'

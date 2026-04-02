@@ -258,6 +258,15 @@ func (m *ProxyManager) Close() error {
 			closeErr = errors.Join(closeErr, sandbox.Close())
 		}
 
+		if flusher, ok := m.accessLogger.(interface{ Flush() }); ok {
+			func() {
+				defer func() {
+					_ = recover()
+				}()
+				flusher.Flush()
+			}()
+		}
+
 		newManagerProxyService(managerProxyConfig{transport: m.transport}).CloseIdleConnections()
 		closeErr = errors.Join(closeErr, m.resolver.Cleanup())
 

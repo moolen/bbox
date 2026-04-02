@@ -11,33 +11,19 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+type cliPolicyRuleConfig struct {
+	HostPatterns   []string            `yaml:"host_patterns"`
+	IPCIDRs        []string            `yaml:"ip_cidrs"`
+	HTTPMethods    []string            `yaml:"http_methods"`
+	ConnectPorts   []string            `yaml:"connect_ports"`
+	PathPatterns   []string            `yaml:"path_patterns"`
+	HeaderPatterns map[string][]string `yaml:"header_patterns"`
+	BodyPatterns   []string            `yaml:"body_patterns"`
+}
+
 type cliPolicyConfig struct {
-	AllowHostPatterns    []string            `yaml:"allow_host_patterns"`
-	DenyHostPatterns     []string            `yaml:"deny_host_patterns"`
-	AllowIPCIDRs         []string            `yaml:"allow_ip_cidrs"`
-	DenyIPCIDRs          []string            `yaml:"deny_ip_cidrs"`
-	AllowHTTPMethods     []string            `yaml:"allow_http_methods"`
-	AllowConnect         bool                `yaml:"allow_connect"`
-	AllowConnectPorts    []string            `yaml:"allow_connect_ports"`
-	AllowPathPatterns    []string            `yaml:"allow_path_patterns"`
-	DenyPathPatterns     []string            `yaml:"deny_path_patterns"`
-	AllowHeaderPatterns  map[string][]string `yaml:"allow_header_patterns"`
-	DenyHeaderPatterns   map[string][]string `yaml:"deny_header_patterns"`
-	AllowBodyPatterns    []string            `yaml:"allow_body_patterns"`
-	DenyBodyPatterns     []string            `yaml:"deny_body_patterns"`
-	hasAllowHostPatterns bool                `yaml:"-"`
-	hasDenyHostPatterns  bool                `yaml:"-"`
-	hasAllowIPCIDRs      bool                `yaml:"-"`
-	hasDenyIPCIDRs       bool                `yaml:"-"`
-	hasAllowHTTPMethods  bool                `yaml:"-"`
-	hasAllowConnect      bool                `yaml:"-"`
-	hasAllowConnectPorts bool                `yaml:"-"`
-	hasAllowPathPatterns bool                `yaml:"-"`
-	hasDenyPathPatterns  bool                `yaml:"-"`
-	hasAllowHeaders      bool                `yaml:"-"`
-	hasDenyHeaders       bool                `yaml:"-"`
-	hasAllowBodyPatterns bool                `yaml:"-"`
-	hasDenyBodyPatterns  bool                `yaml:"-"`
+	Rules    []cliPolicyRuleConfig `yaml:"rules"`
+	hasRules bool                  `yaml:"-"`
 }
 
 type cliFileConfig struct {
@@ -71,19 +57,7 @@ type cliFileConfig struct {
 }
 
 type rawCLIPolicyConfig struct {
-	AllowHostPatterns   *[]string            `yaml:"allow_host_patterns"`
-	DenyHostPatterns    *[]string            `yaml:"deny_host_patterns"`
-	AllowIPCIDRs        *[]string            `yaml:"allow_ip_cidrs"`
-	DenyIPCIDRs         *[]string            `yaml:"deny_ip_cidrs"`
-	AllowHTTPMethods    *[]string            `yaml:"allow_http_methods"`
-	AllowConnect        *bool                `yaml:"allow_connect"`
-	AllowConnectPorts   *[]string            `yaml:"allow_connect_ports"`
-	AllowPathPatterns   *[]string            `yaml:"allow_path_patterns"`
-	DenyPathPatterns    *[]string            `yaml:"deny_path_patterns"`
-	AllowHeaderPatterns *map[string][]string `yaml:"allow_header_patterns"`
-	DenyHeaderPatterns  *map[string][]string `yaml:"deny_header_patterns"`
-	AllowBodyPatterns   *[]string            `yaml:"allow_body_patterns"`
-	DenyBodyPatterns    *[]string            `yaml:"deny_body_patterns"`
+	Rules *[]cliPolicyRuleConfig `yaml:"rules"`
 }
 
 type rawCLIFileConfig struct {
@@ -145,6 +119,9 @@ func loadCLIFileConfig(path string) (cliFileConfig, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&raw); err != nil {
+		if err == io.EOF {
+			return cliFileConfig{}, nil
+		}
 		return cliFileConfig{}, fmt.Errorf("decode config file %q: %w", path, err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
@@ -210,59 +187,9 @@ func toCLIFileConfig(raw rawCLIFileConfig) cliFileConfig {
 		cfg.ReportRequestSummary = *raw.ReportRequestSummary
 		cfg.hasReportRequestSummary = true
 	}
-	if raw.Policy != nil {
-		if raw.Policy.AllowHostPatterns != nil {
-			cfg.Policy.AllowHostPatterns = cloneStringSlice(*raw.Policy.AllowHostPatterns)
-			cfg.Policy.hasAllowHostPatterns = true
-		}
-		if raw.Policy.DenyHostPatterns != nil {
-			cfg.Policy.DenyHostPatterns = cloneStringSlice(*raw.Policy.DenyHostPatterns)
-			cfg.Policy.hasDenyHostPatterns = true
-		}
-		if raw.Policy.AllowIPCIDRs != nil {
-			cfg.Policy.AllowIPCIDRs = cloneStringSlice(*raw.Policy.AllowIPCIDRs)
-			cfg.Policy.hasAllowIPCIDRs = true
-		}
-		if raw.Policy.DenyIPCIDRs != nil {
-			cfg.Policy.DenyIPCIDRs = cloneStringSlice(*raw.Policy.DenyIPCIDRs)
-			cfg.Policy.hasDenyIPCIDRs = true
-		}
-		if raw.Policy.AllowHTTPMethods != nil {
-			cfg.Policy.AllowHTTPMethods = cloneStringSlice(*raw.Policy.AllowHTTPMethods)
-			cfg.Policy.hasAllowHTTPMethods = true
-		}
-		if raw.Policy.AllowConnect != nil {
-			cfg.Policy.AllowConnect = *raw.Policy.AllowConnect
-			cfg.Policy.hasAllowConnect = true
-		}
-		if raw.Policy.AllowConnectPorts != nil {
-			cfg.Policy.AllowConnectPorts = cloneStringSlice(*raw.Policy.AllowConnectPorts)
-			cfg.Policy.hasAllowConnectPorts = true
-		}
-		if raw.Policy.AllowPathPatterns != nil {
-			cfg.Policy.AllowPathPatterns = cloneStringSlice(*raw.Policy.AllowPathPatterns)
-			cfg.Policy.hasAllowPathPatterns = true
-		}
-		if raw.Policy.DenyPathPatterns != nil {
-			cfg.Policy.DenyPathPatterns = cloneStringSlice(*raw.Policy.DenyPathPatterns)
-			cfg.Policy.hasDenyPathPatterns = true
-		}
-		if raw.Policy.AllowHeaderPatterns != nil {
-			cfg.Policy.AllowHeaderPatterns = cloneStringSliceMap(*raw.Policy.AllowHeaderPatterns)
-			cfg.Policy.hasAllowHeaders = true
-		}
-		if raw.Policy.DenyHeaderPatterns != nil {
-			cfg.Policy.DenyHeaderPatterns = cloneStringSliceMap(*raw.Policy.DenyHeaderPatterns)
-			cfg.Policy.hasDenyHeaders = true
-		}
-		if raw.Policy.AllowBodyPatterns != nil {
-			cfg.Policy.AllowBodyPatterns = cloneStringSlice(*raw.Policy.AllowBodyPatterns)
-			cfg.Policy.hasAllowBodyPatterns = true
-		}
-		if raw.Policy.DenyBodyPatterns != nil {
-			cfg.Policy.DenyBodyPatterns = cloneStringSlice(*raw.Policy.DenyBodyPatterns)
-			cfg.Policy.hasDenyBodyPatterns = true
-		}
+	if raw.Policy != nil && raw.Policy.Rules != nil {
+		cfg.Policy.Rules = clonePolicyRules(*raw.Policy.Rules)
+		cfg.Policy.hasRules = true
 	}
 	return cfg
 }
@@ -312,6 +239,12 @@ func defaultCLIFileConfig() cliFileConfig {
 		hasReportPolicyViolations: true,
 		hasReportAccessSummary:    true,
 		hasReportRequestSummary:   true,
+		Policy: cliPolicyConfig{
+			Rules: []cliPolicyRuleConfig{
+				{ConnectPorts: []string{"443"}},
+			},
+			hasRules: true,
+		},
 	}
 }
 
@@ -404,57 +337,9 @@ func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfi
 		base.ReportRequestSummary = overlay.ReportRequestSummary
 		base.hasReportRequestSummary = true
 	}
-	if overlay.Policy.hasAllowHostPatterns {
-		base.Policy.AllowHostPatterns = cloneStringSlice(overlay.Policy.AllowHostPatterns)
-		base.Policy.hasAllowHostPatterns = true
-	}
-	if overlay.Policy.hasDenyHostPatterns {
-		base.Policy.DenyHostPatterns = cloneStringSlice(overlay.Policy.DenyHostPatterns)
-		base.Policy.hasDenyHostPatterns = true
-	}
-	if overlay.Policy.hasAllowIPCIDRs {
-		base.Policy.AllowIPCIDRs = cloneStringSlice(overlay.Policy.AllowIPCIDRs)
-		base.Policy.hasAllowIPCIDRs = true
-	}
-	if overlay.Policy.hasDenyIPCIDRs {
-		base.Policy.DenyIPCIDRs = cloneStringSlice(overlay.Policy.DenyIPCIDRs)
-		base.Policy.hasDenyIPCIDRs = true
-	}
-	if overlay.Policy.hasAllowHTTPMethods {
-		base.Policy.AllowHTTPMethods = cloneStringSlice(overlay.Policy.AllowHTTPMethods)
-		base.Policy.hasAllowHTTPMethods = true
-	}
-	if overlay.Policy.hasAllowConnect {
-		base.Policy.AllowConnect = overlay.Policy.AllowConnect
-		base.Policy.hasAllowConnect = true
-	}
-	if overlay.Policy.hasAllowConnectPorts {
-		base.Policy.AllowConnectPorts = cloneStringSlice(overlay.Policy.AllowConnectPorts)
-		base.Policy.hasAllowConnectPorts = true
-	}
-	if overlay.Policy.hasAllowPathPatterns {
-		base.Policy.AllowPathPatterns = cloneStringSlice(overlay.Policy.AllowPathPatterns)
-		base.Policy.hasAllowPathPatterns = true
-	}
-	if overlay.Policy.hasDenyPathPatterns {
-		base.Policy.DenyPathPatterns = cloneStringSlice(overlay.Policy.DenyPathPatterns)
-		base.Policy.hasDenyPathPatterns = true
-	}
-	if overlay.Policy.hasAllowHeaders {
-		base.Policy.AllowHeaderPatterns = cloneStringSliceMap(overlay.Policy.AllowHeaderPatterns)
-		base.Policy.hasAllowHeaders = true
-	}
-	if overlay.Policy.hasDenyHeaders {
-		base.Policy.DenyHeaderPatterns = cloneStringSliceMap(overlay.Policy.DenyHeaderPatterns)
-		base.Policy.hasDenyHeaders = true
-	}
-	if overlay.Policy.hasAllowBodyPatterns {
-		base.Policy.AllowBodyPatterns = cloneStringSlice(overlay.Policy.AllowBodyPatterns)
-		base.Policy.hasAllowBodyPatterns = true
-	}
-	if overlay.Policy.hasDenyBodyPatterns {
-		base.Policy.DenyBodyPatterns = cloneStringSlice(overlay.Policy.DenyBodyPatterns)
-		base.Policy.hasDenyBodyPatterns = true
+	if overlay.Policy.hasRules {
+		base.Policy.Rules = clonePolicyRules(overlay.Policy.Rules)
+		base.Policy.hasRules = true
 	}
 	return base
 }
@@ -470,6 +355,22 @@ func cloneStringSliceMap(in map[string][]string) map[string][]string {
 	out := make(map[string][]string, len(in))
 	for k, v := range in {
 		out[k] = cloneStringSlice(v)
+	}
+	return out
+}
+
+func clonePolicyRules(in []cliPolicyRuleConfig) []cliPolicyRuleConfig {
+	out := make([]cliPolicyRuleConfig, 0, len(in))
+	for _, rule := range in {
+		out = append(out, cliPolicyRuleConfig{
+			HostPatterns:   cloneStringSlice(rule.HostPatterns),
+			IPCIDRs:        cloneStringSlice(rule.IPCIDRs),
+			HTTPMethods:    cloneStringSlice(rule.HTTPMethods),
+			ConnectPorts:   cloneStringSlice(rule.ConnectPorts),
+			PathPatterns:   cloneStringSlice(rule.PathPatterns),
+			HeaderPatterns: cloneStringSliceMap(rule.HeaderPatterns),
+			BodyPatterns:   cloneStringSlice(rule.BodyPatterns),
+		})
 	}
 	return out
 }

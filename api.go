@@ -3,6 +3,7 @@ package bbox
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/moolen/bbox/internal/helperruntime"
+	"golang.org/x/term"
 )
 
 const (
@@ -17,24 +19,68 @@ const (
 	defaultMaxResponseBodyBytes = 4 << 20
 )
 
-type stdoutJSONAccessLogger struct {
-	mu  sync.Mutex
-	enc *json.Encoder
+type defaultJSONAccessLogger struct {
+	mu          sync.Mutex
+	enc         *json.Encoder
+	deferOutput bool
+	entries     []AccessLogEntry
 }
 
-var sharedStdoutAccessLogger = newStdoutJSONAccessLogger()
-
-func newStdoutJSONAccessLogger() *stdoutJSONAccessLogger {
-	return &stdoutJSONAccessLogger{enc: json.NewEncoder(os.Stdout)}
+func newDefaultJSONAccessLogger(w io.Writer) *defaultJSONAccessLogger {
+	return newDefaultJSONAccessLoggerWithMode(w, writerIsTerminal(w))
 }
 
-func (l *stdoutJSONAccessLogger) LogAccess(entry AccessLogEntry) {
+func newDefaultJSONAccessLoggerWithMode(w io.Writer, deferOutput bool) *defaultJSONAccessLogger {
+	logger := &defaultJSONAccessLogger{}
+	if w != nil {
+		logger.enc = json.NewEncoder(w)
+	}
+	logger.deferOutput = deferOutput
+	return logger
+}
+
+func (l *defaultJSONAccessLogger) LogAccess(entry AccessLogEntry) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.deferOutput {
+		l.entries = append(l.entries, entry)
+		return
+	}
+	if l.enc == nil {
+		return
+	}
 	_ = l.enc.Encode(entry)
+}
+
+func (l *defaultJSONAccessLogger) Flush() {
+	if l == nil {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.deferOutput || l.enc == nil || len(l.entries) == 0 {
+		return
+	}
+	for _, entry := range l.entries {
+		_ = l.enc.Encode(entry)
+	}
+	l.entries = nil
+}
+
+func writerIsTerminal(w io.Writer) bool {
+	if w == nil {
+		return false
+	}
+	file, ok := w.(interface{ Fd() uintptr })
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(file.Fd()))
 }
 
 func isNilAccessLogger(logger AccessLogger) bool {
@@ -84,7 +130,7 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	manager.policyMode = policyMode
 	manager.reporting = opts.Reporting
 	if isNilAccessLogger(opts.AccessLogger) {
-		manager.accessLogger = sharedStdoutAccessLogger
+		manager.accessLogger = newDefaultJSONAccessLogger(os.Stderr)
 	} else {
 		manager.accessLogger = opts.AccessLogger
 	}

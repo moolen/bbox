@@ -122,8 +122,12 @@ func TestProxyManagerMITMForwardsAllowedRequest(t *testing.T) {
 	}
 
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-		AllowPathPatterns: []string{`^/allowed$`},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				PathPatterns: []string{`^/allowed$`},
+			},
+		},
 	})
 	manager := newProxyManager(policy)
 	manager.transport = server.Client().Transport.(*http.Transport).Clone()
@@ -153,8 +157,12 @@ func TestProxyManagerMITMForwardsAllowedRequest(t *testing.T) {
 
 func TestProxyManagerMITMRejectsDeniedPath(t *testing.T) {
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
-		DenyPathPatterns:  []string{`^/admin$`},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^example[.]com$`},
+				PathPatterns: []string{`^/allowed$`},
+			},
+		},
 	})
 	manager := newProxyManager(policy)
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -176,7 +184,9 @@ func TestProxyManagerMITMRejectsDeniedPath(t *testing.T) {
 
 func TestProxyManagerMITMRejectsOversizedBody(t *testing.T) {
 	policy := mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^example[.]com$`}},
+		},
 	})
 	manager := newProxyManager(policy)
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -210,7 +220,9 @@ func TestProxyManagerMITMRejectsHostAuthorityMismatch(t *testing.T) {
 
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^allowed[.]example$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^allowed[.]example$`}},
+		},
 	}))
 	manager.transport = server.Client().Transport.(*http.Transport).Clone()
 	manager.accessLogger = logger
@@ -244,7 +256,9 @@ func TestProxyManagerMITMRejectsHostAuthorityMismatch(t *testing.T) {
 func TestHandleProxyRequestRecordsDeniedAccess(t *testing.T) {
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		DenyHostPatterns: []string{`^denied[.]test$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^allowed[.]test$`}},
+		},
 	}))
 	manager.accessLogger = logger
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -309,8 +323,12 @@ func TestHandleProxyRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testing
 	logger := &stubAccessLogger{}
 	manager, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{http.MethodGet},
+			Rules: []PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{http.MethodGet},
+				},
+			},
 		},
 		PolicyMode:   PolicyModeAudit,
 		AccessLogger: logger,
@@ -364,7 +382,9 @@ func TestHandleProxyRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testing
 
 func TestHandleProxyRequestRecordsUpstreamErrorAccess(t *testing.T) {
 	logger := &stubAccessLogger{}
-	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		Rules: []PolicyRule{{}},
+	}))
 	manager.transport = &http.Transport{
 		DialContext: func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("dial failed")
@@ -443,8 +463,12 @@ func TestHandleProxyRequestAcceptsOriginStyleURLFromTransparentIngress(t *testin
 
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^127[.]0[.]0[.]1(:[0-9]+)?$`},
-		AllowPathPatterns: []string{`^/allowed$`},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1(:[0-9]+)?$`},
+				PathPatterns: []string{`^/allowed$`},
+			},
+		},
 	}))
 	manager.transport = server.Client().Transport.(*http.Transport).Clone()
 	manager.accessLogger = logger
@@ -495,9 +519,12 @@ func TestHandleProxyRequestAcceptsOriginStyleURLFromTransparentIngress(t *testin
 func TestHandleConnectRequestRecordsAllowedAccess(t *testing.T) {
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowConnect:      true,
-		AllowConnectPorts: []string{"443"},
-		AllowHostPatterns: []string{`^example[.]com$`},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^example[.]com$`},
+				ConnectPorts: []string{"443"},
+			},
+		},
 	}))
 	manager.accessLogger = logger
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -540,7 +567,9 @@ func TestHandleConnectRequestRecordsAllowedAccess(t *testing.T) {
 func TestHandleConnectRequestRecordsDeniedAccess(t *testing.T) {
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^example[.]com$`}},
+		},
 	}))
 	manager.accessLogger = logger
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -587,7 +616,9 @@ func TestHandleConnectRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testi
 	logger := &stubAccessLogger{}
 	manager, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowHostPatterns: []string{`^example[.]com$`},
+			Rules: []PolicyRule{
+				{HostPatterns: []string{`^example[.]com$`}},
+			},
 		},
 		PolicyMode:   PolicyModeAudit,
 		AccessLogger: logger,
@@ -632,7 +663,7 @@ func TestHandleConnectRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testi
 	if len(entry.PolicyViolations) == 0 {
 		t.Fatal("expected policy violations to be recorded")
 	}
-	if !strings.Contains(entry.PolicyViolations[0], "CONNECT requests are not allowed") {
+	if !strings.Contains(entry.PolicyViolations[0], "CONNECT port 443 is not allowed") {
 		t.Fatalf("expected CONNECT denial reason, got %#v", entry.PolicyViolations)
 	}
 }
@@ -641,7 +672,9 @@ func TestHandleConnectRequestAuditModeAllowsTransparentPolicyViolationAndRecords
 	logger := &stubAccessLogger{}
 	manager, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowHostPatterns: []string{`^allowed[.]example$`},
+			Rules: []PolicyRule{
+				{HostPatterns: []string{`^allowed[.]example$`}},
+			},
 		},
 		PolicyMode:   PolicyModeAudit,
 		AccessLogger: logger,
@@ -708,8 +741,14 @@ func TestHandleMITMRequestRecordsAccess(t *testing.T) {
 	}
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowConnect:      true,
-		AllowConnectPorts: []string{serverURL.Port()},
+		Rules: []PolicyRule{
+			{ConnectPorts: []string{serverURL.Port()}},
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				HTTPMethods:  []string{http.MethodGet},
+				PathPatterns: []string{`^/mitm$`},
+			},
+		},
 	}))
 	manager.transport = server.Client().Transport.(*http.Transport).Clone()
 	manager.accessLogger = logger
@@ -794,8 +833,12 @@ func TestHandleMITMRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testing.
 	logger := &stubAccessLogger{}
 	manager, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
-			AllowHTTPMethods:  []string{http.MethodGet},
+			Rules: []PolicyRule{
+				{
+					HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+					HTTPMethods:  []string{http.MethodGet},
+				},
+			},
 		},
 		PolicyMode:   PolicyModeAudit,
 		AccessLogger: logger,
@@ -863,7 +906,9 @@ func TestHandleMITMRequestRejectsHostAuthorityMismatch(t *testing.T) {
 	}
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^decrypted[.]test$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^decrypted[.]test$`}},
+		},
 	}))
 	manager.transport = server.Client().Transport.(*http.Transport).Clone()
 	manager.accessLogger = logger
@@ -918,7 +963,9 @@ func TestHandleMITMRequestRejectsHostAuthorityMismatchUsingAuthorityPort(t *test
 
 	logger := &stubAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^decrypted[.]test$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^decrypted[.]test$`}},
+		},
 	}))
 	manager.transport = server.Client().Transport.(*http.Transport).Clone()
 	manager.accessLogger = logger
@@ -958,7 +1005,9 @@ func TestHandleMITMRequestRejectsHostAuthorityMismatchUsingAuthorityPort(t *test
 
 func TestHandleProxyRequestRejectsOversizedRequestBody(t *testing.T) {
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^example[.]com$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^example[.]com$`}},
+		},
 	}))
 	manager.requestBodyLimitBytes = 8
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -988,7 +1037,9 @@ func TestProxyManagerRejectsOversizedResponseBody(t *testing.T) {
 	}
 
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowHostPatterns: []string{`^127[.]0[.]0[.]1$`},
+		Rules: []PolicyRule{
+			{HostPatterns: []string{`^127[.]0[.]0[.]1$`}},
+		},
 	}))
 	manager.transport = server.Client().Transport.(*http.Transport).Clone()
 	manager.responseBodyLimitBytes = 16
@@ -1072,7 +1123,9 @@ func TestLoggerFailureDoesNotBreakRequest(t *testing.T) {
 	}
 
 	logger := &panicAccessLogger{}
-	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		Rules: []PolicyRule{{}},
+	}))
 	manager.transport = server.Client().Transport.(*http.Transport).Clone()
 	manager.accessLogger = logger
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -1102,9 +1155,12 @@ func TestLoggerFailureDoesNotBreakRequest(t *testing.T) {
 func TestLoggerFailureDoesNotBreakRequestConnect(t *testing.T) {
 	logger := &panicAccessLogger{}
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
-		AllowConnect:      true,
-		AllowConnectPorts: []string{"443"},
-		AllowHostPatterns: []string{`^example[.]com$`},
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^example[.]com$`},
+				ConnectPorts: []string{"443"},
+			},
+		},
 	}))
 	manager.accessLogger = logger
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -1134,7 +1190,9 @@ func TestHandleDNSRequestAuditModeAllowsPolicyViolationAndRecordsIt(t *testing.T
 	logger := &stubAccessLogger{}
 	manager, err := NewProxyManager(ProxyOptions{
 		NetworkPolicy: NetworkPolicy{
-			AllowHostPatterns: []string{`^allowed[.]example[.]com$`},
+			Rules: []PolicyRule{
+				{HostPatterns: []string{`^allowed[.]example[.]com$`}},
+			},
 		},
 		PolicyMode:   PolicyModeAudit,
 		AccessLogger: logger,

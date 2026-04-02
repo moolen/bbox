@@ -221,39 +221,32 @@ type RunResult struct {
 
 // NetworkPolicy defines the host-side egress rules applied to one sandbox.
 type NetworkPolicy struct {
-	// AllowHostPatterns is a regex allowlist matched against destination hosts.
-	AllowHostPatterns []string
-	// DenyHostPatterns is a regex denylist applied before the allowlist.
-	DenyHostPatterns []string
-	// AllowIPCIDRs is a CIDR allowlist matched against IP literal destinations.
-	AllowIPCIDRs []string
-	// DenyIPCIDRs is a CIDR denylist applied before the CIDR allowlist.
-	DenyIPCIDRs []string
-	// AllowHTTPMethods restricts plain HTTP requests to the listed methods.
-	AllowHTTPMethods []string
-	// AllowConnect enables HTTP CONNECT tunneling.
-	AllowConnect bool
-	// AllowConnectPorts restricts CONNECT to the listed destination ports or
-	// port ranges.
-	AllowConnectPorts []string
-	// AllowPathPatterns is a regex allowlist matched against decrypted request
-	// paths.
-	AllowPathPatterns []string
-	// DenyPathPatterns is a regex denylist matched against decrypted request
-	// paths.
-	DenyPathPatterns []string
-	// AllowHeaderPatterns is a map of header names to regex allowlists for their
+	// Rules is the ordered list of allow rules. A request is allowed when at
+	// least one rule matches. The zero value denies all traffic in enforce mode.
+	Rules []PolicyRule
+}
+
+// PolicyRule describes one allow rule within a NetworkPolicy.
+type PolicyRule struct {
+	// HostPatterns is a regex allowlist matched against normalized destination
+	// hostnames.
+	HostPatterns []string
+	// IPCIDRs is a CIDR allowlist matched against IP literal destinations.
+	IPCIDRs []string
+	// HTTPMethods restricts plain or MITM-visible HTTP requests to the listed
+	// methods.
+	HTTPMethods []string
+	// ConnectPorts restricts explicit proxy CONNECT traffic to the listed
+	// destination ports or port ranges.
+	ConnectPorts []string
+	// PathPatterns is a regex allowlist matched against visible request paths.
+	PathPatterns []string
+	// HeaderPatterns is a map of header names to regex allowlists for their
 	// values.
-	AllowHeaderPatterns map[string][]string
-	// DenyHeaderPatterns is a map of header names to regex denylists for their
-	// values.
-	DenyHeaderPatterns map[string][]string
-	// AllowBodyPatterns is a regex allowlist matched against the bounded request
-	// body.
-	AllowBodyPatterns []string
-	// DenyBodyPatterns is a regex denylist matched against the bounded request
-	// body.
-	DenyBodyPatterns []string
+	HeaderPatterns map[string][]string
+	// BodyPatterns is a regex allowlist matched against the bounded inspected
+	// request body.
+	BodyPatterns []string
 }
 
 // ProxyManager owns the shared proxy policy state and creates sandboxes that
