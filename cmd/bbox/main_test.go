@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -242,6 +244,67 @@ access_log: off
 	}
 }
 
+func TestRootCommandConfigDiscoveryPrefersNearestBBoxYAML(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	nested := filepath.Join(project, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeBBoxYAML(t, root, `
+traffic_mode: proxy
+access_log: off
+`)
+	writeBBoxYAML(t, project, `
+traffic_mode: transparent
+access_log: json
+`)
+
+	var got runConfig
+	cmd := newRootCommand(commandDeps{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getwd: func() (string, error) {
+			return nested, nil
+		},
+		environ: func() []string { return nil },
+		run: func(cfg runConfig) error {
+			got = cfg
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"--", "bash"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got.sandbox.TrafficMode != bbox.TrafficModeTransparent {
+		t.Fatalf("expected nearest bbox.yaml traffic mode, got %q", got.sandbox.TrafficMode)
+	}
+	if got.accessLogMode != "json" {
+		t.Fatalf("expected nearest bbox.yaml access log, got %q", got.accessLogMode)
+	}
+}
+
+func TestBuildConfigOmittedPolicyStillUsesAuditReportingDefaults(t *testing.T) {
+	root := t.TempDir()
+	writeBBoxYAML(t, root, `
+traffic_mode: proxy
+access_log: json
+`)
+
+	cfg, err := buildConfig(cliOptions{}, []string{"bash"}, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
+		t.Fatalf("expected default policy mode audit when policy section omitted, got %q", cfg.manager.PolicyMode)
+	}
+	if !cfg.reporting.PolicyViolations || !cfg.reporting.AccessSummary || !cfg.reporting.RequestSummary {
+		t.Fatalf("expected reporting defaults when policy section omitted, got %#v", cfg.reporting)
+	}
+}
+
 func TestRootCommandClearEnvFalseOverridesBBoxYAMLTrue(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested")
@@ -272,6 +335,99 @@ clear_env: true
 	}
 	if !containsString(got.sandbox.Env, "SECRET=value") {
 		t.Fatalf("expected inherited env to be restored by --clear-env=false, got %v", got.sandbox.Env)
+	}
+}
+
+func TestBuildConfigTrafficModesDoNotRequireMITMFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want bbox.TrafficMode
+	}{
+		{name: "proxy", mode: "proxy", want: bbox.TrafficModeProxy},
+		{name: "transparent", mode: "transparent", want: bbox.TrafficModeTransparent},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trafficMode := tt.mode
+			cfg, err := buildConfig(cliOptions{
+				trafficMode: tt.mode,
+				flagOverrides: cliFlagOverrides{
+					TrafficMode: &trafficMode,
+				},
+			}, []string{"curl"}, t.TempDir(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.sandbox.TrafficMode != tt.want {
+				t.Fatalf("unexpected traffic mode: %q", cfg.sandbox.TrafficMode)
+			}
+			if !cfg.manager.MITM.Enabled {
+				t.Fatalf("expected %s mode to enable mitm internally", tt.mode)
+			}
+		})
+	}
+}
+
+func TestRootCommandPrintPolicyShowsMergedConfigAndFlagState(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeBBoxYAML(t, root, `
+traffic_mode: transparent
+policy:
+  allow_host_patterns:
+    - "^api[.]example[.]com$"
+`)
+
+	var got runConfig
+	var stdout bytes.Buffer
+	cmd := newRootCommand(commandDeps{
+		stdout: &stdout,
+		stderr: io.Discard,
+		getwd: func() (string, error) {
+			return nested, nil
+		},
+		environ: func() []string { return nil },
+		run: func(cfg runConfig) error {
+			got = cfg
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"--print-policy", "--report-access-summary=false", "--", "bash"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got.sandbox.TrafficMode != bbox.TrafficModeTransparent {
+		t.Fatalf("expected merged config traffic mode in run config, got %q", got.sandbox.TrafficMode)
+	}
+	if got.reporting.AccessSummary {
+		t.Fatalf("expected CLI flag override to disable access summary in run config, got %#v", got.reporting)
+	}
+
+	var printed struct {
+		Manager bbox.ProxyOptions   `json:"manager"`
+		Sandbox bbox.SandboxOptions `json:"sandbox"`
+		Argv    []string            `json:"argv"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &printed); err != nil {
+		t.Fatalf("decode print-policy output: %v\noutput=%s", err, stdout.String())
+	}
+	if printed.Sandbox.TrafficMode != bbox.TrafficModeTransparent {
+		t.Fatalf("expected print-policy to show merged file traffic mode, got %q", printed.Sandbox.TrafficMode)
+	}
+	if !reflect.DeepEqual(printed.Sandbox.Policy.AllowHostPatterns, []string{"^api[.]example[.]com$"}) {
+		t.Fatalf("expected print-policy to include merged file policy, got %v", printed.Sandbox.Policy.AllowHostPatterns)
+	}
+	if printed.Manager.Reporting.AccessSummary {
+		t.Fatalf("expected print-policy to include CLI override state, got %#v", printed.Manager.Reporting)
+	}
+	if len(printed.Argv) != 1 || printed.Argv[0] != "bash" {
+		t.Fatalf("expected print-policy argv to match payload, got %v", printed.Argv)
 	}
 }
 

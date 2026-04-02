@@ -25,20 +25,67 @@ How it works:
 
 `bbox` ships as a single linux binary. the transparent seccomp launcher is embedded into `bbox` and executed from an anonymous `memfd`, so release archives and the sandbox filesystem only need `/app/bbox`.
 
-## Policy Modes
+## CLI Configuration (`bbox.yaml`)
 
-`bbox` evaluates mediated traffic against `NetworkPolicy` in one of two modes:
+`bbox` loads CLI configuration from a `bbox.yaml` file discovered from your current working directory.
 
-- `enforce` is the default. A policy violation blocks the mediated request.
-- `audit` evaluates the same policy but does not block mediated HTTP, CONNECT, MITM, DNS, or transparent traffic because of policy alone.
+Discovery order:
+1. `./bbox.yaml` (current working directory)
+2. first parent directory containing `bbox.yaml`
+3. continue upward until filesystem root
+4. if none is found, run with built-in defaults
 
-In both modes bbox still records what happened. Access log entries expose:
+If `bbox.yaml` is found in a parent directory, relative paths in `workdir`, `mount_ro`, and `mount_rw` are resolved relative to the directory containing that `bbox.yaml`.
 
-- `Allowed`: the real runtime outcome
-- `PolicyAllowed`: whether the compiled policy would have allowed the request
-- `PolicyViolations`: human-readable denial reasons when policy evaluation failed
+Example:
 
-That means an `audit` run can report `Allowed=true` and `PolicyAllowed=false` for the same request, while `enforce` can still log the violation that produced an HTTP `403` or other denial.
+```yaml
+name: demo-sandbox
+workdir: ./workspace
+bin:
+  - curl
+mount_ro:
+  - ./certs:/etc/ssl/certs
+mount_rw:
+  - ../shared:/workspace/shared
+env:
+  - API_TOKEN=redacted
+clear_env: false
+traffic_mode: proxy # or transparent
+max_request_body_bytes: 65536
+access_log: json # json or off
+report_policy_violations: true
+report_access_summary: true
+report_request_summary: true
+policy:
+  allow_host_patterns:
+    - "^api[.]example[.]com$"
+  allow_http_methods:
+    - POST
+  allow_connect: true
+```
+
+Merge precedence is:
+1. CLI defaults
+2. `bbox.yaml` (if present)
+3. explicitly changed runtime flags (`--traffic-mode`, reporting flags, `--access-log`)
+4. `--audit` (forces audit reporting on)
+
+If no `bbox.yaml` is present, bbox still defaults to audit-first behavior:
+- policy mode is `audit`
+- `report_policy_violations`, `report_access_summary`, and `report_request_summary` are enabled
+- `traffic_mode` defaults to `proxy`
+- `access_log` defaults to `json`
+
+Use `--print-policy` to print the final merged manager+sandbox configuration before execution.
+
+Example:
+
+```bash
+bbox --print-policy --report-access-summary=false -- curl -sS https://example.com
+```
+
+The printed JSON includes merged file settings plus final flag state.
 
 ## Library Reporting
 
@@ -60,25 +107,16 @@ for _, req := range summary.Requests {
 
 If you need per-attempt reporting instead of aggregates, inject an `AccessLogger` through `ProxyOptions`.
 
-## CLI Reporting
+## CLI Flags
 
-The CLI defaults to `--policy-mode enforce`.
+Current policy-shaping CLI flags were intentionally removed in favor of config-file policy definition:
 
-Use `--audit` when you want policy evaluation without policy enforcement. That flag is shorthand for:
+- removed: `--policy-mode`
+- removed: `--allowed-domain`
+- removed: `--deny-domain`
+- removed: `--allow-http-method`
+- removed: `--mitm`
 
-- `--policy-mode audit`
-- `--report-policy-violations`
-- `--report-access-summary`
-- `--report-request-summary`
+Use `bbox.yaml` `policy:` to define allow/deny behavior, and keep runtime flags for execution/reporting behavior.
 
-You can also enable the reporting outputs independently in `enforce` mode:
-
-- `--report-policy-violations` prints the grouped policy-denial reasons seen during the run
-- `--report-access-summary` prints the host-level aggregate summary
-- `--report-request-summary` prints the grouped request summary
-
-Example:
-
-```bash
-bbox --audit --allowed-domain example.com -- curl -sS https://example.com
-```
+The `--audit` flag remains available and forces reporting summaries on for that run.
