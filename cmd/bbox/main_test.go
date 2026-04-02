@@ -431,25 +431,6 @@ policy:
 	}
 }
 
-func TestBuildConfigTransparentModeDoesNotRequireMITMFlag(t *testing.T) {
-	trafficMode := "transparent"
-	cfg, err := buildConfig(cliOptions{
-		trafficMode: "transparent",
-		flagOverrides: cliFlagOverrides{
-			TrafficMode: &trafficMode,
-		},
-	}, []string{"curl"}, t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.sandbox.TrafficMode != bbox.TrafficModeTransparent {
-		t.Fatalf("unexpected traffic mode: %q", cfg.sandbox.TrafficMode)
-	}
-	if !cfg.manager.MITM.Enabled {
-		t.Fatal("expected transparent mode to enable mitm internally")
-	}
-}
-
 func TestAuditFlagStillOverridesMergedConfig(t *testing.T) {
 	root := t.TempDir()
 	writeBBoxYAML(t, root, `

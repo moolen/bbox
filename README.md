@@ -68,7 +68,7 @@ policy:
 Merge precedence is:
 1. CLI defaults
 2. `bbox.yaml` (if present)
-3. explicitly changed runtime flags (`--traffic-mode`, reporting flags, `--access-log`)
+3. supported runtime flags that are explicitly set on the CLI override file values (for example `--name`, `--workdir`, `--bin`, `--mount-ro`, `--mount-rw`, `--env`, `--clear-env`, `--max-request-body-bytes`, `--traffic-mode`, reporting flags, and `--access-log`)
 4. `--audit` (forces audit reporting on)
 
 If no `bbox.yaml` is present, bbox still defaults to audit-first behavior:
