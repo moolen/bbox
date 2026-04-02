@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -146,6 +147,20 @@ func TestLoadCLIFileConfigResolvesRelativePathsFromConfigDirectory(t *testing.T)
 	}
 }
 
+func TestLoadCLIFileConfigRejectsUnknownKeys(t *testing.T) {
+	path := fixturePath(t, "unknown_key.yaml")
+	_, err := loadCLIFileConfig(path)
+	if err == nil {
+		t.Fatal("expected unknown key to fail")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("expected path-qualified error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "field unknown_key not found") {
+		t.Fatalf("expected unknown field error, got %v", err)
+	}
+}
+
 func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 	defaults := defaultCLIFileConfig()
 	fileCfg := cliFileConfig{
@@ -156,10 +171,14 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 		AccessLog:                 "off",
 		MaxRequestBodyBytes:       999,
 		Policy:                    cliPolicyConfig{AllowHostPatterns: []string{"^file[.]example[.]com$"}},
+		hasTrafficMode:            true,
+		hasAccessLog:              true,
+		hasMaxRequestBodyBytes:    true,
 		hasReportPolicyViolations: true,
 		hasReportAccessSummary:    true,
 		hasReportRequestSummary:   true,
 	}
+	fileCfg.Policy.hasAllowHostPatterns = true
 	flags := cliFlagOverrides{
 		TrafficMode:         stringPtr("proxy"),
 		ReportAccessSummary: boolPtr(false),
@@ -182,6 +201,62 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Policy.AllowHostPatterns, []string{"^file[.]example[.]com$"}) {
 		t.Fatalf("got policy allow_host_patterns %v", got.Policy.AllowHostPatterns)
+	}
+}
+
+func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testing.T) {
+	base := cliFileConfig{
+		ClearEnv:               true,
+		MaxRequestBodyBytes:    123,
+		Bin:                    []string{"bash"},
+		hasClearEnv:            true,
+		hasMaxRequestBodyBytes: true,
+		hasBin:                 true,
+		Policy: cliPolicyConfig{
+			AllowConnect:         true,
+			AllowHostPatterns:    []string{"^example[.]com$"},
+			AllowHeaderPatterns:  map[string][]string{"x-test": []string{"one"}},
+			hasAllowConnect:      true,
+			hasAllowHostPatterns: true,
+			hasAllowHeaders:      true,
+		},
+	}
+
+	overlay := cliFileConfig{
+		ClearEnv:               false,
+		MaxRequestBodyBytes:    0,
+		Bin:                    []string{},
+		hasClearEnv:            true,
+		hasMaxRequestBodyBytes: true,
+		hasBin:                 true,
+		Policy: cliPolicyConfig{
+			AllowConnect:         false,
+			AllowHostPatterns:    []string{},
+			AllowHeaderPatterns:  map[string][]string{},
+			hasAllowConnect:      true,
+			hasAllowHostPatterns: true,
+			hasAllowHeaders:      true,
+		},
+	}
+
+	got := mergeCLIConfigLayer(base, overlay)
+	if got.ClearEnv {
+		t.Fatal("expected clear_env override to false")
+	}
+	if got.MaxRequestBodyBytes != 0 {
+		t.Fatalf("got max_request_body_bytes %d want 0", got.MaxRequestBodyBytes)
+	}
+	if len(got.Bin) != 0 {
+		t.Fatalf("expected bin to be cleared, got %v", got.Bin)
+	}
+	if got.Policy.AllowConnect {
+		t.Fatal("expected policy.allow_connect override to false")
+	}
+	if len(got.Policy.AllowHostPatterns) != 0 {
+		t.Fatalf("expected allow_host_patterns to be cleared, got %v", got.Policy.AllowHostPatterns)
+	}
+	if len(got.Policy.AllowHeaderPatterns) != 0 {
+		t.Fatalf("expected allow_header_patterns to be cleared, got %v", got.Policy.AllowHeaderPatterns)
 	}
 }
 

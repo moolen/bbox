@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,40 +12,95 @@ import (
 )
 
 type cliPolicyConfig struct {
-	AllowHostPatterns   []string            `yaml:"allow_host_patterns"`
-	DenyHostPatterns    []string            `yaml:"deny_host_patterns"`
-	AllowIPCIDRs        []string            `yaml:"allow_ip_cidrs"`
-	DenyIPCIDRs         []string            `yaml:"deny_ip_cidrs"`
-	AllowHTTPMethods    []string            `yaml:"allow_http_methods"`
-	AllowConnect        bool                `yaml:"allow_connect"`
-	AllowConnectPorts   []string            `yaml:"allow_connect_ports"`
-	AllowPathPatterns   []string            `yaml:"allow_path_patterns"`
-	DenyPathPatterns    []string            `yaml:"deny_path_patterns"`
-	AllowHeaderPatterns map[string][]string `yaml:"allow_header_patterns"`
-	DenyHeaderPatterns  map[string][]string `yaml:"deny_header_patterns"`
-	AllowBodyPatterns   []string            `yaml:"allow_body_patterns"`
-	DenyBodyPatterns    []string            `yaml:"deny_body_patterns"`
+	AllowHostPatterns    []string            `yaml:"allow_host_patterns"`
+	DenyHostPatterns     []string            `yaml:"deny_host_patterns"`
+	AllowIPCIDRs         []string            `yaml:"allow_ip_cidrs"`
+	DenyIPCIDRs          []string            `yaml:"deny_ip_cidrs"`
+	AllowHTTPMethods     []string            `yaml:"allow_http_methods"`
+	AllowConnect         bool                `yaml:"allow_connect"`
+	AllowConnectPorts    []string            `yaml:"allow_connect_ports"`
+	AllowPathPatterns    []string            `yaml:"allow_path_patterns"`
+	DenyPathPatterns     []string            `yaml:"deny_path_patterns"`
+	AllowHeaderPatterns  map[string][]string `yaml:"allow_header_patterns"`
+	DenyHeaderPatterns   map[string][]string `yaml:"deny_header_patterns"`
+	AllowBodyPatterns    []string            `yaml:"allow_body_patterns"`
+	DenyBodyPatterns     []string            `yaml:"deny_body_patterns"`
+	hasAllowHostPatterns bool                `yaml:"-"`
+	hasDenyHostPatterns  bool                `yaml:"-"`
+	hasAllowIPCIDRs      bool                `yaml:"-"`
+	hasDenyIPCIDRs       bool                `yaml:"-"`
+	hasAllowHTTPMethods  bool                `yaml:"-"`
+	hasAllowConnect      bool                `yaml:"-"`
+	hasAllowConnectPorts bool                `yaml:"-"`
+	hasAllowPathPatterns bool                `yaml:"-"`
+	hasDenyPathPatterns  bool                `yaml:"-"`
+	hasAllowHeaders      bool                `yaml:"-"`
+	hasDenyHeaders       bool                `yaml:"-"`
+	hasAllowBodyPatterns bool                `yaml:"-"`
+	hasDenyBodyPatterns  bool                `yaml:"-"`
 }
 
 type cliFileConfig struct {
-	Name                   string          `yaml:"name"`
-	WorkDir                string          `yaml:"workdir"`
-	Bin                    []string        `yaml:"bin"`
-	MountRO                []string        `yaml:"mount_ro"`
-	MountRW                []string        `yaml:"mount_rw"`
-	Env                    []string        `yaml:"env"`
-	ClearEnv               bool            `yaml:"clear_env"`
-	TrafficMode            string          `yaml:"traffic_mode"`
-	MaxRequestBodyBytes    int64           `yaml:"max_request_body_bytes"`
-	AccessLog              string          `yaml:"access_log"`
-	ReportPolicyViolations bool            `yaml:"report_policy_violations"`
-	ReportAccessSummary    bool            `yaml:"report_access_summary"`
-	ReportRequestSummary   bool            `yaml:"report_request_summary"`
-	Policy                 cliPolicyConfig `yaml:"policy"`
+	Name                      string          `yaml:"name"`
+	WorkDir                   string          `yaml:"workdir"`
+	Bin                       []string        `yaml:"bin"`
+	MountRO                   []string        `yaml:"mount_ro"`
+	MountRW                   []string        `yaml:"mount_rw"`
+	Env                       []string        `yaml:"env"`
+	ClearEnv                  bool            `yaml:"clear_env"`
+	TrafficMode               string          `yaml:"traffic_mode"`
+	MaxRequestBodyBytes       int64           `yaml:"max_request_body_bytes"`
+	AccessLog                 string          `yaml:"access_log"`
+	ReportPolicyViolations    bool            `yaml:"report_policy_violations"`
+	ReportAccessSummary       bool            `yaml:"report_access_summary"`
+	ReportRequestSummary      bool            `yaml:"report_request_summary"`
+	Policy                    cliPolicyConfig `yaml:"policy"`
+	hasName                   bool            `yaml:"-"`
+	hasWorkDir                bool            `yaml:"-"`
+	hasBin                    bool            `yaml:"-"`
+	hasMountRO                bool            `yaml:"-"`
+	hasMountRW                bool            `yaml:"-"`
+	hasEnv                    bool            `yaml:"-"`
+	hasClearEnv               bool            `yaml:"-"`
+	hasTrafficMode            bool            `yaml:"-"`
+	hasMaxRequestBodyBytes    bool            `yaml:"-"`
+	hasAccessLog              bool            `yaml:"-"`
+	hasReportPolicyViolations bool            `yaml:"-"`
+	hasReportAccessSummary    bool            `yaml:"-"`
+	hasReportRequestSummary   bool            `yaml:"-"`
+}
 
-	hasReportPolicyViolations bool `yaml:"-"`
-	hasReportAccessSummary    bool `yaml:"-"`
-	hasReportRequestSummary   bool `yaml:"-"`
+type rawCLIPolicyConfig struct {
+	AllowHostPatterns   *[]string            `yaml:"allow_host_patterns"`
+	DenyHostPatterns    *[]string            `yaml:"deny_host_patterns"`
+	AllowIPCIDRs        *[]string            `yaml:"allow_ip_cidrs"`
+	DenyIPCIDRs         *[]string            `yaml:"deny_ip_cidrs"`
+	AllowHTTPMethods    *[]string            `yaml:"allow_http_methods"`
+	AllowConnect        *bool                `yaml:"allow_connect"`
+	AllowConnectPorts   *[]string            `yaml:"allow_connect_ports"`
+	AllowPathPatterns   *[]string            `yaml:"allow_path_patterns"`
+	DenyPathPatterns    *[]string            `yaml:"deny_path_patterns"`
+	AllowHeaderPatterns *map[string][]string `yaml:"allow_header_patterns"`
+	DenyHeaderPatterns  *map[string][]string `yaml:"deny_header_patterns"`
+	AllowBodyPatterns   *[]string            `yaml:"allow_body_patterns"`
+	DenyBodyPatterns    *[]string            `yaml:"deny_body_patterns"`
+}
+
+type rawCLIFileConfig struct {
+	Name                   *string             `yaml:"name"`
+	WorkDir                *string             `yaml:"workdir"`
+	Bin                    *[]string           `yaml:"bin"`
+	MountRO                *[]string           `yaml:"mount_ro"`
+	MountRW                *[]string           `yaml:"mount_rw"`
+	Env                    *[]string           `yaml:"env"`
+	ClearEnv               *bool               `yaml:"clear_env"`
+	TrafficMode            *string             `yaml:"traffic_mode"`
+	MaxRequestBodyBytes    *int64              `yaml:"max_request_body_bytes"`
+	AccessLog              *string             `yaml:"access_log"`
+	ReportPolicyViolations *bool               `yaml:"report_policy_violations"`
+	ReportAccessSummary    *bool               `yaml:"report_access_summary"`
+	ReportRequestSummary   *bool               `yaml:"report_request_summary"`
+	Policy                 *rawCLIPolicyConfig `yaml:"policy"`
 }
 
 type cliFlagOverrides struct {
@@ -84,40 +141,62 @@ func loadCLIFileConfig(path string) (cliFileConfig, error) {
 		return cliFileConfig{}, fmt.Errorf("read config file %q: %w", path, err)
 	}
 
-	type rawCLIFileConfig struct {
-		Name                   string          `yaml:"name"`
-		WorkDir                string          `yaml:"workdir"`
-		Bin                    []string        `yaml:"bin"`
-		MountRO                []string        `yaml:"mount_ro"`
-		MountRW                []string        `yaml:"mount_rw"`
-		Env                    []string        `yaml:"env"`
-		ClearEnv               bool            `yaml:"clear_env"`
-		TrafficMode            string          `yaml:"traffic_mode"`
-		MaxRequestBodyBytes    int64           `yaml:"max_request_body_bytes"`
-		AccessLog              string          `yaml:"access_log"`
-		ReportPolicyViolations *bool           `yaml:"report_policy_violations"`
-		ReportAccessSummary    *bool           `yaml:"report_access_summary"`
-		ReportRequestSummary   *bool           `yaml:"report_request_summary"`
-		Policy                 cliPolicyConfig `yaml:"policy"`
-	}
-
 	var raw rawCLIFileConfig
-	if err := yaml.Unmarshal(content, &raw); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&raw); err != nil {
 		return cliFileConfig{}, fmt.Errorf("decode config file %q: %w", path, err)
 	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return cliFileConfig{}, fmt.Errorf("decode config file %q: multiple YAML documents are not supported", path)
+	}
 
-	cfg := cliFileConfig{
-		Name:                raw.Name,
-		WorkDir:             raw.WorkDir,
-		Bin:                 raw.Bin,
-		MountRO:             raw.MountRO,
-		MountRW:             raw.MountRW,
-		Env:                 raw.Env,
-		ClearEnv:            raw.ClearEnv,
-		TrafficMode:         raw.TrafficMode,
-		MaxRequestBodyBytes: raw.MaxRequestBodyBytes,
-		AccessLog:           raw.AccessLog,
-		Policy:              raw.Policy,
+	cfg := toCLIFileConfig(raw)
+	resolveCLIFileConfigPaths(&cfg, filepath.Dir(path))
+	return cfg, nil
+}
+
+func toCLIFileConfig(raw rawCLIFileConfig) cliFileConfig {
+	var cfg cliFileConfig
+	if raw.Name != nil {
+		cfg.Name = *raw.Name
+		cfg.hasName = true
+	}
+	if raw.WorkDir != nil {
+		cfg.WorkDir = *raw.WorkDir
+		cfg.hasWorkDir = true
+	}
+	if raw.Bin != nil {
+		cfg.Bin = cloneStringSlice(*raw.Bin)
+		cfg.hasBin = true
+	}
+	if raw.MountRO != nil {
+		cfg.MountRO = cloneStringSlice(*raw.MountRO)
+		cfg.hasMountRO = true
+	}
+	if raw.MountRW != nil {
+		cfg.MountRW = cloneStringSlice(*raw.MountRW)
+		cfg.hasMountRW = true
+	}
+	if raw.Env != nil {
+		cfg.Env = cloneStringSlice(*raw.Env)
+		cfg.hasEnv = true
+	}
+	if raw.ClearEnv != nil {
+		cfg.ClearEnv = *raw.ClearEnv
+		cfg.hasClearEnv = true
+	}
+	if raw.TrafficMode != nil {
+		cfg.TrafficMode = *raw.TrafficMode
+		cfg.hasTrafficMode = true
+	}
+	if raw.MaxRequestBodyBytes != nil {
+		cfg.MaxRequestBodyBytes = *raw.MaxRequestBodyBytes
+		cfg.hasMaxRequestBodyBytes = true
+	}
+	if raw.AccessLog != nil {
+		cfg.AccessLog = *raw.AccessLog
+		cfg.hasAccessLog = true
 	}
 	if raw.ReportPolicyViolations != nil {
 		cfg.ReportPolicyViolations = *raw.ReportPolicyViolations
@@ -131,16 +210,73 @@ func loadCLIFileConfig(path string) (cliFileConfig, error) {
 		cfg.ReportRequestSummary = *raw.ReportRequestSummary
 		cfg.hasReportRequestSummary = true
 	}
-
-	dir := filepath.Dir(path)
-	resolveCLIFileConfigPaths(&cfg, dir)
-	return cfg, nil
+	if raw.Policy != nil {
+		if raw.Policy.AllowHostPatterns != nil {
+			cfg.Policy.AllowHostPatterns = cloneStringSlice(*raw.Policy.AllowHostPatterns)
+			cfg.Policy.hasAllowHostPatterns = true
+		}
+		if raw.Policy.DenyHostPatterns != nil {
+			cfg.Policy.DenyHostPatterns = cloneStringSlice(*raw.Policy.DenyHostPatterns)
+			cfg.Policy.hasDenyHostPatterns = true
+		}
+		if raw.Policy.AllowIPCIDRs != nil {
+			cfg.Policy.AllowIPCIDRs = cloneStringSlice(*raw.Policy.AllowIPCIDRs)
+			cfg.Policy.hasAllowIPCIDRs = true
+		}
+		if raw.Policy.DenyIPCIDRs != nil {
+			cfg.Policy.DenyIPCIDRs = cloneStringSlice(*raw.Policy.DenyIPCIDRs)
+			cfg.Policy.hasDenyIPCIDRs = true
+		}
+		if raw.Policy.AllowHTTPMethods != nil {
+			cfg.Policy.AllowHTTPMethods = cloneStringSlice(*raw.Policy.AllowHTTPMethods)
+			cfg.Policy.hasAllowHTTPMethods = true
+		}
+		if raw.Policy.AllowConnect != nil {
+			cfg.Policy.AllowConnect = *raw.Policy.AllowConnect
+			cfg.Policy.hasAllowConnect = true
+		}
+		if raw.Policy.AllowConnectPorts != nil {
+			cfg.Policy.AllowConnectPorts = cloneStringSlice(*raw.Policy.AllowConnectPorts)
+			cfg.Policy.hasAllowConnectPorts = true
+		}
+		if raw.Policy.AllowPathPatterns != nil {
+			cfg.Policy.AllowPathPatterns = cloneStringSlice(*raw.Policy.AllowPathPatterns)
+			cfg.Policy.hasAllowPathPatterns = true
+		}
+		if raw.Policy.DenyPathPatterns != nil {
+			cfg.Policy.DenyPathPatterns = cloneStringSlice(*raw.Policy.DenyPathPatterns)
+			cfg.Policy.hasDenyPathPatterns = true
+		}
+		if raw.Policy.AllowHeaderPatterns != nil {
+			cfg.Policy.AllowHeaderPatterns = cloneStringSliceMap(*raw.Policy.AllowHeaderPatterns)
+			cfg.Policy.hasAllowHeaders = true
+		}
+		if raw.Policy.DenyHeaderPatterns != nil {
+			cfg.Policy.DenyHeaderPatterns = cloneStringSliceMap(*raw.Policy.DenyHeaderPatterns)
+			cfg.Policy.hasDenyHeaders = true
+		}
+		if raw.Policy.AllowBodyPatterns != nil {
+			cfg.Policy.AllowBodyPatterns = cloneStringSlice(*raw.Policy.AllowBodyPatterns)
+			cfg.Policy.hasAllowBodyPatterns = true
+		}
+		if raw.Policy.DenyBodyPatterns != nil {
+			cfg.Policy.DenyBodyPatterns = cloneStringSlice(*raw.Policy.DenyBodyPatterns)
+			cfg.Policy.hasDenyBodyPatterns = true
+		}
+	}
+	return cfg
 }
 
 func resolveCLIFileConfigPaths(cfg *cliFileConfig, configDir string) {
-	cfg.WorkDir = resolveConfigPath(cfg.WorkDir, configDir)
-	cfg.MountRO = resolveConfigMountSpecs(cfg.MountRO, configDir)
-	cfg.MountRW = resolveConfigMountSpecs(cfg.MountRW, configDir)
+	if cfg.hasWorkDir {
+		cfg.WorkDir = resolveConfigPath(cfg.WorkDir, configDir)
+	}
+	if cfg.hasMountRO {
+		cfg.MountRO = resolveConfigMountSpecs(cfg.MountRO, configDir)
+	}
+	if cfg.hasMountRW {
+		cfg.MountRW = resolveConfigMountSpecs(cfg.MountRW, configDir)
+	}
 }
 
 func resolveConfigPath(value string, baseDir string) string {
@@ -152,10 +288,6 @@ func resolveConfigPath(value string, baseDir string) string {
 }
 
 func resolveConfigMountSpecs(specs []string, baseDir string) []string {
-	if len(specs) == 0 {
-		return nil
-	}
-
 	out := make([]string, 0, len(specs))
 	for _, spec := range specs {
 		src, dst, ok := strings.Cut(spec, ":")
@@ -175,6 +307,8 @@ func defaultCLIFileConfig() cliFileConfig {
 		ReportPolicyViolations:    true,
 		ReportAccessSummary:       true,
 		ReportRequestSummary:      true,
+		hasTrafficMode:            true,
+		hasAccessLog:              true,
 		hasReportPolicyViolations: true,
 		hasReportAccessSummary:    true,
 		hasReportRequestSummary:   true,
@@ -182,11 +316,11 @@ func defaultCLIFileConfig() cliFileConfig {
 }
 
 func mergeCLIConfig(defaults cliFileConfig, fileCfg cliFileConfig, flags cliFlagOverrides, audit bool) cliFileConfig {
-	merged := defaults
-	merged = mergeCLIConfigLayer(merged, fileCfg)
+	merged := mergeCLIConfigLayer(defaults, fileCfg)
 
 	if flags.TrafficMode != nil {
 		merged.TrafficMode = *flags.TrafficMode
+		merged.hasTrafficMode = true
 	}
 	if flags.ReportPolicy != nil {
 		merged.ReportPolicyViolations = *flags.ReportPolicy
@@ -202,6 +336,7 @@ func mergeCLIConfig(defaults cliFileConfig, fileCfg cliFileConfig, flags cliFlag
 	}
 	if flags.AccessLog != nil {
 		merged.AccessLog = *flags.AccessLog
+		merged.hasAccessLog = true
 	}
 
 	if audit {
@@ -217,35 +352,45 @@ func mergeCLIConfig(defaults cliFileConfig, fileCfg cliFileConfig, flags cliFlag
 }
 
 func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfig {
-	if overlay.Name != "" {
+	if overlay.hasName {
 		base.Name = overlay.Name
+		base.hasName = true
 	}
-	if overlay.WorkDir != "" {
+	if overlay.hasWorkDir {
 		base.WorkDir = overlay.WorkDir
+		base.hasWorkDir = true
 	}
-	if len(overlay.Bin) > 0 {
-		base.Bin = append([]string(nil), overlay.Bin...)
+	if overlay.hasBin {
+		base.Bin = cloneStringSlice(overlay.Bin)
+		base.hasBin = true
 	}
-	if len(overlay.MountRO) > 0 {
-		base.MountRO = append([]string(nil), overlay.MountRO...)
+	if overlay.hasMountRO {
+		base.MountRO = cloneStringSlice(overlay.MountRO)
+		base.hasMountRO = true
 	}
-	if len(overlay.MountRW) > 0 {
-		base.MountRW = append([]string(nil), overlay.MountRW...)
+	if overlay.hasMountRW {
+		base.MountRW = cloneStringSlice(overlay.MountRW)
+		base.hasMountRW = true
 	}
-	if len(overlay.Env) > 0 {
-		base.Env = append([]string(nil), overlay.Env...)
+	if overlay.hasEnv {
+		base.Env = cloneStringSlice(overlay.Env)
+		base.hasEnv = true
 	}
-	if overlay.ClearEnv {
-		base.ClearEnv = true
+	if overlay.hasClearEnv {
+		base.ClearEnv = overlay.ClearEnv
+		base.hasClearEnv = true
 	}
-	if overlay.TrafficMode != "" {
+	if overlay.hasTrafficMode {
 		base.TrafficMode = overlay.TrafficMode
+		base.hasTrafficMode = true
 	}
-	if overlay.MaxRequestBodyBytes != 0 {
+	if overlay.hasMaxRequestBodyBytes {
 		base.MaxRequestBodyBytes = overlay.MaxRequestBodyBytes
+		base.hasMaxRequestBodyBytes = true
 	}
-	if overlay.AccessLog != "" {
+	if overlay.hasAccessLog {
 		base.AccessLog = overlay.AccessLog
+		base.hasAccessLog = true
 	}
 	if overlay.hasReportPolicyViolations {
 		base.ReportPolicyViolations = overlay.ReportPolicyViolations
@@ -259,55 +404,72 @@ func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfi
 		base.ReportRequestSummary = overlay.ReportRequestSummary
 		base.hasReportRequestSummary = true
 	}
-	if len(overlay.Policy.AllowHostPatterns) > 0 {
-		base.Policy.AllowHostPatterns = append([]string(nil), overlay.Policy.AllowHostPatterns...)
+	if overlay.Policy.hasAllowHostPatterns {
+		base.Policy.AllowHostPatterns = cloneStringSlice(overlay.Policy.AllowHostPatterns)
+		base.Policy.hasAllowHostPatterns = true
 	}
-	if len(overlay.Policy.DenyHostPatterns) > 0 {
-		base.Policy.DenyHostPatterns = append([]string(nil), overlay.Policy.DenyHostPatterns...)
+	if overlay.Policy.hasDenyHostPatterns {
+		base.Policy.DenyHostPatterns = cloneStringSlice(overlay.Policy.DenyHostPatterns)
+		base.Policy.hasDenyHostPatterns = true
 	}
-	if len(overlay.Policy.AllowIPCIDRs) > 0 {
-		base.Policy.AllowIPCIDRs = append([]string(nil), overlay.Policy.AllowIPCIDRs...)
+	if overlay.Policy.hasAllowIPCIDRs {
+		base.Policy.AllowIPCIDRs = cloneStringSlice(overlay.Policy.AllowIPCIDRs)
+		base.Policy.hasAllowIPCIDRs = true
 	}
-	if len(overlay.Policy.DenyIPCIDRs) > 0 {
-		base.Policy.DenyIPCIDRs = append([]string(nil), overlay.Policy.DenyIPCIDRs...)
+	if overlay.Policy.hasDenyIPCIDRs {
+		base.Policy.DenyIPCIDRs = cloneStringSlice(overlay.Policy.DenyIPCIDRs)
+		base.Policy.hasDenyIPCIDRs = true
 	}
-	if len(overlay.Policy.AllowHTTPMethods) > 0 {
-		base.Policy.AllowHTTPMethods = append([]string(nil), overlay.Policy.AllowHTTPMethods...)
+	if overlay.Policy.hasAllowHTTPMethods {
+		base.Policy.AllowHTTPMethods = cloneStringSlice(overlay.Policy.AllowHTTPMethods)
+		base.Policy.hasAllowHTTPMethods = true
 	}
-	if overlay.Policy.AllowConnect {
-		base.Policy.AllowConnect = true
+	if overlay.Policy.hasAllowConnect {
+		base.Policy.AllowConnect = overlay.Policy.AllowConnect
+		base.Policy.hasAllowConnect = true
 	}
-	if len(overlay.Policy.AllowConnectPorts) > 0 {
-		base.Policy.AllowConnectPorts = append([]string(nil), overlay.Policy.AllowConnectPorts...)
+	if overlay.Policy.hasAllowConnectPorts {
+		base.Policy.AllowConnectPorts = cloneStringSlice(overlay.Policy.AllowConnectPorts)
+		base.Policy.hasAllowConnectPorts = true
 	}
-	if len(overlay.Policy.AllowPathPatterns) > 0 {
-		base.Policy.AllowPathPatterns = append([]string(nil), overlay.Policy.AllowPathPatterns...)
+	if overlay.Policy.hasAllowPathPatterns {
+		base.Policy.AllowPathPatterns = cloneStringSlice(overlay.Policy.AllowPathPatterns)
+		base.Policy.hasAllowPathPatterns = true
 	}
-	if len(overlay.Policy.DenyPathPatterns) > 0 {
-		base.Policy.DenyPathPatterns = append([]string(nil), overlay.Policy.DenyPathPatterns...)
+	if overlay.Policy.hasDenyPathPatterns {
+		base.Policy.DenyPathPatterns = cloneStringSlice(overlay.Policy.DenyPathPatterns)
+		base.Policy.hasDenyPathPatterns = true
 	}
-	if len(overlay.Policy.AllowHeaderPatterns) > 0 {
+	if overlay.Policy.hasAllowHeaders {
 		base.Policy.AllowHeaderPatterns = cloneStringSliceMap(overlay.Policy.AllowHeaderPatterns)
+		base.Policy.hasAllowHeaders = true
 	}
-	if len(overlay.Policy.DenyHeaderPatterns) > 0 {
+	if overlay.Policy.hasDenyHeaders {
 		base.Policy.DenyHeaderPatterns = cloneStringSliceMap(overlay.Policy.DenyHeaderPatterns)
+		base.Policy.hasDenyHeaders = true
 	}
-	if len(overlay.Policy.AllowBodyPatterns) > 0 {
-		base.Policy.AllowBodyPatterns = append([]string(nil), overlay.Policy.AllowBodyPatterns...)
+	if overlay.Policy.hasAllowBodyPatterns {
+		base.Policy.AllowBodyPatterns = cloneStringSlice(overlay.Policy.AllowBodyPatterns)
+		base.Policy.hasAllowBodyPatterns = true
 	}
-	if len(overlay.Policy.DenyBodyPatterns) > 0 {
-		base.Policy.DenyBodyPatterns = append([]string(nil), overlay.Policy.DenyBodyPatterns...)
+	if overlay.Policy.hasDenyBodyPatterns {
+		base.Policy.DenyBodyPatterns = cloneStringSlice(overlay.Policy.DenyBodyPatterns)
+		base.Policy.hasDenyBodyPatterns = true
 	}
 	return base
 }
 
+func cloneStringSlice(in []string) []string {
+	return append([]string(nil), in...)
+}
+
 func cloneStringSliceMap(in map[string][]string) map[string][]string {
-	if len(in) == 0 {
+	if in == nil {
 		return nil
 	}
 	out := make(map[string][]string, len(in))
 	for k, v := range in {
-		out[k] = append([]string(nil), v...)
+		out[k] = cloneStringSlice(v)
 	}
 	return out
 }
