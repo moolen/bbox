@@ -29,7 +29,6 @@ type cliOptions struct {
 	env                 []string
 	clearEnv            bool
 	trafficMode         string
-	trafficModeSet      bool
 	maxRequestBodyBytes int64
 	maxBodySizeSet      bool
 	printPolicy         bool
@@ -138,7 +137,6 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 
 			opts.flagOverrides = cliFlagOverrides{}
 			if cmd.Flags().Changed("traffic-mode") {
-				opts.trafficModeSet = true
 				opts.flagOverrides.TrafficMode = &opts.trafficMode
 			}
 			if cmd.Flags().Changed("max-request-body-bytes") {
@@ -254,24 +252,7 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 		runtimeLayer.hasMaxRequestBodyBytes = true
 	}
 
-	flagOverrides := opts.flagOverrides
-	if flagOverrides.TrafficMode == nil && strings.TrimSpace(opts.trafficMode) != "" {
-		flagOverrides.TrafficMode = &opts.trafficMode
-	}
-	if flagOverrides.ReportPolicy == nil && opts.reportPolicy {
-		flagOverrides.ReportPolicy = &opts.reportPolicy
-	}
-	if flagOverrides.ReportAccessSummary == nil && opts.reportAccess {
-		flagOverrides.ReportAccessSummary = &opts.reportAccess
-	}
-	if flagOverrides.ReportRequestSummary == nil && opts.reportRequests {
-		flagOverrides.ReportRequestSummary = &opts.reportRequests
-	}
-	if flagOverrides.AccessLog == nil && strings.TrimSpace(opts.accessLog) != "" {
-		flagOverrides.AccessLog = &opts.accessLog
-	}
-
-	mergedCfg := mergeCLIConfig(defaults, fileCfg, flagOverrides, opts.audit)
+	mergedCfg := mergeCLIConfig(defaults, fileCfg, opts.flagOverrides, opts.audit)
 	mergedCfg = mergeCLIConfigLayer(mergedCfg, runtimeLayer)
 
 	workDir := strings.TrimSpace(mergedCfg.WorkDir)

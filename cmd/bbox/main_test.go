@@ -217,6 +217,11 @@ report_policy_violations: false
 report_access_summary: false
 report_request_summary: false
 `)
+	trafficMode := "proxy"
+	accessLog := "json"
+	reportPolicy := true
+	reportAccess := true
+	reportRequests := true
 
 	cfg, err := buildConfig(cliOptions{
 		trafficMode:    "proxy",
@@ -224,6 +229,13 @@ report_request_summary: false
 		reportPolicy:   true,
 		reportAccess:   true,
 		reportRequests: true,
+		flagOverrides: cliFlagOverrides{
+			TrafficMode:          &trafficMode,
+			ReportPolicy:         &reportPolicy,
+			ReportAccessSummary:  &reportAccess,
+			ReportRequestSummary: &reportRequests,
+			AccessLog:            &accessLog,
+		},
 	}, []string{"bash"}, root, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -239,8 +251,51 @@ report_request_summary: false
 	}
 }
 
+func TestRootCommandUnchangedFlagsDoNotOverrideBBoxYAML(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeBBoxYAML(t, root, `
+traffic_mode: transparent
+access_log: off
+`)
+
+	var got runConfig
+	cmd := newRootCommand(commandDeps{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getwd: func() (string, error) {
+			return nested, nil
+		},
+		environ: func() []string { return nil },
+		run: func(cfg runConfig) error {
+			got = cfg
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"--", "bash"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got.sandbox.TrafficMode != bbox.TrafficModeTransparent {
+		t.Fatalf("expected file traffic mode to survive when flag unchanged, got %q", got.sandbox.TrafficMode)
+	}
+	if got.accessLogMode != "off" {
+		t.Fatalf("expected file access_log to survive when flag unchanged, got %q", got.accessLogMode)
+	}
+}
+
 func TestBuildConfigTransparentModeDoesNotRequireMITMFlag(t *testing.T) {
-	cfg, err := buildConfig(cliOptions{trafficMode: "transparent"}, []string{"curl"}, t.TempDir(), nil)
+	trafficMode := "transparent"
+	cfg, err := buildConfig(cliOptions{
+		trafficMode: "transparent",
+		flagOverrides: cliFlagOverrides{
+			TrafficMode: &trafficMode,
+		},
+	}, []string{"curl"}, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
