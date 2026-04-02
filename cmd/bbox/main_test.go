@@ -50,7 +50,7 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectory(t *testing.T) {
 	}
 }
 
-func TestBuildCLIProcessRunOptionsUsesBufferedModeWithoutTTY(t *testing.T) {
+func TestBuildCLIProcessRunOptionsForwardsStdinWithoutTTY(t *testing.T) {
 	stdin, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatal(err)
@@ -69,8 +69,11 @@ func TestBuildCLIProcessRunOptionsUsesBufferedModeWithoutTTY(t *testing.T) {
 	if opts.Interactive {
 		t.Fatalf("expected non-tty run options to stay buffered, got %#v", opts)
 	}
-	if opts.Stdin != nil || opts.Stdout != nil || opts.Stderr != nil {
-		t.Fatalf("expected non-tty run options to avoid live stdio forwarding, got %#v", opts)
+	if opts.Stdin != stdin {
+		t.Fatalf("expected non-tty run options to preserve stdin, got %#v", opts)
+	}
+	if opts.Stdout != nil || opts.Stderr != nil {
+		t.Fatalf("expected non-tty run options to avoid live stdout/stderr forwarding, got %#v", opts)
 	}
 	if opts.Terminal || opts.Resize != nil {
 		t.Fatalf("expected non-tty run options to avoid terminal plumbing, got %#v", opts)
@@ -672,6 +675,23 @@ func TestBuildConfigCollapsesUsrPathEntriesIntoSingleUsrMount(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected exactly one /usr PATH mount, got %d in %v", count, cfg.sandbox.Mounts)
+	}
+}
+
+func TestPathMountTargetDoesNotCollapseRootBinDirectories(t *testing.T) {
+	tests := []struct {
+		dir      string
+		resolved string
+		want     string
+	}{
+		{dir: "/bin", resolved: "/bin", want: "/bin"},
+		{dir: "/sbin", resolved: "/sbin", want: "/sbin"},
+	}
+
+	for _, tt := range tests {
+		if got := pathMountTarget(tt.dir, tt.resolved); got != tt.want {
+			t.Fatalf("pathMountTarget(%q, %q) = %q, want %q", tt.dir, tt.resolved, got, tt.want)
+		}
 	}
 }
 

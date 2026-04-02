@@ -72,4 +72,4 @@ jobs:
 
       - name: Run Darwin backend smoke tests
         run: |
-          go test . ./cmd/bbox -count=1 -run '^(TestNewSandboxDarwinRejectsTransparentMode|TestNewSandboxDarwinRejectsMounts|TestNewSandboxDarwinRejectsSeccomp|TestDarwinLaunchEnvStripsDYLDVars|TestGenerateDarwinProfileAllowsOnlyProxyLoopbackEndpoints|TestGenerateDarwinProfileTreatsBinAsExecAllowlist|TestDarwinRuntimeRunUsesSandboxExecWithSanitizedEnv|TestDarwinRuntimeInteractiveRunUsesSameSandboxLaunchPath|TestDarwinRuntimeProxyURLUsesManagerProxyAddr|TestNewSandboxDarwinProxyModeRoutesHTTPViaHostHelper|TestDarwinSandboxAllowsLoopbackHTTPViaProxy|TestDarwinSandboxBlocksDirectLoopbackHTTP|TestDarwinSandboxDeniesLoopbackHTTPViaProxyWithoutRule|TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime)$'
+          go test . ./cmd/bbox -count=1 -run 'Darwin'

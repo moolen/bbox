@@ -526,13 +526,7 @@ func pathMountForDir(dir string) (bbox.Mount, bool, error) {
 	if eval, err := filepath.EvalSymlinks(dir); err == nil && strings.TrimSpace(eval) != "" {
 		resolved = filepath.Clean(eval)
 	}
-
-	switch {
-	case resolved == "/usr" || strings.HasPrefix(resolved, "/usr/"):
-		target = "/usr"
-	case filepath.Base(dir) == "bin" || filepath.Base(dir) == "sbin":
-		target = filepath.Dir(dir)
-	}
+	target = pathMountTarget(dir, resolved)
 
 	info, err = os.Stat(target)
 	if err != nil {
@@ -547,6 +541,19 @@ func pathMountForDir(dir string) (bbox.Mount, bool, error) {
 		Target:   target,
 		ReadOnly: true,
 	}, true, nil
+}
+
+func pathMountTarget(dir string, resolved string) string {
+	switch {
+	case resolved == "/usr" || strings.HasPrefix(resolved, "/usr/"):
+		return "/usr"
+	case filepath.Base(dir) == "bin" || filepath.Base(dir) == "sbin":
+		parent := filepath.Dir(dir)
+		if parent != string(filepath.Separator) && parent != "." {
+			return parent
+		}
+	}
+	return dir
 }
 
 func mountOverlapsAny(want bbox.Mount, existing []bbox.Mount) bool {
@@ -753,7 +760,7 @@ func buildCLIProcessRunOptions(stdin *os.File, stdout, stderr io.Writer) (bbox.R
 
 	fd := int(stdin.Fd())
 	if !cliIsTerminal(fd) {
-		return bbox.RunOptions{}, false, func() {}, nil
+		return bbox.RunOptions{Stdin: stdin}, false, func() {}, nil
 	}
 
 	opts := bbox.RunOptions{

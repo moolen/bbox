@@ -47,9 +47,11 @@ Discovery order:
 
 If `bbox.yaml` is found in a parent directory, relative paths in `workdir`, `mount_ro`, and `mount_rw` are resolved relative to the directory containing that `bbox.yaml`.
 
-The CLI automatically stages every executable found on the effective sandbox `PATH`. By default that comes from the inherited host environment. You can override it with `env: ["PATH=..."]` in `bbox.yaml` or `--env PATH=...` on the CLI. If you also set `clear_env: true`, set `PATH` explicitly if you still want command-name lookup inside the sandbox.
+The CLI resolves the payload command and any explicit `bin` entries against the effective sandbox `PATH`. By default that comes from the inherited host environment. You can override it with `env: ["PATH=..."]` in `bbox.yaml` or `--env PATH=...` on the CLI. If you also set `clear_env: true`, set `PATH` explicitly if you still want command-name lookup inside the sandbox.
 
-On macOS, those same `PATH`-resolved entries are used to build the executable allowlist for the generated Seatbelt profile.
+On Linux, bbox also adds read-only mounts for the effective `PATH` roots so those command lookups can keep working at runtime. For entries under `/usr`, this collapses to a single `/usr` mount. For non-root `.../bin` and `.../sbin` entries, bbox mounts the parent directory instead.
+
+On macOS, bbox does not mirror the Linux PATH mount behavior. Instead, the resolved payload command plus any explicit `bin` entries are used to build the generated Seatbelt executable allowlist.
 
 Example:
 
