@@ -142,13 +142,132 @@ func TestRootCommandAuditFlagPassesAuditReportingToRunner(t *testing.T) {
 	}
 }
 
-func TestBuildConfigTransparentModeRequiresMITM(t *testing.T) {
-	_, err := buildConfig(cliOptions{trafficMode: "transparent"}, []string{"curl"}, t.TempDir(), nil)
-	if err == nil {
-		t.Fatal("expected transparent mode without mitm to fail")
+func TestRootCommandDoesNotRegisterRemovedPolicyFlags(t *testing.T) {
+	cmd := newRootCommand(commandDeps{stdout: io.Discard, stderr: io.Discard})
+	for _, flag := range []string{
+		"allowed-domain",
+		"deny-domain",
+		"allow-http-method",
+		"policy-mode",
+		"mitm",
+	} {
+		if got := cmd.Flags().Lookup(flag); got != nil {
+			t.Fatalf("expected %q to be removed, found %q", flag, got.Name)
+		}
 	}
-	if !strings.Contains(err.Error(), "--mitm") {
-		t.Fatalf("unexpected error: %v", err)
+}
+
+func TestBuildConfigDefaultsToAuditReportingWithoutConfigFile(t *testing.T) {
+	cfg, err := buildConfig(cliOptions{}, []string{"bash"}, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
+		t.Fatalf("expected default policy mode to be audit, got %q", cfg.manager.PolicyMode)
+	}
+	if !cfg.reporting.PolicyViolations || !cfg.reporting.AccessSummary || !cfg.reporting.RequestSummary {
+		t.Fatalf("expected default reporting to be enabled, got %#v", cfg.reporting)
+	}
+}
+
+func TestBuildConfigUsesBBoxYAMLWhenPresent(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "nested")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeBBoxYAML(t, root, `
+traffic_mode: transparent
+access_log: off
+max_request_body_bytes: 123
+policy:
+  allow_host_patterns:
+    - "^api[.]example[.]com$"
+  allow_http_methods:
+    - post
+`)
+
+	cfg, err := buildConfig(cliOptions{}, []string{"bash"}, child, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.sandbox.TrafficMode != bbox.TrafficModeTransparent {
+		t.Fatalf("expected transparent traffic mode from config file, got %q", cfg.sandbox.TrafficMode)
+	}
+	if cfg.accessLogMode != "off" {
+		t.Fatalf("expected access log mode off from config file, got %q", cfg.accessLogMode)
+	}
+	if cfg.manager.MaxRequestBodyBytes != 123 {
+		t.Fatalf("expected max request body bytes from config file, got %d", cfg.manager.MaxRequestBodyBytes)
+	}
+	if !reflect.DeepEqual(cfg.sandbox.Policy.AllowHostPatterns, []string{"^api[.]example[.]com$"}) {
+		t.Fatalf("unexpected allow host patterns: %v", cfg.sandbox.Policy.AllowHostPatterns)
+	}
+	if !reflect.DeepEqual(cfg.sandbox.Policy.AllowHTTPMethods, []string{"POST"}) {
+		t.Fatalf("unexpected allow methods: %v", cfg.sandbox.Policy.AllowHTTPMethods)
+	}
+}
+
+func TestBuildConfigCLIFlagsOverrideBBoxYAML(t *testing.T) {
+	root := t.TempDir()
+	writeBBoxYAML(t, root, `
+traffic_mode: transparent
+access_log: off
+report_policy_violations: false
+report_access_summary: false
+report_request_summary: false
+`)
+
+	cfg, err := buildConfig(cliOptions{
+		trafficMode:    "proxy",
+		accessLog:      "json",
+		reportPolicy:   true,
+		reportAccess:   true,
+		reportRequests: true,
+	}, []string{"bash"}, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.sandbox.TrafficMode != bbox.TrafficModeProxy {
+		t.Fatalf("expected traffic mode override from CLI, got %q", cfg.sandbox.TrafficMode)
+	}
+	if cfg.accessLogMode != "json" {
+		t.Fatalf("expected access log override from CLI, got %q", cfg.accessLogMode)
+	}
+	if !cfg.reporting.PolicyViolations || !cfg.reporting.AccessSummary || !cfg.reporting.RequestSummary {
+		t.Fatalf("expected reporting overrides from CLI, got %#v", cfg.reporting)
+	}
+}
+
+func TestBuildConfigTransparentModeDoesNotRequireMITMFlag(t *testing.T) {
+	cfg, err := buildConfig(cliOptions{trafficMode: "transparent"}, []string{"curl"}, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.sandbox.TrafficMode != bbox.TrafficModeTransparent {
+		t.Fatalf("unexpected traffic mode: %q", cfg.sandbox.TrafficMode)
+	}
+	if !cfg.manager.MITM.Enabled {
+		t.Fatal("expected transparent mode to enable mitm internally")
+	}
+}
+
+func TestAuditFlagStillOverridesMergedConfig(t *testing.T) {
+	root := t.TempDir()
+	writeBBoxYAML(t, root, `
+report_policy_violations: false
+report_access_summary: false
+report_request_summary: false
+`)
+	cfg, err := buildConfig(cliOptions{audit: true}, []string{"bash"}, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
+		t.Fatalf("expected policy mode audit, got %q", cfg.manager.PolicyMode)
+	}
+	if !cfg.reporting.PolicyViolations || !cfg.reporting.AccessSummary || !cfg.reporting.RequestSummary {
+		t.Fatalf("expected audit flag to force reporting on, got %#v", cfg.reporting)
 	}
 }
 
@@ -232,4 +351,12 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func writeBBoxYAML(t *testing.T, dir string, content string) {
+	t.Helper()
+	path := filepath.Join(dir, "bbox.yaml")
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(content)+"\n"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }

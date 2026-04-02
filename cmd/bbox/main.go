@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/moolen/bbox"
@@ -28,23 +29,17 @@ type cliOptions struct {
 	env                 []string
 	clearEnv            bool
 	trafficMode         string
-	mitm                bool
+	trafficModeSet      bool
 	maxRequestBodyBytes int64
+	maxBodySizeSet      bool
 	printPolicy         bool
-	allowedDomains      []string
-	allowedDomainsFile  string
-	denyDomains         []string
-	allowHTTPMethods    []string
-	allowConnect        bool
-	allowConnectPorts   []string
-	allowPaths          []string
-	denyPaths           []string
-	policyMode          string
 	reportPolicy        bool
 	reportAccess        bool
 	reportRequests      bool
 	accessLog           string
 	audit               bool
+	policyMode          string
+	flagOverrides       cliFlagOverrides
 }
 
 type runConfig struct {
@@ -141,6 +136,27 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 				return fmt.Errorf("resolve current working directory: %w", err)
 			}
 
+			opts.flagOverrides = cliFlagOverrides{}
+			if cmd.Flags().Changed("traffic-mode") {
+				opts.trafficModeSet = true
+				opts.flagOverrides.TrafficMode = &opts.trafficMode
+			}
+			if cmd.Flags().Changed("max-request-body-bytes") {
+				opts.maxBodySizeSet = true
+			}
+			if cmd.Flags().Changed("report-policy-violations") {
+				opts.flagOverrides.ReportPolicy = &opts.reportPolicy
+			}
+			if cmd.Flags().Changed("report-access-summary") {
+				opts.flagOverrides.ReportAccessSummary = &opts.reportAccess
+			}
+			if cmd.Flags().Changed("report-request-summary") {
+				opts.flagOverrides.ReportRequestSummary = &opts.reportRequests
+			}
+			if cmd.Flags().Changed("access-log") {
+				opts.flagOverrides.AccessLog = &opts.accessLog
+			}
+
 			cfg, err := buildConfig(opts, args, cwd, deps.environ())
 			if err != nil {
 				return err
@@ -165,19 +181,9 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 	flags.StringArrayVar(&opts.env, "env", nil, "environment entry in KEY=VALUE form")
 	flags.BoolVar(&opts.clearEnv, "clear-env", false, "do not inherit the host environment")
 	flags.StringVar(&opts.trafficMode, "traffic-mode", "proxy", "traffic mode: proxy or transparent")
-	flags.BoolVar(&opts.mitm, "mitm", false, "enable MITM support")
 	flags.Int64Var(&opts.maxRequestBodyBytes, "max-request-body-bytes", 64<<10, "maximum request body inspection size for MITM")
 	flags.BoolVar(&opts.printPolicy, "print-policy", false, "print the effective policy before execution")
 
-	flags.StringArrayVar(&opts.allowedDomains, "allowed-domain", nil, "allowed domain or wildcard entry")
-	flags.StringVar(&opts.allowedDomainsFile, "allowed-domains-file", "", "file containing allowed domains or wildcards")
-	flags.StringArrayVar(&opts.denyDomains, "deny-domain", nil, "denied domain or wildcard entry")
-	flags.StringArrayVar(&opts.allowHTTPMethods, "allow-http-method", nil, "allowed HTTP method")
-	flags.BoolVar(&opts.allowConnect, "allow-connect", true, "allow HTTPS CONNECT tunneling")
-	flags.StringArrayVar(&opts.allowConnectPorts, "allow-connect-port", nil, "allowed CONNECT destination port or range")
-	flags.StringArrayVar(&opts.allowPaths, "allow-path", nil, "allowed request path regex")
-	flags.StringArrayVar(&opts.denyPaths, "deny-path", nil, "denied request path regex")
-	flags.StringVar(&opts.policyMode, "policy-mode", "", "policy mode: enforce or audit")
 	flags.BoolVar(&opts.reportPolicy, "report-policy-violations", false, "render a policy-violations summary after execution")
 	flags.BoolVar(&opts.reportAccess, "report-access-summary", false, "render a host access summary after execution")
 	flags.BoolVar(&opts.reportRequests, "report-request-summary", false, "render a request summary after execution")
@@ -197,15 +203,86 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 		return runConfig{}, fmt.Errorf("resolve current working directory: %w", err)
 	}
 
-	workDir := strings.TrimSpace(opts.workDir)
+	defaults := defaultCLIFileConfig()
+	defaults.MaxRequestBodyBytes = 64 << 10
+	defaults.hasMaxRequestBodyBytes = true
+
+	var fileCfg cliFileConfig
+	configPath, err := findConfigFile(absCWD)
+	if err != nil {
+		return runConfig{}, err
+	}
+	if configPath != "" {
+		loaded, err := loadCLIFileConfig(configPath)
+		if err != nil {
+			return runConfig{}, err
+		}
+		fileCfg = loaded
+	}
+
+	runtimeLayer := cliFileConfig{}
+	if strings.TrimSpace(opts.name) != "" {
+		runtimeLayer.Name = opts.name
+		runtimeLayer.hasName = true
+	}
+	if strings.TrimSpace(opts.workDir) != "" {
+		runtimeLayer.WorkDir = opts.workDir
+		runtimeLayer.hasWorkDir = true
+	}
+	if len(opts.binaries) > 0 {
+		runtimeLayer.Bin = append([]string(nil), opts.binaries...)
+		runtimeLayer.hasBin = true
+	}
+	if len(opts.mountRO) > 0 {
+		runtimeLayer.MountRO = append([]string(nil), opts.mountRO...)
+		runtimeLayer.hasMountRO = true
+	}
+	if len(opts.mountRW) > 0 {
+		runtimeLayer.MountRW = append([]string(nil), opts.mountRW...)
+		runtimeLayer.hasMountRW = true
+	}
+	if len(opts.env) > 0 {
+		runtimeLayer.Env = append([]string(nil), opts.env...)
+		runtimeLayer.hasEnv = true
+	}
+	if opts.clearEnv {
+		runtimeLayer.ClearEnv = true
+		runtimeLayer.hasClearEnv = true
+	}
+	if opts.maxBodySizeSet {
+		runtimeLayer.MaxRequestBodyBytes = opts.maxRequestBodyBytes
+		runtimeLayer.hasMaxRequestBodyBytes = true
+	}
+
+	flagOverrides := opts.flagOverrides
+	if flagOverrides.TrafficMode == nil && strings.TrimSpace(opts.trafficMode) != "" {
+		flagOverrides.TrafficMode = &opts.trafficMode
+	}
+	if flagOverrides.ReportPolicy == nil && opts.reportPolicy {
+		flagOverrides.ReportPolicy = &opts.reportPolicy
+	}
+	if flagOverrides.ReportAccessSummary == nil && opts.reportAccess {
+		flagOverrides.ReportAccessSummary = &opts.reportAccess
+	}
+	if flagOverrides.ReportRequestSummary == nil && opts.reportRequests {
+		flagOverrides.ReportRequestSummary = &opts.reportRequests
+	}
+	if flagOverrides.AccessLog == nil && strings.TrimSpace(opts.accessLog) != "" {
+		flagOverrides.AccessLog = &opts.accessLog
+	}
+
+	mergedCfg := mergeCLIConfig(defaults, fileCfg, flagOverrides, opts.audit)
+	mergedCfg = mergeCLIConfigLayer(mergedCfg, runtimeLayer)
+
+	workDir := strings.TrimSpace(mergedCfg.WorkDir)
 	if workDir == "" {
 		workDir = absCWD
 	} else if !filepath.IsAbs(workDir) {
 		workDir = filepath.Join(absCWD, workDir)
 	}
 
-	mounts := make([]bbox.Mount, 0, 1+len(opts.mountRO)+len(opts.mountRW))
-	if !hasMount(absCWD, absCWD, append(opts.mountRO, opts.mountRW...)) {
+	mounts := make([]bbox.Mount, 0, 1+len(mergedCfg.MountRO)+len(mergedCfg.MountRW))
+	if !hasMount(absCWD, absCWD, append(mergedCfg.MountRO, mergedCfg.MountRW...)) {
 		mounts = append(mounts, bbox.Mount{
 			Source:   absCWD,
 			Target:   absCWD,
@@ -213,14 +290,14 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 		})
 	}
 
-	for _, spec := range opts.mountRO {
+	for _, spec := range mergedCfg.MountRO {
 		mount, err := parseMountSpec(spec, true)
 		if err != nil {
 			return runConfig{}, err
 		}
 		mounts = append(mounts, mount)
 	}
-	for _, spec := range opts.mountRW {
+	for _, spec := range mergedCfg.MountRW {
 		mount, err := parseMountSpec(spec, false)
 		if err != nil {
 			return runConfig{}, err
@@ -228,75 +305,68 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 		mounts = append(mounts, mount)
 	}
 
-	trafficMode := bbox.TrafficMode(strings.ToLower(strings.TrimSpace(opts.trafficMode)))
+	trafficMode := bbox.TrafficMode(strings.ToLower(strings.TrimSpace(mergedCfg.TrafficMode)))
 	if trafficMode == "" {
 		trafficMode = bbox.TrafficModeProxy
 	}
 	if trafficMode != bbox.TrafficModeProxy && trafficMode != bbox.TrafficModeTransparent {
-		return runConfig{}, fmt.Errorf("unsupported traffic mode %q", opts.trafficMode)
-	}
-	if trafficMode == bbox.TrafficModeTransparent && !opts.mitm {
-		return runConfig{}, fmt.Errorf("transparent mode requires --mitm")
+		return runConfig{}, fmt.Errorf("unsupported traffic mode %q", mergedCfg.TrafficMode)
 	}
 
-	allowPatterns, err := buildDomainPatterns(opts.allowedDomains, opts.allowedDomainsFile)
-	if err != nil {
-		return runConfig{}, err
-	}
-	denyPatterns, err := buildDomainPatterns(opts.denyDomains, "")
+	envEntries, err := buildSandboxEnv(cliOptions{
+		clearEnv: mergedCfg.ClearEnv,
+		env:      mergedCfg.Env,
+	}, environ)
 	if err != nil {
 		return runConfig{}, err
 	}
 
-	envEntries, err := buildSandboxEnv(opts, environ)
-	if err != nil {
-		return runConfig{}, err
-	}
-
-	connectPorts := append([]string(nil), opts.allowConnectPorts...)
-	if len(connectPorts) == 0 {
-		connectPorts = []string{"443"}
-	}
-
-	binaries := make([]string, 0, 1+len(opts.binaries))
+	binaries := make([]string, 0, 1+len(mergedCfg.Bin))
 	binaries = append(binaries, payload[0])
-	for _, binary := range opts.binaries {
+	for _, binary := range mergedCfg.Bin {
 		if !contains(binaries, binary) {
 			binaries = append(binaries, binary)
 		}
 	}
 
-	policyMode, err := effectivePolicyMode(opts)
-	if err != nil {
-		return runConfig{}, err
+	policyMode := bbox.PolicyModeAudit
+	reporting := bbox.ReportingOptions{
+		PolicyViolations: mergedCfg.ReportPolicyViolations,
+		AccessSummary:    mergedCfg.ReportAccessSummary,
+		RequestSummary:   mergedCfg.ReportRequestSummary,
 	}
-	reporting := effectiveReportingOptions(opts)
-	accessLogMode, err := normalizeAccessLogMode(opts.accessLog)
+	accessLogMode, err := normalizeAccessLogMode(mergedCfg.AccessLog)
 	if err != nil {
 		return runConfig{}, err
 	}
 
 	return runConfig{
 		manager: bbox.ProxyOptions{
-			MaxRequestBodyBytes: opts.maxRequestBodyBytes,
-			MITM:                bbox.MITMOptions{Enabled: opts.mitm},
+			MaxRequestBodyBytes: mergedCfg.MaxRequestBodyBytes,
+			MITM:                bbox.MITMOptions{Enabled: true},
 			PolicyMode:          policyMode,
 			Reporting:           reporting,
 		},
 		sandbox: bbox.SandboxOptions{
-			Name:        strings.TrimSpace(opts.name),
+			Name:        strings.TrimSpace(mergedCfg.Name),
 			Binaries:    binaries,
 			Mounts:      mounts,
 			Env:         envEntries,
 			TrafficMode: trafficMode,
 			Policy: bbox.NetworkPolicy{
-				AllowHostPatterns: allowPatterns,
-				DenyHostPatterns:  denyPatterns,
-				AllowHTTPMethods:  normalizeHTTPMethods(opts.allowHTTPMethods),
-				AllowConnect:      opts.allowConnect,
-				AllowConnectPorts: connectPorts,
-				AllowPathPatterns: append([]string(nil), opts.allowPaths...),
-				DenyPathPatterns:  append([]string(nil), opts.denyPaths...),
+				AllowHostPatterns:   append([]string(nil), mergedCfg.Policy.AllowHostPatterns...),
+				DenyHostPatterns:    append([]string(nil), mergedCfg.Policy.DenyHostPatterns...),
+				AllowIPCIDRs:        append([]string(nil), mergedCfg.Policy.AllowIPCIDRs...),
+				DenyIPCIDRs:         append([]string(nil), mergedCfg.Policy.DenyIPCIDRs...),
+				AllowHTTPMethods:    normalizeHTTPMethods(mergedCfg.Policy.AllowHTTPMethods),
+				AllowConnect:        mergedCfg.Policy.AllowConnect,
+				AllowConnectPorts:   append([]string(nil), mergedCfg.Policy.AllowConnectPorts...),
+				AllowPathPatterns:   append([]string(nil), mergedCfg.Policy.AllowPathPatterns...),
+				DenyPathPatterns:    append([]string(nil), mergedCfg.Policy.DenyPathPatterns...),
+				AllowHeaderPatterns: cloneStringSliceMap(mergedCfg.Policy.AllowHeaderPatterns),
+				DenyHeaderPatterns:  cloneStringSliceMap(mergedCfg.Policy.DenyHeaderPatterns),
+				AllowBodyPatterns:   append([]string(nil), mergedCfg.Policy.AllowBodyPatterns...),
+				DenyBodyPatterns:    append([]string(nil), mergedCfg.Policy.DenyBodyPatterns...),
 			},
 			WorkDir: workDir,
 		},
@@ -546,13 +616,17 @@ func runSandbox(cfg runConfig) error {
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	var cleanupOnce sync.Once
+	cleanupRun := func() {
+		cleanupOnce.Do(cleanup)
+	}
+	defer cleanupRun()
 
 	result, err := sandbox.RunInteractive(ctx, cfg.argv, runOpts)
 	if err != nil {
 		return err
 	}
-	if err := renderRunSummary(stderr, sandbox.AccessSummary(), accessLogger.Entries(), cfg.reporting); err != nil {
+	if err := finalizeRunOutput(cleanupRun, stderr, accessLogger, sandbox.AccessSummary(), cfg.reporting); err != nil {
 		return err
 	}
 	if result != nil && result.ExitCode != 0 {
