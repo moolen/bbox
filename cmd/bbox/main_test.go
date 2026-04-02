@@ -11,52 +11,6 @@ import (
 	"github.com/moolen/bbox"
 )
 
-func TestReadDomainListFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "allowed.txt")
-	content := strings.Join([]string{
-		"",
-		"# comment",
-		"example.com",
-		"  *.github.com  ",
-		"",
-	}, "\n")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := readDomainListFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{"example.com", "*.github.com"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v want %v", got, want)
-	}
-}
-
-func TestDomainPatternFromEntry(t *testing.T) {
-	tests := []struct {
-		entry string
-		want  string
-	}{
-		{entry: "example.com", want: `^example[.]com$`},
-		{entry: "*.github.com", want: `^([^.]+[.])+github[.]com$`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.entry, func(t *testing.T) {
-			got, err := domainPatternFromEntry(tt.entry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tt.want {
-				t.Fatalf("got %q want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseMountSpec(t *testing.T) {
 	got, err := parseMountSpec("/host/path:/sandbox/path", false)
 	if err != nil {
@@ -288,6 +242,39 @@ access_log: off
 	}
 }
 
+func TestRootCommandClearEnvFalseOverridesBBoxYAMLTrue(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeBBoxYAML(t, root, `
+clear_env: true
+`)
+
+	var got runConfig
+	cmd := newRootCommand(commandDeps{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getwd: func() (string, error) {
+			return nested, nil
+		},
+		environ: func() []string { return []string{"SECRET=value"} },
+		run: func(cfg runConfig) error {
+			got = cfg
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{"--clear-env=false", "--", "bash"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(got.sandbox.Env, "SECRET=value") {
+		t.Fatalf("expected inherited env to be restored by --clear-env=false, got %v", got.sandbox.Env)
+	}
+}
+
 func TestBuildConfigTransparentModeDoesNotRequireMITMFlag(t *testing.T) {
 	trafficMode := "transparent"
 	cfg, err := buildConfig(cliOptions{
@@ -328,8 +315,9 @@ report_request_summary: false
 
 func TestBuildConfigClearEnvSkipsInheritedEnv(t *testing.T) {
 	cfg, err := buildConfig(cliOptions{
-		clearEnv: true,
-		env:      []string{"FOO=bar"},
+		clearEnv:    true,
+		clearEnvSet: true,
+		env:         []string{"FOO=bar"},
 	}, []string{"bash"}, t.TempDir(), []string{"SECRET=value"})
 	if err != nil {
 		t.Fatal(err)

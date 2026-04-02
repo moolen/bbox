@@ -28,6 +28,7 @@ type cliOptions struct {
 	mountRW             []string
 	env                 []string
 	clearEnv            bool
+	clearEnvSet         bool
 	trafficMode         string
 	maxRequestBodyBytes int64
 	maxBodySizeSet      bool
@@ -37,7 +38,6 @@ type cliOptions struct {
 	reportRequests      bool
 	accessLog           string
 	audit               bool
-	policyMode          string
 	flagOverrides       cliFlagOverrides
 }
 
@@ -46,7 +46,6 @@ type runConfig struct {
 	sandbox       bbox.SandboxOptions
 	argv          []string
 	printPolicy   bool
-	policyMode    bbox.PolicyMode
 	reporting     bbox.ReportingOptions
 	accessLogMode string
 	stdout        io.Writer
@@ -142,6 +141,9 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 			if cmd.Flags().Changed("max-request-body-bytes") {
 				opts.maxBodySizeSet = true
 			}
+			if cmd.Flags().Changed("clear-env") {
+				opts.clearEnvSet = true
+			}
 			if cmd.Flags().Changed("report-policy-violations") {
 				opts.flagOverrides.ReportPolicy = &opts.reportPolicy
 			}
@@ -182,11 +184,11 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 	flags.Int64Var(&opts.maxRequestBodyBytes, "max-request-body-bytes", 64<<10, "maximum request body inspection size for MITM")
 	flags.BoolVar(&opts.printPolicy, "print-policy", false, "print the effective policy before execution")
 
-	flags.BoolVar(&opts.reportPolicy, "report-policy-violations", false, "render a policy-violations summary after execution")
-	flags.BoolVar(&opts.reportAccess, "report-access-summary", false, "render a host access summary after execution")
-	flags.BoolVar(&opts.reportRequests, "report-request-summary", false, "render a request summary after execution")
+	flags.BoolVar(&opts.reportPolicy, "report-policy-violations", true, "render a policy-violations summary after execution")
+	flags.BoolVar(&opts.reportAccess, "report-access-summary", true, "render a host access summary after execution")
+	flags.BoolVar(&opts.reportRequests, "report-request-summary", true, "render a request summary after execution")
 	flags.StringVar(&opts.accessLog, "access-log", "json", "access log mode: json or off")
-	flags.BoolVar(&opts.audit, "audit", false, "shorthand for --policy-mode audit plus summary reporting")
+	flags.BoolVar(&opts.audit, "audit", false, "force audit reporting summaries on")
 
 	return cmd
 }
@@ -243,8 +245,8 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 		runtimeLayer.Env = append([]string(nil), opts.env...)
 		runtimeLayer.hasEnv = true
 	}
-	if opts.clearEnv {
-		runtimeLayer.ClearEnv = true
+	if opts.clearEnvSet {
+		runtimeLayer.ClearEnv = opts.clearEnv
 		runtimeLayer.hasClearEnv = true
 	}
 	if opts.maxBodySizeSet {
@@ -353,40 +355,9 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 		},
 		argv:          append([]string(nil), payload...),
 		printPolicy:   opts.printPolicy,
-		policyMode:    policyMode,
 		reporting:     reporting,
 		accessLogMode: accessLogMode,
 	}, nil
-}
-
-func effectivePolicyMode(opts cliOptions) (bbox.PolicyMode, error) {
-	if opts.audit {
-		return bbox.PolicyModeAudit, nil
-	}
-
-	mode := bbox.PolicyMode(strings.ToLower(strings.TrimSpace(opts.policyMode)))
-	switch mode {
-	case "":
-		return bbox.PolicyModeEnforce, nil
-	case bbox.PolicyModeEnforce, bbox.PolicyModeAudit:
-		return mode, nil
-	default:
-		return "", fmt.Errorf("unsupported policy mode %q", opts.policyMode)
-	}
-}
-
-func effectiveReportingOptions(opts cliOptions) bbox.ReportingOptions {
-	reporting := bbox.ReportingOptions{
-		PolicyViolations: opts.reportPolicy,
-		AccessSummary:    opts.reportAccess,
-		RequestSummary:   opts.reportRequests,
-	}
-	if opts.audit {
-		reporting.PolicyViolations = true
-		reporting.AccessSummary = true
-		reporting.RequestSummary = true
-	}
-	return reporting
 }
 
 func normalizeAccessLogMode(mode string) (string, error) {
@@ -414,94 +385,6 @@ func buildSandboxEnv(opts cliOptions, environ []string) ([]string, error) {
 		envEntries = append(envEntries, entry)
 	}
 	return envEntries, nil
-}
-
-func buildDomainPatterns(values []string, filePath string) ([]string, error) {
-	entries := append([]string(nil), values...)
-	if strings.TrimSpace(filePath) != "" {
-		fileEntries, err := readDomainListFile(filePath)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, fileEntries...)
-	}
-
-	patterns := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		pattern, err := domainPatternFromEntry(entry)
-		if err != nil {
-			return nil, err
-		}
-		patterns = append(patterns, pattern)
-	}
-	return patterns, nil
-}
-
-func readDomainListFile(path string) ([]string, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read allowed domains file %q: %w", path, err)
-	}
-
-	var entries []string
-	for _, line := range strings.Split(string(content), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		entries = append(entries, line)
-	}
-	return entries, nil
-}
-
-func domainPatternFromEntry(entry string) (string, error) {
-	entry = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(entry, ".")))
-	if entry == "" {
-		return "", fmt.Errorf("domain entry cannot be empty")
-	}
-
-	if strings.HasPrefix(entry, "*.") {
-		suffix := strings.TrimPrefix(entry, "*.")
-		if !isValidDomainLiteral(suffix) {
-			return "", fmt.Errorf("invalid wildcard domain %q", entry)
-		}
-		return "^([^.]+[.])+" + escapeDomainLiteral(suffix) + "$", nil
-	}
-
-	if strings.Contains(entry, "*") || !isValidDomainLiteral(entry) {
-		return "", fmt.Errorf("invalid domain %q", entry)
-	}
-
-	return "^" + escapeDomainLiteral(entry) + "$", nil
-}
-
-func isValidDomainLiteral(value string) bool {
-	if strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") {
-		return false
-	}
-	parts := strings.Split(value, ".")
-	if len(parts) == 0 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" {
-			return false
-		}
-		for _, ch := range part {
-			switch {
-			case ch >= 'a' && ch <= 'z':
-			case ch >= '0' && ch <= '9':
-			case ch == '-':
-			default:
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func escapeDomainLiteral(value string) string {
-	return strings.ReplaceAll(value, ".", "[.]")
 }
 
 func parseMountSpec(spec string, readOnly bool) (bbox.Mount, error) {
