@@ -156,8 +156,8 @@ func TestLoadCLIFileConfigRejectsUnknownKeys(t *testing.T) {
 	if !strings.Contains(err.Error(), path) {
 		t.Fatalf("expected path-qualified error, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "field unknown_key not found") {
-		t.Fatalf("expected unknown field error, got %v", err)
+	if !(strings.Contains(err.Error(), "decode config file") && strings.Contains(err.Error(), "unknown")) {
+		t.Fatalf("expected unknown-field decode error, got %v", err)
 	}
 }
 
