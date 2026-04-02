@@ -1,0 +1,20 @@
+name: from-file
+workdir: /workspace
+bin: [bash, curl]
+mount_ro:
+  - /etc/ssl/certs:/etc/ssl/certs
+mount_rw:
+  - /host/cache:/cache
+env:
+  - FOO=bar
+clear_env: true
+traffic_mode: transparent
+max_request_body_bytes: 12345
+access_log: off
+report_policy_violations: true
+report_access_summary: true
+report_request_summary: false
+policy:
+  allow_host_patterns:
+    - "^api[.]example[.]com$"
+  allow_connect: false

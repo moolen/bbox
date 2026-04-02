@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -69,34 +70,7 @@ func TestFindConfigFileReturnsEmptyWhenMissing(t *testing.T) {
 }
 
 func TestLoadCLIFileConfigDecodesFlatYAML(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bbox.yaml")
-	content := `
-name: from-file
-workdir: /workspace
-bin: [bash, curl]
-mount_ro:
-  - /etc/ssl/certs:/etc/ssl/certs
-mount_rw:
-  - /host/cache:/cache
-env:
-  - FOO=bar
-clear_env: true
-traffic_mode: transparent
-max_request_body_bytes: 12345
-access_log: off
-report_policy_violations: true
-report_access_summary: true
-report_request_summary: false
-policy:
-  allow_host_patterns:
-    - "^api[.]example[.]com$"
-  allow_connect: false
-`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+	path := fixturePath(t, "flat_config.yaml")
 	got, err := loadCLIFileConfig(path)
 	if err != nil {
 		t.Fatal(err)
@@ -144,25 +118,8 @@ policy:
 }
 
 func TestLoadCLIFileConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) {
-	root := t.TempDir()
-	configDir := filepath.Join(root, "configs", "dev")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	path := filepath.Join(configDir, "bbox.yaml")
-	content := `
-workdir: ./workspace
-mount_ro:
-  - ./certs:/etc/ssl/certs
-mount_rw:
-  - ../shared:./sandbox/shared
-  - /var/tmp:/abs-target
-`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+	path := fixturePath(t, "relative_paths.yaml")
+	configDir := filepath.Dir(path)
 	got, err := loadCLIFileConfig(path)
 	if err != nil {
 		t.Fatal(err)
@@ -192,14 +149,16 @@ mount_rw:
 func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 	defaults := defaultCLIFileConfig()
 	fileCfg := cliFileConfig{
-		TrafficMode:            "transparent",
-		ReportPolicyViolations: false,
-		ReportAccessSummary:    false,
-		ReportRequestSummary:   false,
-		PolicyMode:             "enforce",
-		AccessLog:              "off",
-		MaxRequestBodyBytes:    999,
-		Policy:                 cliPolicyConfig{AllowHostPatterns: []string{"^file[.]example[.]com$"}},
+		TrafficMode:               "transparent",
+		ReportPolicyViolations:    false,
+		ReportAccessSummary:       false,
+		ReportRequestSummary:      false,
+		AccessLog:                 "off",
+		MaxRequestBodyBytes:       999,
+		Policy:                    cliPolicyConfig{AllowHostPatterns: []string{"^file[.]example[.]com$"}},
+		hasReportPolicyViolations: true,
+		hasReportAccessSummary:    true,
+		hasReportRequestSummary:   true,
 	}
 	flags := cliFlagOverrides{
 		TrafficMode:         stringPtr("proxy"),
@@ -211,9 +170,6 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 
 	if got.TrafficMode != "proxy" {
 		t.Fatalf("got traffic_mode %q", got.TrafficMode)
-	}
-	if got.PolicyMode != "audit" {
-		t.Fatalf("got policy_mode %q", got.PolicyMode)
 	}
 	if !got.ReportPolicyViolations || !got.ReportAccessSummary || !got.ReportRequestSummary {
 		t.Fatalf("expected audit reporting enabled, got %#v", got)
@@ -232,3 +188,12 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 func stringPtr(v string) *string { return &v }
 
 func boolPtr(v bool) *bool { return &v }
+
+func fixturePath(t *testing.T, name string) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test file path")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "testdata", name)
+}

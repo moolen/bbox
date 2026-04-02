@@ -39,7 +39,6 @@ type cliFileConfig struct {
 	ReportPolicyViolations bool            `yaml:"report_policy_violations"`
 	ReportAccessSummary    bool            `yaml:"report_access_summary"`
 	ReportRequestSummary   bool            `yaml:"report_request_summary"`
-	PolicyMode             string          `yaml:"policy_mode"`
 	Policy                 cliPolicyConfig `yaml:"policy"`
 
 	hasReportPolicyViolations bool `yaml:"-"`
@@ -99,7 +98,6 @@ func loadCLIFileConfig(path string) (cliFileConfig, error) {
 		ReportPolicyViolations *bool           `yaml:"report_policy_violations"`
 		ReportAccessSummary    *bool           `yaml:"report_access_summary"`
 		ReportRequestSummary   *bool           `yaml:"report_request_summary"`
-		PolicyMode             string          `yaml:"policy_mode"`
 		Policy                 cliPolicyConfig `yaml:"policy"`
 	}
 
@@ -119,7 +117,6 @@ func loadCLIFileConfig(path string) (cliFileConfig, error) {
 		TrafficMode:         raw.TrafficMode,
 		MaxRequestBodyBytes: raw.MaxRequestBodyBytes,
 		AccessLog:           raw.AccessLog,
-		PolicyMode:          raw.PolicyMode,
 		Policy:              raw.Policy,
 	}
 	if raw.ReportPolicyViolations != nil {
@@ -174,7 +171,6 @@ func resolveConfigMountSpecs(specs []string, baseDir string) []string {
 func defaultCLIFileConfig() cliFileConfig {
 	return cliFileConfig{
 		TrafficMode:               "proxy",
-		PolicyMode:                "audit",
 		AccessLog:                 "json",
 		ReportPolicyViolations:    true,
 		ReportAccessSummary:       true,
@@ -209,7 +205,6 @@ func mergeCLIConfig(defaults cliFileConfig, fileCfg cliFileConfig, flags cliFlag
 	}
 
 	if audit {
-		merged.PolicyMode = "audit"
 		merged.ReportPolicyViolations = true
 		merged.ReportAccessSummary = true
 		merged.ReportRequestSummary = true
@@ -251,9 +246,6 @@ func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfi
 	}
 	if overlay.AccessLog != "" {
 		base.AccessLog = overlay.AccessLog
-	}
-	if overlay.PolicyMode != "" {
-		base.PolicyMode = overlay.PolicyMode
 	}
 	if overlay.hasReportPolicyViolations {
 		base.ReportPolicyViolations = overlay.ReportPolicyViolations
