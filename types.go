@@ -212,7 +212,6 @@ type DockerSocketPolicy struct {
 
 // DockerSocketRule defines one ordered Docker socket policy rule.
 type DockerSocketRule struct {
-	Name       string
 	Action     DockerRuleAction
 	Operations []DockerOperation
 	HTTP       *DockerHTTPMatch

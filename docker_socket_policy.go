@@ -7,13 +7,13 @@ import (
 )
 
 type compiledDockerSocketPolicy struct {
-	defaultAction dockerRuleAction
+	defaultAction DockerRuleAction
 	rules         []compiledDockerSocketRule
 }
 
 type compiledDockerSocketRule struct {
-	action       dockerRuleAction
-	operations   map[dockerOperation]struct{}
+	action       DockerRuleAction
+	operations   map[DockerOperation]struct{}
 	httpMethods  map[string]struct{}
 	pathPatterns []*regexp.Regexp
 }
@@ -46,7 +46,7 @@ func compileDockerSocketRule(index int, rule DockerSocketRule) (compiledDockerSo
 
 	compiled := compiledDockerSocketRule{
 		action:      action,
-		operations:  map[dockerOperation]struct{}{},
+		operations:  map[DockerOperation]struct{}{},
 		httpMethods: map[string]struct{}{},
 	}
 
@@ -81,22 +81,22 @@ func compileDockerSocketRule(index int, rule DockerSocketRule) (compiledDockerSo
 	return compiled, nil
 }
 
-func normalizeDockerRuleAction(action DockerRuleAction, allowDefault bool) (dockerRuleAction, error) {
-	normalized := dockerRuleAction(strings.ToLower(strings.TrimSpace(string(action))))
+func normalizeDockerRuleAction(action DockerRuleAction, allowDefault bool) (DockerRuleAction, error) {
+	normalized := DockerRuleAction(strings.ToLower(strings.TrimSpace(string(action))))
 	if normalized == "" && allowDefault {
-		return dockerRuleActionDeny, nil
+		return DockerRuleActionDeny, nil
 	}
 	switch normalized {
-	case dockerRuleActionAllow, dockerRuleActionDeny:
+	case DockerRuleActionAllow, DockerRuleActionDeny:
 		return normalized, nil
 	default:
 		return "", fmt.Errorf("invalid docker rule action %q", action)
 	}
 }
 
-func (p *compiledDockerSocketPolicy) evaluate(req dockerSocketRequest) dockerRuleAction {
+func (p *compiledDockerSocketPolicy) evaluate(req dockerSocketRequest) DockerRuleAction {
 	if p == nil {
-		return dockerRuleActionDeny
+		return DockerRuleActionDeny
 	}
 
 	for _, rule := range p.rules {
@@ -107,7 +107,7 @@ func (p *compiledDockerSocketPolicy) evaluate(req dockerSocketRequest) dockerRul
 	}
 
 	if p.defaultAction == "" {
-		return dockerRuleActionDeny
+		return DockerRuleActionDeny
 	}
 	return p.defaultAction
 }
