@@ -215,12 +215,26 @@ type DockerSocketRule struct {
 	Action     DockerRuleAction
 	Operations []DockerOperation
 	HTTP       *DockerHTTPMatch
+	Build      *DockerBuildMatch
 }
 
 // DockerHTTPMatch provides raw HTTP request matching for Docker policies.
 type DockerHTTPMatch struct {
 	Methods      []string
 	PathPatterns []string
+}
+
+// DockerBuildContextMatch constrains which build context forms a rule allows.
+type DockerBuildContextMatch string
+
+const (
+	DockerBuildContextMatchLocalOnly DockerBuildContextMatch = "local_only"
+)
+
+// DockerBuildMatch provides build-specific request matching.
+type DockerBuildMatch struct {
+	Context         DockerBuildContextMatch
+	DockerfilePaths []string
 }
 
 // TerminalSize describes terminal dimensions for interactive runs.

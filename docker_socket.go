@@ -6,6 +6,7 @@ type dockerSocketRequest struct {
 	Method    string
 	Path      string
 	Operation DockerOperation
+	Build     *dockerBuildRequest
 }
 
 func normalizeDockerOperation(op string) DockerOperation {

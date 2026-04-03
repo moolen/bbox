@@ -16,6 +16,12 @@ type compiledDockerSocketRule struct {
 	operations   map[DockerOperation]struct{}
 	httpMethods  map[string]struct{}
 	pathPatterns []*regexp.Regexp
+	build        *compiledDockerBuildMatch
+}
+
+type compiledDockerBuildMatch struct {
+	context            DockerBuildContextMatch
+	dockerfilePatterns []*regexp.Regexp
 }
 
 func compileDockerSocketPolicy(policy DockerSocketPolicy) (*compiledDockerSocketPolicy, error) {
@@ -58,24 +64,51 @@ func compileDockerSocketRule(index int, rule DockerSocketRule) (compiledDockerSo
 		compiled.operations[normalized] = struct{}{}
 	}
 
-	if rule.HTTP == nil {
-		return compiled, nil
-	}
-
-	for _, method := range rule.HTTP.Methods {
-		normalized := strings.ToUpper(strings.TrimSpace(method))
-		if normalized == "" {
-			return compiledDockerSocketRule{}, fmt.Errorf("rule %d HTTP method cannot be empty", index)
+	if rule.HTTP != nil {
+		for _, method := range rule.HTTP.Methods {
+			normalized := strings.ToUpper(strings.TrimSpace(method))
+			if normalized == "" {
+				return compiledDockerSocketRule{}, fmt.Errorf("rule %d HTTP method cannot be empty", index)
+			}
+			compiled.httpMethods[normalized] = struct{}{}
 		}
-		compiled.httpMethods[normalized] = struct{}{}
+
+		for _, pattern := range rule.HTTP.PathPatterns {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return compiledDockerSocketRule{}, fmt.Errorf("compile rule %d HTTP path pattern %q: %w", index, pattern, err)
+			}
+			compiled.pathPatterns = append(compiled.pathPatterns, re)
+		}
 	}
 
-	for _, pattern := range rule.HTTP.PathPatterns {
+	if rule.Build != nil {
+		build, err := compileDockerBuildMatch(index, *rule.Build)
+		if err != nil {
+			return compiledDockerSocketRule{}, err
+		}
+		compiled.build = build
+	}
+
+	return compiled, nil
+}
+
+func compileDockerBuildMatch(index int, match DockerBuildMatch) (*compiledDockerBuildMatch, error) {
+	context, err := normalizeDockerBuildContextMatch(match.Context)
+	if err != nil {
+		return nil, fmt.Errorf("rule %d build context: %w", index, err)
+	}
+
+	compiled := &compiledDockerBuildMatch{
+		context:            context,
+		dockerfilePatterns: make([]*regexp.Regexp, 0, len(match.DockerfilePaths)),
+	}
+	for _, pattern := range match.DockerfilePaths {
 		re, err := regexp.Compile(pattern)
 		if err != nil {
-			return compiledDockerSocketRule{}, fmt.Errorf("compile rule %d HTTP path pattern %q: %w", index, pattern, err)
+			return nil, fmt.Errorf("compile rule %d build dockerfile path pattern %q: %w", index, pattern, err)
 		}
-		compiled.pathPatterns = append(compiled.pathPatterns, re)
+		compiled.dockerfilePatterns = append(compiled.dockerfilePatterns, re)
 	}
 
 	return compiled, nil
@@ -91,6 +124,16 @@ func normalizeDockerRuleAction(action DockerRuleAction, allowDefault bool) (Dock
 		return normalized, nil
 	default:
 		return "", fmt.Errorf("invalid docker rule action %q", action)
+	}
+}
+
+func normalizeDockerBuildContextMatch(value DockerBuildContextMatch) (DockerBuildContextMatch, error) {
+	normalized := DockerBuildContextMatch(strings.ToLower(strings.TrimSpace(string(value))))
+	switch normalized {
+	case "", DockerBuildContextMatchLocalOnly:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid docker build context match %q", value)
 	}
 }
 
@@ -139,5 +182,35 @@ func (r compiledDockerSocketRule) matches(req dockerSocketRequest) bool {
 		return false
 	}
 
+	if r.build != nil && !r.build.matches(req.Build) {
+		return false
+	}
+
 	return true
+}
+
+func (m *compiledDockerBuildMatch) matches(req *dockerBuildRequest) bool {
+	if m == nil {
+		return true
+	}
+	if req == nil {
+		return false
+	}
+	if m.context == DockerBuildContextMatchLocalOnly {
+		if req.Remote != "" {
+			return false
+		}
+		if req.BodyKind != "tar" {
+			return false
+		}
+	}
+	if len(m.dockerfilePatterns) == 0 {
+		return true
+	}
+	for _, pattern := range m.dockerfilePatterns {
+		if pattern.MatchString(req.Dockerfile) {
+			return true
+		}
+	}
+	return false
 }
