@@ -94,11 +94,25 @@ func TestTransparentSandboxAuditModeAllowsPolicyDeniedDNS(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip("bwrap not available")
 	}
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("go not available")
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("cc not available")
 	}
 
-	clientPath, clientDir := buildAuditDNSClient(t)
+	dnsAddr, _ := startStubDNSServer(t)
+
+	originalNewManagerDNSService := newManagerDNSService
+	newManagerDNSService = func() *managerDNSService {
+		return &managerDNSService{
+			dialContext: (&net.Dialer{Timeout: time.Second}).DialContext,
+			servers:     []string{dnsAddr},
+			timeout:     time.Second,
+		}
+	}
+	t.Cleanup(func() {
+		newManagerDNSService = originalNewManagerDNSService
+	})
+
+	clientPath, clientDir := buildLibcGetaddrinfoClient(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -139,7 +153,7 @@ func TestTransparentSandboxAuditModeAllowsPolicyDeniedDNS(t *testing.T) {
 		}
 	}()
 
-	result, err := sandbox.Run(ctx, []string{sandboxClientPath}, RunOptions{})
+	result, err := sandbox.Run(ctx, []string{sandboxClientPath, "example.test", "80"}, RunOptions{})
 	if err != nil {
 		waitErr := "pending"
 		select {
@@ -162,8 +176,8 @@ func TestTransparentSandboxAuditModeAllowsPolicyDeniedDNS(t *testing.T) {
 			sandbox.helperLogContents(),
 		)
 	}
-	if strings.TrimSpace(string(result.Stdout)) != "dns ok" {
-		t.Fatalf("expected stdout to be dns ok, got %q helperlog=%q", string(result.Stdout), sandbox.helperLogContents())
+	if !strings.Contains(string(result.Stdout), "127.0.0.1") {
+		t.Fatalf("expected IPv4 answer in stdout, got %q helperlog=%q", string(result.Stdout), sandbox.helperLogContents())
 	}
 }
 
@@ -225,78 +239,6 @@ int main(int argc, char **argv) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build getaddrinfo client: %v: %s", err, strings.TrimSpace(string(output)))
-	}
-	return binaryPath, dir
-}
-
-func buildAuditDNSClient(t *testing.T) (string, string) {
-	t.Helper()
-
-	dir, err := os.MkdirTemp("", "audit-dns-client-")
-	if err != nil {
-		t.Fatalf("mkdir temp dir: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(dir)
-	})
-
-	sourcePath := filepath.Join(dir, "main.go")
-	source := `package main
-
-import (
-	"fmt"
-	"net"
-	"os"
-	"time"
-)
-
-func main() {
-	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-	query := []byte{
-		0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-		0x04, 't', 'e', 's', 't',
-		0x00,
-		0x00, 0x01,
-		0x00, 0x01,
-	}
-
-	if _, err := conn.WriteTo(query, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 53}); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	buf := make([]byte, 512)
-	n, _, err := conn.ReadFrom(buf)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if n < 12 || buf[0] != 0x12 || buf[1] != 0x34 || buf[2]&0x80 == 0 {
-		fmt.Fprintf(os.Stderr, "unexpected DNS response: %x\n", buf[:n])
-		os.Exit(1)
-	}
-
-	fmt.Println("dns ok")
-}
-`
-	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
-		t.Fatalf("write client source: %v", err)
-	}
-
-	binaryPath := filepath.Join(dir, "dns-client")
-	cmd := exec.Command("go", "build", "-o", binaryPath, sourcePath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build audit dns client: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return binaryPath, dir
 }
