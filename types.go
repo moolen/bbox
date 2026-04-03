@@ -124,6 +124,8 @@ type ProxyOptions struct {
 	MITM MITMOptions
 	// AccessLogger receives per-request access log entries.
 	AccessLogger AccessLogger
+	// DockerSocket configures manager-wide Docker socket mediation defaults.
+	DockerSocket DockerSocketOptions
 }
 
 // MITMOptions configures manager-wide MITM behavior.
@@ -175,6 +177,51 @@ type SandboxOptions struct {
 	// Seccomp configures seccomp filtering for this sandbox. The zero value
 	// enables the baseline built-in profile.
 	Seccomp SeccompOptions
+	// DockerSocket overrides manager Docker socket mediation settings when
+	// non-zero.
+	DockerSocket DockerSocketOptions
+}
+
+// DockerSocketOptions configures Docker socket mediation for a manager or
+// sandbox.
+type DockerSocketOptions struct {
+	Enabled          bool
+	MountPath        string
+	TargetSocketPath string
+	Policy           DockerSocketPolicy
+}
+
+// DockerRuleAction controls whether a matching rule allows or denies a
+// request.
+type DockerRuleAction string
+
+const (
+	DockerRuleActionAllow DockerRuleAction = "allow"
+	DockerRuleActionDeny  DockerRuleAction = "deny"
+)
+
+// DockerOperation is a normalized Docker API operation identifier.
+type DockerOperation string
+
+// DockerSocketPolicy defines ordered allow/deny rules for Docker socket
+// mediation.
+type DockerSocketPolicy struct {
+	DefaultAction DockerRuleAction
+	Rules         []DockerSocketRule
+}
+
+// DockerSocketRule defines one ordered Docker socket policy rule.
+type DockerSocketRule struct {
+	Name       string
+	Action     DockerRuleAction
+	Operations []DockerOperation
+	HTTP       *DockerHTTPMatch
+}
+
+// DockerHTTPMatch provides raw HTTP request matching for Docker policies.
+type DockerHTTPMatch struct {
+	Methods      []string
+	PathPatterns []string
 }
 
 // TerminalSize describes terminal dimensions for interactive runs.
@@ -263,6 +310,8 @@ type ProxyManager struct {
 	mitm                   MITMOptions
 	policyMode             PolicyMode
 	reporting              ReportingOptions
+	dockerSocket           DockerSocketOptions
+	dockerSocketPolicy     *compiledDockerSocketPolicy
 	mitmCA                 *mitmCA
 	caCertPEM              []byte
 	nextSandboxID          atomic.Uint64

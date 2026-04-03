@@ -103,6 +103,10 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	if err != nil {
 		return nil, err
 	}
+	dockerSocketPolicy, err := compileDockerSocketPolicy(opts.DockerSocket.Policy)
+	if err != nil {
+		return nil, err
+	}
 	policyMode, err := normalizePolicyMode(opts.PolicyMode)
 	if err != nil {
 		return nil, err
@@ -129,6 +133,8 @@ func NewProxyManager(opts ProxyOptions) (*ProxyManager, error) {
 	manager.mitm = opts.MITM
 	manager.policyMode = policyMode
 	manager.reporting = opts.Reporting
+	manager.dockerSocket = opts.DockerSocket
+	manager.dockerSocketPolicy = dockerSocketPolicy
 	if isNilAccessLogger(opts.AccessLogger) {
 		manager.accessLogger = newDefaultJSONAccessLogger(os.Stderr)
 	} else {
