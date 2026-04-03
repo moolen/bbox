@@ -32,6 +32,12 @@ func normalizeDockerAPIPath(path string) string {
 	if normalized == "" {
 		return "/"
 	}
+	if len(normalized) > 1 {
+		normalized = strings.TrimRight(normalized, "/")
+		if normalized == "" {
+			return "/"
+		}
+	}
 	return normalized
 }
 
