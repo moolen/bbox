@@ -35,7 +35,9 @@ func inspectDockerBuildRequest(req *http.Request, body []byte) (dockerBuildReque
 	}
 
 	if buildReq.Remote != "" {
-		buildReq.BodyKind = "remote"
+		if err := setDockerBuildBodyKind(&buildReq, "remote"); err != nil {
+			return dockerBuildRequest{}, err
+		}
 	}
 
 	exportKind, err := detectDockerBuildExport(query)
@@ -43,15 +45,19 @@ func inspectDockerBuildRequest(req *http.Request, body []byte) (dockerBuildReque
 		return dockerBuildRequest{}, err
 	}
 	if exportKind != "" {
-		buildReq.BodyKind = exportKind
+		if err := setDockerBuildBodyKind(&buildReq, exportKind); err != nil {
+			return dockerBuildRequest{}, err
+		}
 	}
 
 	hasTarBody, err := validateDockerBuildContextBody(req, body, buildReq.Dockerfile)
 	if err != nil {
 		return dockerBuildRequest{}, err
 	}
-	if hasTarBody && buildReq.BodyKind == "" {
-		buildReq.BodyKind = "tar"
+	if hasTarBody {
+		if err := setDockerBuildBodyKind(&buildReq, "tar"); err != nil {
+			return dockerBuildRequest{}, err
+		}
 	}
 	if buildReq.BodyKind == "" {
 		return dockerBuildRequest{}, fmt.Errorf("unsupported docker build request body")
@@ -96,9 +102,29 @@ func normalizeDockerBuildPath(value string) string {
 	}
 }
 
+func setDockerBuildBodyKind(buildReq *dockerBuildRequest, bodyKind string) error {
+	if buildReq == nil || bodyKind == "" {
+		return nil
+	}
+	if buildReq.BodyKind == "" {
+		buildReq.BodyKind = bodyKind
+		return nil
+	}
+	if buildReq.BodyKind == bodyKind {
+		return nil
+	}
+	return fmt.Errorf("conflicting docker build context signals: %s and %s", buildReq.BodyKind, bodyKind)
+}
+
 func detectDockerBuildExport(query map[string][]string) (string, error) {
-	if truthyDockerBuildQueryValue(query["push"]) {
-		return "export", nil
+	if values, ok := query["push"]; ok {
+		push, err := parseDockerBuildPush(values)
+		if err != nil {
+			return "", err
+		}
+		if push {
+			return "export", nil
+		}
 	}
 
 	if values, ok := query["output"]; ok {
@@ -130,14 +156,21 @@ func detectDockerBuildExport(query map[string][]string) (string, error) {
 	return "", nil
 }
 
-func truthyDockerBuildQueryValue(values []string) bool {
+func parseDockerBuildPush(values []string) (bool, error) {
+	sawTruthy := false
 	for _, value := range values {
 		switch strings.ToLower(strings.TrimSpace(value)) {
 		case "1", "t", "true", "yes":
-			return true
+			sawTruthy = true
+		case "0", "f", "false", "no":
+			continue
+		case "":
+			return false, fmt.Errorf("docker build push parameter cannot be empty")
+		default:
+			return false, fmt.Errorf("docker build push parameter %q is ambiguous", value)
 		}
 	}
-	return false
+	return sawTruthy, nil
 }
 
 func validateDockerBuildContextBody(req *http.Request, body []byte, dockerfilePath string) (bool, error) {
@@ -146,7 +179,7 @@ func validateDockerBuildContextBody(req *http.Request, body []byte, dockerfilePa
 	}
 
 	contentType := strings.TrimSpace(req.Header.Get("Content-Type"))
-	if contentType != "" && !strings.HasPrefix(contentType, "application/x-tar") {
+	if contentType != "" && !strings.HasPrefix(strings.ToLower(contentType), "application/x-tar") {
 		return false, fmt.Errorf("unsupported docker build content type %q", contentType)
 	}
 

@@ -174,12 +174,16 @@ func (r compiledDockerSocketRule) matches(req dockerSocketRequest) bool {
 		if path == "" {
 			path = "/"
 		}
+		matched := false
 		for _, pattern := range r.pathPatterns {
 			if pattern.MatchString(path) {
-				return true
+				matched = true
+				break
 			}
 		}
-		return false
+		if !matched {
+			return false
+		}
 	}
 
 	if r.build != nil && !r.build.matches(req.Build) {
