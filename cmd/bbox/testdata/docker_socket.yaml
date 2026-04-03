@@ -1,0 +1,13 @@
+docker_socket:
+  enabled: true
+  mount_path: /var/run/docker.sock
+  target_socket_path: /run/user/1000/docker.sock
+  default_action: deny
+  rules:
+    - action: allow
+      operations:
+        - image_pull
+        - build
+    - action: deny
+      operations:
+        - image_push

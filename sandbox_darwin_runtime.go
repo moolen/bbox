@@ -35,7 +35,7 @@ type darwinSandboxRuntime struct {
 
 var darwinExecCommandContext = exec.CommandContext
 
-func (m *ProxyManager) newDarwinSandboxRuntime(ctx context.Context, sandboxID string, opts SandboxOptions, _ TrafficMode) (*sandboxRuntimeBootstrap, error) {
+func (m *ProxyManager) newDarwinSandboxRuntime(ctx context.Context, sandboxID string, opts SandboxOptions, _ TrafficMode, _ *dockerSocketMount) (*sandboxRuntimeBootstrap, error) {
 	runtimeBinary, err := m.runtimeBinary()
 	if err != nil {
 		return nil, err

@@ -23,12 +23,12 @@ type sandboxRuntimeBootstrap struct {
 
 var sandboxPlatform = runtime.GOOS
 
-func (m *ProxyManager) newSandboxRuntime(ctx context.Context, sandboxID string, opts SandboxOptions, mode TrafficMode) (*sandboxRuntimeBootstrap, error) {
+func (m *ProxyManager) newSandboxRuntime(ctx context.Context, sandboxID string, opts SandboxOptions, mode TrafficMode, dockerMount *dockerSocketMount) (*sandboxRuntimeBootstrap, error) {
 	switch sandboxPlatform {
 	case "linux":
-		return m.newLinuxSandboxRuntime(ctx, sandboxID, opts, mode)
+		return m.newLinuxSandboxRuntime(ctx, sandboxID, opts, mode, dockerMount)
 	case "darwin":
-		return m.newDarwinSandboxRuntime(ctx, sandboxID, opts, mode)
+		return m.newDarwinSandboxRuntime(ctx, sandboxID, opts, mode, dockerMount)
 	default:
 		return nil, fmt.Errorf("bbox sandbox is not supported on %s", sandboxPlatform)
 	}

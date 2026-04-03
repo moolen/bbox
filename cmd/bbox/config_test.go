@@ -121,6 +121,36 @@ func TestLoadCLIFileConfigDecodesRuleYAML(t *testing.T) {
 	}
 }
 
+func TestLoadCLIFileConfigDecodesDockerSocketPolicy(t *testing.T) {
+	path := fixturePath(t, "docker_socket.yaml")
+	got, err := loadCLIFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !got.DockerSocket.Enabled {
+		t.Fatal("expected docker_socket.enabled=true")
+	}
+	if got.DockerSocket.MountPath != "/var/run/docker.sock" {
+		t.Fatalf("got docker_socket.mount_path %q", got.DockerSocket.MountPath)
+	}
+	if got.DockerSocket.TargetSocketPath != "/run/user/1000/docker.sock" {
+		t.Fatalf("got docker_socket.target_socket_path %q", got.DockerSocket.TargetSocketPath)
+	}
+	if got.DockerSocket.DefaultAction != "deny" {
+		t.Fatalf("got docker_socket.default_action %q", got.DockerSocket.DefaultAction)
+	}
+	if len(got.DockerSocket.Rules) != 2 {
+		t.Fatalf("expected 2 docker socket rules, got %#v", got.DockerSocket.Rules)
+	}
+	if !reflect.DeepEqual(got.DockerSocket.Rules[0].Operations, []string{"image_pull", "build"}) {
+		t.Fatalf("got docker_socket.operations %v", got.DockerSocket.Rules[0].Operations)
+	}
+	if got.DockerSocket.Rules[1].Action != "deny" {
+		t.Fatalf("got docker_socket rule action %q", got.DockerSocket.Rules[1].Action)
+	}
+}
+
 func TestLoadCLIFileConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) {
 	path := fixturePath(t, "relative_paths.yaml")
 	configDir := filepath.Dir(path)
@@ -272,6 +302,48 @@ func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testin
 	}
 	if len(got.Policy.Rules) != 0 {
 		t.Fatalf("expected policy rules to be cleared, got %v", got.Policy.Rules)
+	}
+}
+
+func TestMergeCLIConfigPreservesDockerSocketPolicy(t *testing.T) {
+	base := cliFileConfig{
+		DockerSocket: cliDockerSocketConfig{
+			Enabled:       true,
+			DefaultAction: "deny",
+			Rules: []cliDockerSocketRuleConfig{
+				{Action: "allow", Operations: []string{"image_pull"}},
+			},
+			hasEnabled:       true,
+			hasDefaultAction: true,
+			hasRules:         true,
+		},
+	}
+
+	overlay := cliFileConfig{
+		DockerSocket: cliDockerSocketConfig{
+			MountPath: "/tmp/docker.sock",
+			Rules: []cliDockerSocketRuleConfig{
+				{Action: "deny", Operations: []string{"image_push"}},
+			},
+			hasMountPath: true,
+			hasRules:     true,
+		},
+	}
+
+	got := mergeCLIConfigLayer(base, overlay)
+	if !got.DockerSocket.Enabled {
+		t.Fatal("expected docker socket enabled flag to be preserved")
+	}
+	if got.DockerSocket.MountPath != "/tmp/docker.sock" {
+		t.Fatalf("got docker_socket.mount_path %q", got.DockerSocket.MountPath)
+	}
+	if got.DockerSocket.DefaultAction != "deny" {
+		t.Fatalf("got docker_socket.default_action %q", got.DockerSocket.DefaultAction)
+	}
+	if !reflect.DeepEqual(got.DockerSocket.Rules, []cliDockerSocketRuleConfig{
+		{Action: "deny", Operations: []string{"image_push"}},
+	}) {
+		t.Fatalf("got docker socket rules %#v", got.DockerSocket.Rules)
 	}
 }
 

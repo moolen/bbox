@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -98,6 +100,43 @@ func TestListenLoopbackPortReturnsErrorWhenUnavailable(t *testing.T) {
 			_ = blocked.Close()
 		}
 		t.Fatal("expected occupied port to fail")
+	}
+}
+
+func TestShouldSkipTransparentRuntimePortRequirement(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "permission denied",
+			err:  &net.OpError{Err: os.NewSyscallError("listen", syscall.EACCES)},
+			want: true,
+		},
+		{
+			name: "operation not permitted",
+			err:  &net.OpError{Err: os.NewSyscallError("listen", syscall.EPERM)},
+			want: true,
+		},
+		{
+			name: "address in use",
+			err:  &net.OpError{Err: os.NewSyscallError("listen", syscall.EADDRINUSE)},
+			want: true,
+		},
+		{
+			name: "other error",
+			err:  errors.New("boom"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldSkipTransparentRuntimePortRequirement(tt.err); got != tt.want {
+				t.Fatalf("shouldSkipTransparentRuntimePortRequirement(%v) = %v want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -248,6 +287,9 @@ func mustListenLoopbackPort(t *testing.T, port int) net.Listener {
 
 	listener, err := listenLoopbackPort(port)
 	if err != nil {
+		if shouldSkipTransparentRuntimePortRequirement(err) {
+			t.Skipf("transparent sandbox integration test requires binding 127.0.0.1:%d: %v", port, err)
+		}
 		t.Fatalf("transparent sandbox integration test requires binding 127.0.0.1:%d: %v", port, err)
 	}
 	return listener
@@ -259,6 +301,9 @@ func requireTransparentRuntimePortsStrict(t *testing.T) {
 	for _, port := range []int{53, 80, 443} {
 		listener, err := listenLoopbackPort(port)
 		if err != nil {
+			if shouldSkipTransparentRuntimePortRequirement(err) {
+				t.Skipf("transparent integration test requires binding 127.0.0.1:%d: %v", port, err)
+			}
 			t.Fatalf("transparent integration test requires binding 127.0.0.1:%d: %v", port, err)
 		}
 		_ = listener.Close()
@@ -267,6 +312,10 @@ func requireTransparentRuntimePortsStrict(t *testing.T) {
 
 func listenLoopbackPort(port int) (net.Listener, error) {
 	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+}
+
+func shouldSkipTransparentRuntimePortRequirement(err error) bool {
+	return errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EADDRINUSE)
 }
 
 func assertBlockedRunResult(t *testing.T, result *bbox.RunResult, err error) {

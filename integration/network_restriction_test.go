@@ -81,6 +81,25 @@ func TestTransparentBlockedProbeSpecsIncludeICMPWhenHostAvailable(t *testing.T) 
 	t.Fatalf("expected ICMP probe to be present when an ICMP host is available: %#v", probes)
 }
 
+func TestShouldSkipSandboxICMPPreflightReturnsFalseWithoutResult(t *testing.T) {
+	if shouldSkipSandboxICMPPreflight(nil) {
+		t.Fatal("expected nil result to keep ICMP preflight enabled")
+	}
+}
+
+func TestShouldSkipSandboxICMPPreflightDetectsMissingRawCapability(t *testing.T) {
+	result := &bbox.RunResult{
+		ExitCode: 2,
+		Stderr: []byte("/usr/bin/ping: socktype: SOCK_RAW\n" +
+			"/usr/bin/ping: socket: Operation not permitted\n" +
+			"/usr/bin/ping: => missing cap_net_raw+p capability or setuid?\n"),
+	}
+
+	if !shouldSkipSandboxICMPPreflight(result) {
+		t.Fatalf("expected missing raw ICMP capability to disable ICMP probes, stderr=%q", string(result.Stderr))
+	}
+}
+
 func TestListenLoopbackTCPAndUDPOnSamePortRetriesWhenUDPPortIsBusy(t *testing.T) {
 	busyUDP, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -187,7 +206,7 @@ func TestNetworkRestrictionsProxyMode(t *testing.T) {
 		t.Fatalf("unexpected proxy HTTP preflight output: %q", got)
 	}
 
-	requireSandboxICMPPreflight(t, ctx, sandbox, tools, targets)
+	targets = requireSandboxICMPPreflight(t, ctx, sandbox, tools, targets)
 
 	for _, probe := range proxyBlockedProbeSpecs(shellPath, tools, targets) {
 		t.Run(probe.name, func(t *testing.T) {
@@ -292,7 +311,7 @@ func TestNetworkRestrictionsTransparentMode(t *testing.T) {
 		t.Fatalf("unexpected transparent HTTPS preflight output: %q", got)
 	}
 
-	requireSandboxICMPPreflight(t, ctx, sandbox, tools, targets)
+	targets = requireSandboxICMPPreflight(t, ctx, sandbox, tools, targets)
 
 	for _, probe := range transparentBlockedProbeSpecs(shellPath, tools, targets) {
 		t.Run(probe.name, func(t *testing.T) {
@@ -452,10 +471,10 @@ func preflightHostRestrictionProbes(t *testing.T, ctx context.Context, shellPath
 	}))
 }
 
-func requireSandboxICMPPreflight(t *testing.T, ctx context.Context, sandbox *bbox.Sandbox, tools networkToolPaths, targets networkRestrictionTargets) {
+func requireSandboxICMPPreflight(t *testing.T, ctx context.Context, sandbox *bbox.Sandbox, tools networkToolPaths, targets networkRestrictionTargets) networkRestrictionTargets {
 	t.Helper()
 	if targets.icmpHost == "" {
-		return
+		return targets
 	}
 
 	result, err := sandbox.Run(ctx, []string{
@@ -467,9 +486,24 @@ func requireSandboxICMPPreflight(t *testing.T, ctx context.Context, sandbox *bbo
 	if result == nil {
 		t.Fatal("expected sandbox ICMP preflight result")
 	}
+	if shouldSkipSandboxICMPPreflight(result) {
+		t.Logf("sandbox ICMP preflight unavailable; omitting blocked ICMP probes: %s", strings.TrimSpace(string(result.Stderr)))
+		targets.icmpHost = ""
+		return targets
+	}
 	if result.ExitCode != 0 {
 		t.Fatalf("sandbox ICMP preflight must succeed before blocked ICMP probes are meaningful, stdout=%q stderr=%q", string(result.Stdout), string(result.Stderr))
 	}
+	return targets
+}
+
+func shouldSkipSandboxICMPPreflight(result *bbox.RunResult) bool {
+	if result == nil || result.ExitCode == 0 {
+		return false
+	}
+	stderr := strings.ToLower(string(result.Stderr))
+	return strings.Contains(stderr, "cap_net_raw") ||
+		(strings.Contains(stderr, "sock_raw") && strings.Contains(stderr, "operation not permitted"))
 }
 
 func mustRequireShellTool(t *testing.T) string {

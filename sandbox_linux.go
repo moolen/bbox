@@ -27,7 +27,7 @@ type linuxSandboxRuntime struct {
 	proxyAddr       string
 }
 
-func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID string, opts SandboxOptions, mode TrafficMode) (*sandboxRuntimeBootstrap, error) {
+func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID string, opts SandboxOptions, mode TrafficMode, dockerMount *dockerSocketMount) (*sandboxRuntimeBootstrap, error) {
 	runtimeBinary, err := m.runtimeBinary()
 	if err != nil {
 		return nil, err
@@ -89,6 +89,7 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 		unshareUser:           os.Geteuid() != 0,
 		maxRequestBodyBytes:   m.requestBodyLimitBytes,
 		mounts:                opts.Mounts,
+		dockerSocketMount:     dockerMount,
 		trafficMode:           mode,
 		payloadSeccompBPFPath: payloadSeccompBPFPath,
 		bridgeFD:              bridgeFD,

@@ -51,3 +51,32 @@ policy:
           - "^trace-[0-9]+$"
       body_patterns:
         - "^safe="
+
+docker_socket:
+  enabled: true
+  mount_path: /var/run/docker.sock
+  target_socket_path: /var/run/docker.sock
+  default_action: deny
+  rules:
+    - action: allow
+      operations:
+        - image_pull
+
+    - action: allow
+      operations:
+        - image_inspect
+
+    - action: allow
+      operations:
+        - build
+      build:
+        context: local_only
+        dockerfile_paths:
+          - "^Dockerfile$"
+          - "^docker/.*$"
+
+    - action: deny
+      operations:
+        - image_push
+        - exec_create
+        - exec_start

@@ -1,6 +1,9 @@
 package bbox
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestSandboxRunRejectsEmptyArgv(t *testing.T) {
 	s := &Sandbox{}
@@ -193,6 +196,49 @@ func TestValidateSandboxOptionsRejectsUnknownPolicyMode(t *testing.T) {
 
 	if err := validateSandboxOptions(opts, true); err == nil {
 		t.Fatal("expected unknown policy mode to fail validation")
+	}
+}
+
+func TestValidateSandboxOptionsRejectsRelativeDockerSocketMountPath(t *testing.T) {
+	opts := SandboxOptions{
+		DockerSocket: DockerSocketOptions{
+			Enabled:   true,
+			MountPath: "var/run/docker.sock",
+		},
+	}
+
+	if err := validateSandboxOptions(opts, true); err == nil {
+		t.Fatal("expected relative docker socket mount path to fail validation")
+	}
+}
+
+func TestNewSandboxRejectsDockerSocketMountPathOverlap(t *testing.T) {
+	manager, err := NewProxyManager(ProxyOptions{
+		DockerSocket: DockerSocketOptions{
+			Enabled:          true,
+			TargetSocketPath: filepath.Join(t.TempDir(), "docker.sock"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	defer manager.Close()
+
+	_, err = manager.NewSandbox(t.Context(), SandboxOptions{
+		Name: "docker-overlap",
+		Mounts: []Mount{
+			{
+				Source:   t.TempDir(),
+				Target:   "/var/run",
+				ReadOnly: false,
+			},
+		},
+		DockerSocket: DockerSocketOptions{
+			Enabled: true,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected overlapping docker socket mount to fail")
 	}
 }
 

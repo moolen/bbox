@@ -74,10 +74,16 @@ type bwrapArgsConfig struct {
 	unshareUser           bool
 	maxRequestBodyBytes   int64
 	mounts                []Mount
+	dockerSocketMount     *dockerSocketMount
 	trafficMode           TrafficMode
 	payloadSeccompBPFPath string
 	bridgeFD              int
 	seccompFD             int
+}
+
+type dockerSocketMount struct {
+	HostPath    string
+	SandboxPath string
 }
 
 func buildBwrapArgs(cfg bwrapArgsConfig) []string {
@@ -110,6 +116,9 @@ func buildBwrapArgs(cfg bwrapArgsConfig) []string {
 			flag = "--ro-bind"
 		}
 		args = append(args, flag, mount.Source, filepath.Clean(mount.Target))
+	}
+	if cfg.dockerSocketMount != nil {
+		args = append(args, "--bind", cfg.dockerSocketMount.HostPath, filepath.Clean(cfg.dockerSocketMount.SandboxPath))
 	}
 
 	args = append(args,

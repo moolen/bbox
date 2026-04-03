@@ -344,15 +344,17 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 			MITM:                bbox.MITMOptions{Enabled: trafficMode == bbox.TrafficModeTransparent},
 			PolicyMode:          policyMode,
 			Reporting:           reporting,
+			DockerSocket:        buildDockerSocketOptions(mergedCfg.DockerSocket),
 		},
 		sandbox: bbox.SandboxOptions{
-			Name:        strings.TrimSpace(mergedCfg.Name),
-			Binaries:    binaries,
-			Mounts:      mounts,
-			Env:         envEntries,
-			TrafficMode: trafficMode,
-			Policy:      buildNetworkPolicy(mergedCfg.Policy),
-			WorkDir:     workDir,
+			Name:         strings.TrimSpace(mergedCfg.Name),
+			Binaries:     binaries,
+			Mounts:       mounts,
+			Env:          envEntries,
+			TrafficMode:  trafficMode,
+			Policy:       buildNetworkPolicy(mergedCfg.Policy),
+			WorkDir:      workDir,
+			DockerSocket: buildDockerSocketOptions(mergedCfg.DockerSocket),
 		},
 		argv:          append([]string(nil), payload...),
 		printPolicy:   opts.printPolicy,
@@ -647,6 +649,54 @@ func buildNetworkPolicy(cfg cliPolicyConfig) bbox.NetworkPolicy {
 		})
 	}
 	return bbox.NetworkPolicy{Rules: rules}
+}
+
+func buildDockerSocketOptions(cfg cliDockerSocketConfig) bbox.DockerSocketOptions {
+	rules := make([]bbox.DockerSocketRule, 0, len(cfg.Rules))
+	for _, rule := range cfg.Rules {
+		next := bbox.DockerSocketRule{
+			Action:     bbox.DockerRuleAction(strings.ToLower(strings.TrimSpace(rule.Action))),
+			Operations: normalizeDockerOperations(rule.Operations),
+		}
+		if rule.HTTP != nil {
+			next.HTTP = &bbox.DockerHTTPMatch{
+				Methods:      normalizeHTTPMethods(rule.HTTP.Methods),
+				PathPatterns: cloneStringSlice(rule.HTTP.PathPatterns),
+			}
+		}
+		if rule.Build != nil {
+			next.Build = &bbox.DockerBuildMatch{
+				Context:         bbox.DockerBuildContextMatch(strings.ToLower(strings.TrimSpace(rule.Build.Context))),
+				DockerfilePaths: cloneStringSlice(rule.Build.DockerfilePaths),
+			}
+		}
+		rules = append(rules, next)
+	}
+
+	return bbox.DockerSocketOptions{
+		Enabled:          cfg.Enabled,
+		MountPath:        strings.TrimSpace(cfg.MountPath),
+		TargetSocketPath: strings.TrimSpace(cfg.TargetSocketPath),
+		Policy: bbox.DockerSocketPolicy{
+			DefaultAction: bbox.DockerRuleAction(strings.ToLower(strings.TrimSpace(cfg.DefaultAction))),
+			Rules:         rules,
+		},
+	}
+}
+
+func normalizeDockerOperations(values []string) []bbox.DockerOperation {
+	ops := make([]bbox.DockerOperation, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		ops = append(ops, bbox.DockerOperation(value))
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+	return ops
 }
 
 func printPolicy(w io.Writer, cfg runConfig) error {

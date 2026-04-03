@@ -263,6 +263,50 @@ report_request_summary: false
 	}
 }
 
+func TestBuildConfigWiresDockerSocketOptionsIntoManagerAndSandbox(t *testing.T) {
+	root := t.TempDir()
+	writeBBoxYAML(t, root, `
+docker_socket:
+  enabled: true
+  mount_path: /var/run/docker.sock
+  target_socket_path: /run/user/1000/docker.sock
+  default_action: deny
+  rules:
+    - action: allow
+      operations:
+        - image_pull
+        - build
+`)
+
+	cfg, err := buildConfig(cliOptions{}, []string{"/bin/sh"}, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.manager.DockerSocket.Enabled {
+		t.Fatal("expected manager docker socket to be enabled")
+	}
+	if cfg.manager.DockerSocket.MountPath != "/var/run/docker.sock" {
+		t.Fatalf("unexpected manager docker socket mount path: %q", cfg.manager.DockerSocket.MountPath)
+	}
+	if cfg.manager.DockerSocket.TargetSocketPath != "/run/user/1000/docker.sock" {
+		t.Fatalf("unexpected manager docker socket target path: %q", cfg.manager.DockerSocket.TargetSocketPath)
+	}
+	if cfg.manager.DockerSocket.Policy.DefaultAction != bbox.DockerRuleActionDeny {
+		t.Fatalf("unexpected manager docker socket default action: %q", cfg.manager.DockerSocket.Policy.DefaultAction)
+	}
+	if !reflect.DeepEqual(cfg.manager.DockerSocket.Policy.Rules, []bbox.DockerSocketRule{
+		{
+			Action:     bbox.DockerRuleActionAllow,
+			Operations: []bbox.DockerOperation{"image_pull", "build"},
+		},
+	}) {
+		t.Fatalf("unexpected manager docker socket rules: %#v", cfg.manager.DockerSocket.Policy.Rules)
+	}
+	if !cfg.sandbox.DockerSocket.Enabled {
+		t.Fatal("expected sandbox docker socket to be enabled")
+	}
+}
+
 func TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime(t *testing.T) {
 	prevPlatform := cliPlatform
 	cliPlatform = "darwin"

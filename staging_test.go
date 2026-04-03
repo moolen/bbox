@@ -302,6 +302,24 @@ func TestBuildBwrapArgsPassesBridgeAndSeccompFDs(t *testing.T) {
 	}
 }
 
+func TestBuildBwrapArgsIncludesDockerSocketMount(t *testing.T) {
+	args := buildBwrapArgs(bwrapArgsConfig{
+		root:            "/tmp/root",
+		helperPath:      "/app/bbox",
+		proxyListenAddr: "127.0.0.1:31111",
+		unshareUser:     true,
+		bridgeFD:        3,
+		trafficMode:     TrafficModeProxy,
+		dockerSocketMount: &dockerSocketMount{
+			HostPath:    "/tmp/bbox/docker.sock",
+			SandboxPath: "/var/run/docker.sock",
+		},
+	})
+	if !containsArgSequence(args, []string{"--bind", "/tmp/bbox/docker.sock", "/var/run/docker.sock"}) {
+		t.Fatalf("expected args to mount docker socket proxy, got %v", args)
+	}
+}
+
 func TestBuildBwrapArgsMountsStagedBinDirectories(t *testing.T) {
 	root := t.TempDir()
 	for _, dir := range []string{"bin", "sbin"} {

@@ -70,10 +70,30 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	if err != nil {
 		return nil, err
 	}
+	if err := validateEffectiveDockerSocketOptions(dockerSocketOpts, opts.Mounts); err != nil {
+		return nil, err
+	}
 
 	sandboxID := m.nextSandboxName(opts.Name)
-	setup, err := m.newSandboxRuntime(ctx, sandboxID, opts, mode)
+	var (
+		proxy       *dockerSocketProxy
+		dockerMount *dockerSocketMount
+	)
+	if dockerSocketOpts.Enabled {
+		proxy, err = m.startDockerSocketProxy(sandboxID, dockerSocketOpts, dockerSocketPolicy)
+		if err != nil {
+			return nil, err
+		}
+		dockerMount = &dockerSocketMount{
+			HostPath:    proxy.socketPath,
+			SandboxPath: dockerSocketOpts.MountPath,
+		}
+	}
+	setup, err := m.newSandboxRuntime(ctx, sandboxID, opts, mode, dockerMount)
 	if err != nil {
+		if proxy != nil {
+			_ = proxy.Close()
+		}
 		return nil, err
 	}
 	sandbox := &Sandbox{
@@ -94,12 +114,6 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	sandbox.baseEnv = runEnvForTrafficMode(mode, proxyAddr, opts.Env)
 
 	if dockerSocketOpts.Enabled {
-		proxy, err := m.startDockerSocketProxy(sandboxID, dockerSocketOpts, dockerSocketPolicy)
-		if err != nil {
-			sandbox.closeErr = nil
-			_ = sandbox.Close()
-			return nil, err
-		}
 		sandbox.dockerSocketProxy = proxy
 		sandbox.dockerSocketPath = proxy.socketPath
 		sandbox.dockerSocketMount = dockerSocketOpts.MountPath
@@ -291,6 +305,12 @@ func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {
 	if opts.WorkDir != "" && !filepath.IsAbs(opts.WorkDir) {
 		return fmt.Errorf("sandbox workdir %q must be absolute", opts.WorkDir)
 	}
+	if mountPath := strings.TrimSpace(opts.DockerSocket.MountPath); mountPath != "" && !filepath.IsAbs(mountPath) {
+		return fmt.Errorf("docker socket mount path %q must be absolute", opts.DockerSocket.MountPath)
+	}
+	if targetSocketPath := strings.TrimSpace(opts.DockerSocket.TargetSocketPath); targetSocketPath != "" && !filepath.IsAbs(targetSocketPath) {
+		return fmt.Errorf("docker socket target socket path %q must be absolute", opts.DockerSocket.TargetSocketPath)
+	}
 	mode := normalizeTrafficMode(opts.TrafficMode)
 	switch mode {
 	case TrafficModeProxy, TrafficModeTransparent:
@@ -323,6 +343,30 @@ func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {
 	}
 	if err := validateSeccompOptions(opts.Seccomp); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateEffectiveDockerSocketOptions(opts DockerSocketOptions, mounts []Mount) error {
+	if !opts.Enabled {
+		return nil
+	}
+	if sandboxPlatform == "darwin" {
+		return errUnsupportedPlatformFeature("darwin", "docker socket mediation")
+	}
+
+	mountPath := filepath.Clean(strings.TrimSpace(opts.MountPath))
+	if mountPath == "" || !filepath.IsAbs(mountPath) {
+		return fmt.Errorf("docker socket mount path %q must be absolute", opts.MountPath)
+	}
+	targetSocketPath := filepath.Clean(strings.TrimSpace(opts.TargetSocketPath))
+	if targetSocketPath == "" || !filepath.IsAbs(targetSocketPath) {
+		return fmt.Errorf("docker socket target socket path %q must be absolute", opts.TargetSocketPath)
+	}
+	for _, mount := range mounts {
+		if targetsOverlap(filepath.Clean(mount.Target), mountPath) {
+			return fmt.Errorf("docker socket mount path %q overlaps with mount target %q", mountPath, mount.Target)
+		}
 	}
 	return nil
 }

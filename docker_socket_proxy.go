@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -120,7 +121,7 @@ func (m *ProxyManager) startDockerSocketProxy(sandboxID string, opts DockerSocke
 		return nil, fmt.Errorf("docker socket policy is required")
 	}
 
-	socketDir, err := os.MkdirTemp("", "bbox-docker-socket-"+sandboxID+"-")
+	socketDir, err := os.MkdirTemp("", "bbox-docker-socket-"+sanitizeDockerSocketSandboxID(sandboxID)+"-")
 	if err != nil {
 		return nil, fmt.Errorf("create docker proxy temp dir: %w", err)
 	}
@@ -179,14 +180,26 @@ func (m *ProxyManager) serveDockerSocketProxy(w http.ResponseWriter, req *http.R
 		return
 	}
 
-	body, tooLarge, err := readBoundedResponse(req.Body, m.requestBodyLimitBytes)
-	if err != nil {
-		m.writeDockerSocketDenied(w, dockerSocketEventWithPolicy(event, mode, false, fmt.Sprintf("read docker request body: %v", err)), http.StatusForbidden)
-		return
-	}
-	if tooLarge {
-		m.writeDockerSocketDenied(w, dockerSocketEventWithPolicy(event, mode, false, "docker request body exceeds inspection limit"), http.StatusRequestEntityTooLarge)
-		return
+	inspectBody := requiresDockerSocketRequestInspection(meta.Operation)
+	var (
+		body    []byte
+		outBody io.Reader
+		err     error
+	)
+	if inspectBody {
+		var tooLarge bool
+		body, tooLarge, err = readBoundedResponse(req.Body, m.requestBodyLimitBytes)
+		if err != nil {
+			m.writeDockerSocketDenied(w, dockerSocketEventWithPolicy(event, mode, false, fmt.Sprintf("read docker request body: %v", err)), http.StatusForbidden)
+			return
+		}
+		if tooLarge {
+			m.writeDockerSocketDenied(w, dockerSocketEventWithPolicy(event, mode, false, "docker request body exceeds inspection limit"), http.StatusRequestEntityTooLarge)
+			return
+		}
+		outBody = bytes.NewReader(body)
+	} else {
+		outBody = req.Body
 	}
 
 	var buildReq *dockerBuildRequest
@@ -219,7 +232,7 @@ func (m *ProxyManager) serveDockerSocketProxy(w http.ResponseWriter, req *http.R
 		RawPath:  req.URL.RawPath,
 		RawQuery: req.URL.RawQuery,
 	}
-	outReq, err := http.NewRequestWithContext(req.Context(), req.Method, targetURL.String(), bytes.NewReader(body))
+	outReq, err := http.NewRequestWithContext(req.Context(), req.Method, targetURL.String(), outBody)
 	if err != nil {
 		event.Allowed = true
 		event.Result = "upstream_error"
@@ -229,7 +242,11 @@ func (m *ProxyManager) serveDockerSocketProxy(w http.ResponseWriter, req *http.R
 		return
 	}
 	outReq.Header = req.Header.Clone()
+	stripHopByHopHeaders(outReq.Header)
 	outReq.Host = req.Host
+	if !inspectBody {
+		outReq.ContentLength = req.ContentLength
+	}
 
 	resp, err := client.Do(outReq)
 	if err != nil {
@@ -240,33 +257,14 @@ func (m *ProxyManager) serveDockerSocketProxy(w http.ResponseWriter, req *http.R
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	responseBody, tooLarge, err := readBoundedResponse(resp.Body, m.responseBodyLimitBytes)
-	if err != nil {
+	if err := writeDockerSocketUpstreamResponse(w, resp); err != nil {
 		event.Allowed = true
 		event.StatusCode = resp.StatusCode
 		event.Result = "upstream_error"
 		event.Error = err.Error()
 		m.recordAccessEvent(event)
-		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	if tooLarge {
-		event.Allowed = true
-		event.StatusCode = resp.StatusCode
-		event.Result = "upstream_error"
-		event.Error = "upstream response body exceeds configured limit"
-		m.recordAccessEvent(event)
-		http.Error(w, event.Error, http.StatusBadGateway)
-		return
-	}
-
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(responseBody)
 
 	event.Allowed = true
 	event.StatusCode = resp.StatusCode
@@ -307,4 +305,94 @@ func (m *ProxyManager) writeDockerSocketDenied(w http.ResponseWriter, event acce
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(statusCode)
 	_, _ = io.WriteString(w, "docker request denied: "+event.Error+"\n")
+}
+
+func requiresDockerSocketRequestInspection(op DockerOperation) bool {
+	switch normalizeDockerOperation(string(op)) {
+	case DockerOperation("build"):
+		return true
+	default:
+		return false
+	}
+}
+
+func writeDockerSocketUpstreamResponse(w http.ResponseWriter, resp *http.Response) error {
+	if resp == nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	stripHopByHopHeaders(resp.Header)
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if resp.Body == nil {
+		return nil
+	}
+	_, err := io.Copy(w, resp.Body)
+	return err
+}
+
+func stripHopByHopHeaders(header http.Header) {
+	if header == nil {
+		return
+	}
+
+	for _, value := range header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(token)
+			if trimmed == "" {
+				continue
+			}
+			header.Del(textproto.CanonicalMIMEHeaderKey(trimmed))
+		}
+	}
+
+	for _, name := range []string{
+		"Connection",
+		"Keep-Alive",
+		"Proxy-Authenticate",
+		"Proxy-Authorization",
+		"Proxy-Connection",
+		"TE",
+		"Trailer",
+		"Transfer-Encoding",
+		"Upgrade",
+	} {
+		header.Del(name)
+	}
+}
+
+func sanitizeDockerSocketSandboxID(sandboxID string) string {
+	trimmed := strings.TrimSpace(sandboxID)
+	if trimmed == "" {
+		return "sandbox"
+	}
+
+	var b strings.Builder
+	lastDash := false
+	for _, r := range trimmed {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+
+	sanitized := strings.Trim(b.String(), "-_.")
+	if sanitized == "" {
+		return "sandbox"
+	}
+	if len(sanitized) > 48 {
+		return sanitized[:48]
+	}
+	return sanitized
 }

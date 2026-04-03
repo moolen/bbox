@@ -47,6 +47,8 @@ Discovery order:
 
 If `bbox.yaml` is found in a parent directory, relative paths in `workdir`, `mount_ro`, and `mount_rw` are resolved relative to the directory containing that `bbox.yaml`.
 
+`docker_socket.target_socket_path` is a host path and must be absolute. `docker_socket.mount_path` is the in-sandbox socket location and must also be absolute.
+
 The CLI resolves the payload command and any explicit `bin` entries against the effective sandbox `PATH`. By default that comes from the inherited host environment. You can override it with `env: ["PATH=..."]` in `bbox.yaml` or `--env PATH=...` on the CLI. If you also set `clear_env: true`, set `PATH` explicitly if you still want command-name lookup inside the sandbox.
 
 On Linux, bbox also adds read-only mounts for the effective `PATH` roots so those command lookups can keep working at runtime. For entries under `/usr`, this collapses to a single `/usr` mount. For non-root `.../bin` and `.../sbin` entries, bbox mounts the parent directory instead.
@@ -83,9 +85,64 @@ policy:
         - "^api[.]example[.]com$"
       connect_ports:
         - "443"
+docker_socket:
+  enabled: true
+  mount_path: /var/run/docker.sock
+  target_socket_path: /var/run/docker.sock
+  default_action: deny
+  rules:
+    - action: allow
+      operations:
+        - image_pull
+    - action: allow
+      operations:
+        - image_inspect
+    - action: allow
+      operations:
+        - build
+      build:
+        context: local_only
+        dockerfile_paths:
+          - "^Dockerfile$"
+          - "^docker/.*$"
+    - action: deny
+      operations:
+        - image_push
+        - exec_create
+        - exec_start
 ```
 
 On macOS, omit `mount_ro`, `mount_rw`, and `traffic_mode: transparent`. Those settings are Linux-only today and fail with explicit runtime errors on Darwin.
+
+## Docker Socket Mediation
+
+When `docker_socket.enabled: true` is set, `bbox` does not mount the real host Docker socket into the sandbox. It creates a sandbox-specific Unix socket proxy on the host, mounts that proxy socket into the sandbox, normalizes Docker Engine API requests, evaluates them against the configured Docker socket policy, and only then forwards allowed requests to the real daemon socket.
+
+Phase 1 supports these normalized operations:
+
+- `image_pull`
+- `image_inspect`
+- `build`
+
+Phase 1 denies other Docker endpoints by default. In particular, the intended default posture is to deny:
+
+- `image_push`
+- `container_create`
+- `container_start`
+- `exec_create`
+- `exec_start`
+- attach, archive, export, daemon-admin, and unknown endpoints
+
+The Docker socket policy is separate from `policy:` because Docker authorization decisions are based on Docker operations and selected request payload semantics rather than remote hostnames.
+
+Current build enforcement is intentionally narrow:
+
+- local tar-stream build contexts can be allowed
+- remote build contexts are denied
+- push and export semantics on `POST /build` are denied
+- Dockerfile paths can be allowlisted with regexes
+
+Important limitation: allowing `docker build` does not preserve `bbox` network isolation by itself. Build steps execute on the Docker daemon or BuildKit side, not inside the `bbox` sandbox, so build-time network exfiltration still depends on daemon-side controls outside this proxy.
 
 Merge precedence is:
 1. CLI defaults

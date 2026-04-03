@@ -26,6 +26,36 @@ type cliPolicyConfig struct {
 	hasRules bool                  `yaml:"-"`
 }
 
+type cliDockerSocketHTTPConfig struct {
+	Methods      []string `yaml:"methods"`
+	PathPatterns []string `yaml:"path_patterns"`
+}
+
+type cliDockerSocketBuildConfig struct {
+	Context         string   `yaml:"context"`
+	DockerfilePaths []string `yaml:"dockerfile_paths"`
+}
+
+type cliDockerSocketRuleConfig struct {
+	Action     string                      `yaml:"action"`
+	Operations []string                    `yaml:"operations"`
+	HTTP       *cliDockerSocketHTTPConfig  `yaml:"http"`
+	Build      *cliDockerSocketBuildConfig `yaml:"build"`
+}
+
+type cliDockerSocketConfig struct {
+	Enabled          bool                        `yaml:"enabled"`
+	MountPath        string                      `yaml:"mount_path"`
+	TargetSocketPath string                      `yaml:"target_socket_path"`
+	DefaultAction    string                      `yaml:"default_action"`
+	Rules            []cliDockerSocketRuleConfig `yaml:"rules"`
+	hasEnabled       bool                        `yaml:"-"`
+	hasMountPath     bool                        `yaml:"-"`
+	hasTargetPath    bool                        `yaml:"-"`
+	hasDefaultAction bool                        `yaml:"-"`
+	hasRules         bool                        `yaml:"-"`
+}
+
 type cliFileConfig struct {
 	Name                      string          `yaml:"name"`
 	WorkDir                   string          `yaml:"workdir"`
@@ -41,40 +71,67 @@ type cliFileConfig struct {
 	ReportAccessSummary       bool            `yaml:"report_access_summary"`
 	ReportRequestSummary      bool            `yaml:"report_request_summary"`
 	Policy                    cliPolicyConfig `yaml:"policy"`
-	hasName                   bool            `yaml:"-"`
-	hasWorkDir                bool            `yaml:"-"`
-	hasBin                    bool            `yaml:"-"`
-	hasMountRO                bool            `yaml:"-"`
-	hasMountRW                bool            `yaml:"-"`
-	hasEnv                    bool            `yaml:"-"`
-	hasClearEnv               bool            `yaml:"-"`
-	hasTrafficMode            bool            `yaml:"-"`
-	hasMaxRequestBodyBytes    bool            `yaml:"-"`
-	hasAccessLog              bool            `yaml:"-"`
-	hasReportPolicyViolations bool            `yaml:"-"`
-	hasReportAccessSummary    bool            `yaml:"-"`
-	hasReportRequestSummary   bool            `yaml:"-"`
+	DockerSocket              cliDockerSocketConfig
+	hasName                   bool `yaml:"-"`
+	hasWorkDir                bool `yaml:"-"`
+	hasBin                    bool `yaml:"-"`
+	hasMountRO                bool `yaml:"-"`
+	hasMountRW                bool `yaml:"-"`
+	hasEnv                    bool `yaml:"-"`
+	hasClearEnv               bool `yaml:"-"`
+	hasTrafficMode            bool `yaml:"-"`
+	hasMaxRequestBodyBytes    bool `yaml:"-"`
+	hasAccessLog              bool `yaml:"-"`
+	hasReportPolicyViolations bool `yaml:"-"`
+	hasReportAccessSummary    bool `yaml:"-"`
+	hasReportRequestSummary   bool `yaml:"-"`
 }
 
 type rawCLIPolicyConfig struct {
 	Rules *[]cliPolicyRuleConfig `yaml:"rules"`
 }
 
+type rawCLIDockerSocketHTTPConfig struct {
+	Methods      *[]string `yaml:"methods"`
+	PathPatterns *[]string `yaml:"path_patterns"`
+}
+
+type rawCLIDockerSocketBuildConfig struct {
+	Context         *string   `yaml:"context"`
+	DockerfilePaths *[]string `yaml:"dockerfile_paths"`
+}
+
+type rawCLIDockerSocketRuleConfig struct {
+	Action     *string                        `yaml:"action"`
+	Operations *[]string                      `yaml:"operations"`
+	HTTP       *rawCLIDockerSocketHTTPConfig  `yaml:"http"`
+	Build      *rawCLIDockerSocketBuildConfig `yaml:"build"`
+}
+
+type rawCLIDockerSocketConfig struct {
+	Enabled          *bool                           `yaml:"enabled"`
+	MountPath        *string                         `yaml:"mount_path"`
+	TargetSocketPath *string                         `yaml:"target_socket_path"`
+	DefaultAction    *string                         `yaml:"default_action"`
+	Rules            *[]rawCLIDockerSocketRuleConfig `yaml:"rules"`
+}
+
 type rawCLIFileConfig struct {
-	Name                   *string             `yaml:"name"`
-	WorkDir                *string             `yaml:"workdir"`
-	Bin                    *[]string           `yaml:"bin"`
-	MountRO                *[]string           `yaml:"mount_ro"`
-	MountRW                *[]string           `yaml:"mount_rw"`
-	Env                    *[]string           `yaml:"env"`
-	ClearEnv               *bool               `yaml:"clear_env"`
-	TrafficMode            *string             `yaml:"traffic_mode"`
-	MaxRequestBodyBytes    *int64              `yaml:"max_request_body_bytes"`
-	AccessLog              *string             `yaml:"access_log"`
-	ReportPolicyViolations *bool               `yaml:"report_policy_violations"`
-	ReportAccessSummary    *bool               `yaml:"report_access_summary"`
-	ReportRequestSummary   *bool               `yaml:"report_request_summary"`
-	Policy                 *rawCLIPolicyConfig `yaml:"policy"`
+	Name                   *string                   `yaml:"name"`
+	WorkDir                *string                   `yaml:"workdir"`
+	Bin                    *[]string                 `yaml:"bin"`
+	MountRO                *[]string                 `yaml:"mount_ro"`
+	MountRW                *[]string                 `yaml:"mount_rw"`
+	Env                    *[]string                 `yaml:"env"`
+	ClearEnv               *bool                     `yaml:"clear_env"`
+	TrafficMode            *string                   `yaml:"traffic_mode"`
+	MaxRequestBodyBytes    *int64                    `yaml:"max_request_body_bytes"`
+	AccessLog              *string                   `yaml:"access_log"`
+	ReportPolicyViolations *bool                     `yaml:"report_policy_violations"`
+	ReportAccessSummary    *bool                     `yaml:"report_access_summary"`
+	ReportRequestSummary   *bool                     `yaml:"report_request_summary"`
+	Policy                 *rawCLIPolicyConfig       `yaml:"policy"`
+	DockerSocket           *rawCLIDockerSocketConfig `yaml:"docker_socket"`
 }
 
 type cliFlagOverrides struct {
@@ -190,6 +247,28 @@ func toCLIFileConfig(raw rawCLIFileConfig) cliFileConfig {
 	if raw.Policy != nil && raw.Policy.Rules != nil {
 		cfg.Policy.Rules = clonePolicyRules(*raw.Policy.Rules)
 		cfg.Policy.hasRules = true
+	}
+	if raw.DockerSocket != nil {
+		if raw.DockerSocket.Enabled != nil {
+			cfg.DockerSocket.Enabled = *raw.DockerSocket.Enabled
+			cfg.DockerSocket.hasEnabled = true
+		}
+		if raw.DockerSocket.MountPath != nil {
+			cfg.DockerSocket.MountPath = *raw.DockerSocket.MountPath
+			cfg.DockerSocket.hasMountPath = true
+		}
+		if raw.DockerSocket.TargetSocketPath != nil {
+			cfg.DockerSocket.TargetSocketPath = *raw.DockerSocket.TargetSocketPath
+			cfg.DockerSocket.hasTargetPath = true
+		}
+		if raw.DockerSocket.DefaultAction != nil {
+			cfg.DockerSocket.DefaultAction = *raw.DockerSocket.DefaultAction
+			cfg.DockerSocket.hasDefaultAction = true
+		}
+		if raw.DockerSocket.Rules != nil {
+			cfg.DockerSocket.Rules = cloneDockerSocketRules(toCLIDockerSocketRules(*raw.DockerSocket.Rules))
+			cfg.DockerSocket.hasRules = true
+		}
 	}
 	return cfg
 }
@@ -341,6 +420,26 @@ func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfi
 		base.Policy.Rules = clonePolicyRules(overlay.Policy.Rules)
 		base.Policy.hasRules = true
 	}
+	if overlay.DockerSocket.hasEnabled {
+		base.DockerSocket.Enabled = overlay.DockerSocket.Enabled
+		base.DockerSocket.hasEnabled = true
+	}
+	if overlay.DockerSocket.hasMountPath {
+		base.DockerSocket.MountPath = overlay.DockerSocket.MountPath
+		base.DockerSocket.hasMountPath = true
+	}
+	if overlay.DockerSocket.hasTargetPath {
+		base.DockerSocket.TargetSocketPath = overlay.DockerSocket.TargetSocketPath
+		base.DockerSocket.hasTargetPath = true
+	}
+	if overlay.DockerSocket.hasDefaultAction {
+		base.DockerSocket.DefaultAction = overlay.DockerSocket.DefaultAction
+		base.DockerSocket.hasDefaultAction = true
+	}
+	if overlay.DockerSocket.hasRules {
+		base.DockerSocket.Rules = cloneDockerSocketRules(overlay.DockerSocket.Rules)
+		base.DockerSocket.hasRules = true
+	}
 	return base
 }
 
@@ -371,6 +470,63 @@ func clonePolicyRules(in []cliPolicyRuleConfig) []cliPolicyRuleConfig {
 			HeaderPatterns: cloneStringSliceMap(rule.HeaderPatterns),
 			BodyPatterns:   cloneStringSlice(rule.BodyPatterns),
 		})
+	}
+	return out
+}
+
+func toCLIDockerSocketRules(in []rawCLIDockerSocketRuleConfig) []cliDockerSocketRuleConfig {
+	out := make([]cliDockerSocketRuleConfig, 0, len(in))
+	for _, rule := range in {
+		next := cliDockerSocketRuleConfig{}
+		if rule.Action != nil {
+			next.Action = *rule.Action
+		}
+		if rule.Operations != nil {
+			next.Operations = cloneStringSlice(*rule.Operations)
+		}
+		if rule.HTTP != nil {
+			next.HTTP = &cliDockerSocketHTTPConfig{}
+			if rule.HTTP.Methods != nil {
+				next.HTTP.Methods = cloneStringSlice(*rule.HTTP.Methods)
+			}
+			if rule.HTTP.PathPatterns != nil {
+				next.HTTP.PathPatterns = cloneStringSlice(*rule.HTTP.PathPatterns)
+			}
+		}
+		if rule.Build != nil {
+			next.Build = &cliDockerSocketBuildConfig{}
+			if rule.Build.Context != nil {
+				next.Build.Context = *rule.Build.Context
+			}
+			if rule.Build.DockerfilePaths != nil {
+				next.Build.DockerfilePaths = cloneStringSlice(*rule.Build.DockerfilePaths)
+			}
+		}
+		out = append(out, next)
+	}
+	return out
+}
+
+func cloneDockerSocketRules(in []cliDockerSocketRuleConfig) []cliDockerSocketRuleConfig {
+	out := make([]cliDockerSocketRuleConfig, 0, len(in))
+	for _, rule := range in {
+		next := cliDockerSocketRuleConfig{
+			Action:     rule.Action,
+			Operations: cloneStringSlice(rule.Operations),
+		}
+		if rule.HTTP != nil {
+			next.HTTP = &cliDockerSocketHTTPConfig{
+				Methods:      cloneStringSlice(rule.HTTP.Methods),
+				PathPatterns: cloneStringSlice(rule.HTTP.PathPatterns),
+			}
+		}
+		if rule.Build != nil {
+			next.Build = &cliDockerSocketBuildConfig{
+				Context:         rule.Build.Context,
+				DockerfilePaths: cloneStringSlice(rule.Build.DockerfilePaths),
+			}
+		}
+		out = append(out, next)
 	}
 	return out
 }
