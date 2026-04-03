@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -572,6 +573,155 @@ func main() {
 			t.Fatalf("expected logged status code 403, got %#v", entry)
 		}
 	})
+}
+
+func TestDockerAccessAuditMode(t *testing.T) {
+	requireSandboxPrereqs(t)
+
+	shPath, err := requireTool("sh")
+	if err != nil {
+		t.Skip(err.Error())
+	}
+
+	daemonSocketPath := startUnixSocketHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %q", r.Method)
+		}
+		if r.URL.Path != "/v1.52/images/create" {
+			t.Fatalf("unexpected path: %q", r.URL.Path)
+		}
+		if r.URL.RawQuery != "fromImage=busybox" {
+			t.Fatalf("unexpected query: %q", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := &recordingAccessLogger{}
+	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
+		AccessLogger: logger,
+		DockerSocket: bbox.DockerSocketOptions{
+			Enabled:          true,
+			TargetSocketPath: daemonSocketPath,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
+		Name:       "audit-docker-mode",
+		Binaries:   []string{shPath},
+		PolicyMode: bbox.PolicyModeAudit,
+		DockerSocket: bbox.DockerSocketOptions{
+			Enabled: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	defer func() {
+		if err := sandbox.Close(); err != nil {
+			t.Fatalf("close sandbox: %v", err)
+		}
+	}()
+
+	if got := sandbox.DockerSocketMountPath(); got != "/var/run/docker.sock" {
+		t.Fatalf("unexpected docker socket mount path: got %q", got)
+	}
+	proxyPath := sandbox.DockerSocketProxyPath()
+	if proxyPath == "" {
+		t.Fatal("expected docker socket proxy path")
+	}
+
+	resp := doUnixSocketRequest(t, proxyPath, http.MethodPost, "/v1.52/images/create?fromImage=busybox", nil, nil)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("unexpected docker proxy status: got %d want %d", resp.StatusCode, http.StatusCreated)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read docker proxy response body: %v", err)
+	}
+	if string(body) != `{"status":"ok"}` {
+		t.Fatalf("unexpected docker proxy response body: %q", string(body))
+	}
+
+	entry, ok := findSandboxAccessLogEntry(logger.snapshot(), "audit-docker-mode", "docker_socket")
+	if !ok {
+		t.Fatalf("expected docker socket access log entry, got %#v", logger.snapshot())
+	}
+	if !entry.Allowed {
+		t.Fatalf("expected audit-mode docker request to be allowed at runtime, got %#v", entry)
+	}
+	if entry.PolicyAllowed {
+		t.Fatalf("expected audit-mode docker request to violate policy, got %#v", entry)
+	}
+	if entry.Path != "/images/create" {
+		t.Fatalf("expected normalized docker path, got %q", entry.Path)
+	}
+
+	summary := sandbox.AccessSummary()
+	row, ok := findRequestAggregate(summary.Requests, "docker_socket", "docker", 0, http.MethodPost, "/images/create")
+	if !ok {
+		t.Fatalf("expected docker request aggregate, got %#v", summary.Requests)
+	}
+	if row.AllowedCount != 1 || row.PolicyDeniedCount != 1 {
+		t.Fatalf("unexpected docker request aggregate: %#v", row)
+	}
+}
+
+func startUnixSocketHTTPServer(t *testing.T, handler http.Handler) string {
+	t.Helper()
+
+	socketPath := filepath.Join(t.TempDir(), "docker.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+
+	return socketPath
+}
+
+func doUnixSocketRequest(t *testing.T, socketPath, method, requestPath string, body io.Reader, header http.Header) *http.Response {
+	t.Helper()
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialer := &net.Dialer{}
+			return dialer.DialContext(ctx, "unix", socketPath)
+		},
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+
+	client := &http.Client{Transport: transport}
+	req, err := http.NewRequestWithContext(t.Context(), method, "http://docker"+requestPath, body)
+	if err != nil {
+		t.Fatalf("build unix socket request: %v", err)
+	}
+	if header != nil {
+		req.Header = header.Clone()
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("execute unix socket request: %v", err)
+	}
+	return resp
 }
 
 func TestSandboxAccessSummary(t *testing.T) {

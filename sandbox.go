@@ -25,6 +25,10 @@ type Sandbox struct {
 	baseEnv     []string
 	workDir     string
 
+	dockerSocketProxy *dockerSocketProxy
+	dockerSocketPath  string
+	dockerSocketMount string
+
 	registered bool
 
 	closeOnce sync.Once
@@ -62,6 +66,10 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 	if err != nil {
 		return nil, err
 	}
+	dockerSocketOpts, dockerSocketPolicy, err := m.effectiveDockerSocketConfig(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	sandboxID := m.nextSandboxName(opts.Name)
 	setup, err := m.newSandboxRuntime(ctx, sandboxID, opts, mode)
@@ -84,6 +92,18 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		sandbox.proxyAddr = proxyAddr
 	}
 	sandbox.baseEnv = runEnvForTrafficMode(mode, proxyAddr, opts.Env)
+
+	if dockerSocketOpts.Enabled {
+		proxy, err := m.startDockerSocketProxy(sandboxID, dockerSocketOpts, dockerSocketPolicy)
+		if err != nil {
+			sandbox.closeErr = nil
+			_ = sandbox.Close()
+			return nil, err
+		}
+		sandbox.dockerSocketProxy = proxy
+		sandbox.dockerSocketPath = proxy.socketPath
+		sandbox.dockerSocketMount = dockerSocketOpts.MountPath
+	}
 
 	if err := m.registerSandbox(sandboxID, policy); err != nil {
 		sandbox.closeErr = nil
@@ -164,6 +184,24 @@ func (s *Sandbox) ProxyURL() string {
 	return proxyURL(addr)
 }
 
+// DockerSocketProxyPath returns the host-side Unix socket path for the
+// sandbox's dedicated Docker proxy.
+func (s *Sandbox) DockerSocketProxyPath() string {
+	if s == nil {
+		return ""
+	}
+	return s.dockerSocketPath
+}
+
+// DockerSocketMountPath returns the intended in-sandbox mount target for the
+// dedicated Docker proxy socket.
+func (s *Sandbox) DockerSocketMountPath() string {
+	if s == nil {
+		return ""
+	}
+	return s.dockerSocketMount
+}
+
 func (s *Sandbox) helperLogContents() string {
 	if s == nil || s.runtime == nil {
 		return ""
@@ -225,6 +263,12 @@ func (s *Sandbox) Close() error {
 
 		if s.runtime != nil {
 			closeErr = errors.Join(closeErr, s.runtime.Close())
+		}
+		if s.dockerSocketProxy != nil {
+			closeErr = errors.Join(closeErr, s.dockerSocketProxy.Close())
+			s.dockerSocketProxy = nil
+			s.dockerSocketPath = ""
+			s.dockerSocketMount = ""
 		}
 
 		if s.manager != nil && s.registered {
