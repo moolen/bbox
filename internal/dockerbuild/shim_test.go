@@ -329,7 +329,9 @@ func argValueForOpt(args []string, prefix string) string {
 }
 
 func TestTrustBundleInjectionSnippetIncludesExpandedClientEnv(t *testing.T) {
-	got := trustBundleInjectionSnippet()
+	got := trustBundleInjectionSnippet(trustInjectionOptions{
+		pemPath: injectedTrustBundlePrimaryPath,
+	})
 	for _, want := range []string{
 		"ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
 		"ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
