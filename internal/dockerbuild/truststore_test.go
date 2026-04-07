@@ -53,10 +53,18 @@ func TestPrepareBuildInputsStagesJavaTruststoreAndMavenSettings(t *testing.T) {
 	if stagingDir == "" {
 		t.Fatal("expected trust staging dir")
 	}
-	if _, err := os.Stat(filepath.Join(stagingDir, "bbox-truststore.p12")); err != nil {
+	truststoreInfo, err := os.Stat(filepath.Join(stagingDir, "bbox-truststore.p12"))
+	if err != nil {
 		t.Fatalf("expected staged JVM truststore: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(stagingDir, "bbox-maven-settings.xml")); err != nil {
+	if truststoreInfo.Size() == 0 {
+		t.Fatal("expected staged JVM truststore to be non-empty")
+	}
+	settingsInfo, err := os.Stat(filepath.Join(stagingDir, "bbox-maven-settings.xml"))
+	if err != nil {
 		t.Fatalf("expected staged Maven settings: %v", err)
+	}
+	if settingsInfo.Size() == 0 {
+		t.Fatal("expected staged Maven settings to be non-empty")
 	}
 }

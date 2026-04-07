@@ -329,14 +329,16 @@ func argValueForOpt(args []string, prefix string) string {
 }
 
 func TestTrustBundleInjectionSnippetIncludesExpandedClientEnv(t *testing.T) {
+	const customPEMPath = "/bbox/custom-ca.pem"
+
 	got := trustBundleInjectionSnippet(trustInjectionOptions{
-		pemPath: injectedTrustBundlePrimaryPath,
+		pemPath: customPEMPath,
 	})
 	for _, want := range []string{
-		"ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
-		"ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
-		"ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt",
-		"ENV GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
+		"ENV CURL_CA_BUNDLE=/bbox/custom-ca.pem",
+		"ENV REQUESTS_CA_BUNDLE=/bbox/custom-ca.pem",
+		"ENV PIP_CERT=/bbox/custom-ca.pem",
+		"ENV GIT_SSL_CAINFO=/bbox/custom-ca.pem",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %s", want, got)

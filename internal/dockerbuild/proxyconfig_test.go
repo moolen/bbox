@@ -1,9 +1,6 @@
 package dockerbuild
 
-import (
-	"slices"
-	"testing"
-)
+import "testing"
 
 func TestJavaProxyOptionsFromEnv(t *testing.T) {
 	got, err := javaProxyOptionsFromEnv([]string{
@@ -13,13 +10,18 @@ func TestJavaProxyOptionsFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("javaProxyOptionsFromEnv failed: %v", err)
 	}
-	for _, want := range []string{
+
+	want := []string{
 		"-Dhttps.proxyHost=proxy.internal",
 		"-Dhttps.proxyPort=8443",
 		"-Dhttp.nonProxyHosts=localhost|*.corp.example|127.0.0.1",
-	} {
-		if !slices.Contains(got, want) {
-			t.Fatalf("missing %q in %v", want, got)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d proxy flags, got %d: %v", len(want), len(got), got)
+	}
+	for i, wantFlag := range want {
+		if got[i] != wantFlag {
+			t.Fatalf("expected proxy flags %v, got %v", want, got)
 		}
 	}
 }
