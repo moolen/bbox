@@ -124,13 +124,67 @@ func TestPrepareBuildInputsStagesJavaTruststoreAndMavenSettings(t *testing.T) {
 	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
 		t.Fatalf("expected staged JVM truststore copy to be injected, got:\n%s", got)
 	}
-	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit") {
+	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS}") {
 		t.Fatalf("expected JAVA_TOOL_OPTIONS truststore config to be injected, got:\n%s", got)
 	}
 	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
 		t.Fatalf("expected staged Maven settings copy to be injected, got:\n%s", got)
 	}
-	if !strings.Contains(got, "ENV MAVEN_ARGS=--settings /etc/maven/bbox-settings.xml") {
+	if !strings.Contains(got, "ENV MAVEN_ARGS=--settings /etc/maven/bbox-settings.xml ${MAVEN_ARGS}") {
 		t.Fatalf("expected MAVEN_ARGS settings path to be injected, got:\n%s", got)
 	}
+}
+
+func TestTrustInjectionOptionsFromStagedAssetsDecouplesJavaAndMaven(t *testing.T) {
+	stageDir := t.TempDir()
+	truststorePath := filepath.Join(stageDir, bboxJavaTruststoreFileName)
+	if err := os.WriteFile(truststorePath, []byte("pkcs12"), 0o644); err != nil {
+		t.Fatalf("write truststore fixture: %v", err)
+	}
+	settingsPath := filepath.Join(stageDir, bboxMavenSettingsFileName)
+	if err := os.WriteFile(settingsPath, []byte("<settings/>"), 0o644); err != nil {
+		t.Fatalf("write settings fixture: %v", err)
+	}
+
+	t.Run("truststore drives java injection without maven settings", func(t *testing.T) {
+		opts := trustInjectionOptionsFromStagedAssets(buildInputs{
+			Truststore: generatedTruststore{
+				Path:     truststorePath,
+				Type:     bboxJavaTruststoreType,
+				Password: bboxJavaTruststorePassword,
+			},
+		})
+
+		if opts.javaTruststorePath != injectedJavaTruststorePath {
+			t.Fatalf("expected java truststore path %q, got %q", injectedJavaTruststorePath, opts.javaTruststorePath)
+		}
+		if opts.javaTruststoreType != bboxJavaTruststoreType {
+			t.Fatalf("expected java truststore type %q, got %q", bboxJavaTruststoreType, opts.javaTruststoreType)
+		}
+		if opts.javaTruststorePass != bboxJavaTruststorePassword {
+			t.Fatalf("expected java truststore password to be set")
+		}
+		if opts.mavenSettingsPath != "" {
+			t.Fatalf("did not expect maven settings path, got %q", opts.mavenSettingsPath)
+		}
+	})
+
+	t.Run("maven settings drive maven injection without java truststore", func(t *testing.T) {
+		opts := trustInjectionOptionsFromStagedAssets(buildInputs{
+			MavenSettings: settingsPath,
+		})
+
+		if opts.mavenSettingsPath != injectedMavenSettingsPath {
+			t.Fatalf("expected maven settings path %q, got %q", injectedMavenSettingsPath, opts.mavenSettingsPath)
+		}
+		if opts.javaTruststorePath != "" {
+			t.Fatalf("did not expect java truststore path, got %q", opts.javaTruststorePath)
+		}
+		if opts.javaTruststoreType != "" {
+			t.Fatalf("did not expect java truststore type, got %q", opts.javaTruststoreType)
+		}
+		if opts.javaTruststorePass != "" {
+			t.Fatal("did not expect java truststore password")
+		}
+	})
 }

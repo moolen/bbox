@@ -186,6 +186,7 @@ type trustInjectionOptions struct {
 	javaTruststorePath string
 	javaTruststoreType string
 	javaTruststorePass string
+	mavenSettingsPath  string
 }
 
 func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (buildInputs, error) {
@@ -273,22 +274,20 @@ func trustInjectionOptionsFromStagedAssets(inputs buildInputs) trustInjectionOpt
 	opts := trustInjectionOptions{
 		pemPath: injectedTrustBundlePrimaryPath,
 	}
-	if strings.TrimSpace(inputs.Truststore.Path) == "" ||
-		strings.TrimSpace(inputs.Truststore.Type) == "" ||
-		strings.TrimSpace(inputs.Truststore.Password) == "" ||
-		strings.TrimSpace(inputs.MavenSettings) == "" {
-		return opts
+	if strings.TrimSpace(inputs.Truststore.Path) != "" &&
+		strings.TrimSpace(inputs.Truststore.Type) != "" &&
+		strings.TrimSpace(inputs.Truststore.Password) != "" {
+		if _, err := os.Stat(inputs.Truststore.Path); err == nil {
+			opts.javaTruststorePath = injectedJavaTruststorePath
+			opts.javaTruststoreType = inputs.Truststore.Type
+			opts.javaTruststorePass = inputs.Truststore.Password
+		}
 	}
-	if _, err := os.Stat(inputs.Truststore.Path); err != nil {
-		return opts
+	if strings.TrimSpace(inputs.MavenSettings) != "" {
+		if _, err := os.Stat(inputs.MavenSettings); err == nil {
+			opts.mavenSettingsPath = injectedMavenSettingsPath
+		}
 	}
-	if _, err := os.Stat(inputs.MavenSettings); err != nil {
-		return opts
-	}
-
-	opts.javaTruststorePath = injectedJavaTruststorePath
-	opts.javaTruststoreType = inputs.Truststore.Type
-	opts.javaTruststorePass = inputs.Truststore.Password
 	return opts
 }
 
@@ -377,13 +376,15 @@ func trustBundleInjectionSnippet(opts ...trustInjectionOptions) string {
 		strings.TrimSpace(injection.javaTruststorePass) != "" {
 		fmt.Fprintf(
 			&b,
-			"ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStoreType=%s -Djavax.net.ssl.trustStorePassword=%s\n",
+			"ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStoreType=%s -Djavax.net.ssl.trustStorePassword=%s ${JAVA_TOOL_OPTIONS}\n",
 			injection.javaTruststorePath,
 			injection.javaTruststoreType,
 			injection.javaTruststorePass,
 		)
-		fmt.Fprintf(&b, "COPY --from=%s /%s %s\n", bboxTrustContextName, bboxMavenSettingsFileName, injectedMavenSettingsPath)
-		fmt.Fprintf(&b, "ENV MAVEN_ARGS=--settings %s\n", injectedMavenSettingsPath)
+	}
+	if strings.TrimSpace(injection.mavenSettingsPath) != "" {
+		fmt.Fprintf(&b, "COPY --from=%s /%s %s\n", bboxTrustContextName, bboxMavenSettingsFileName, injection.mavenSettingsPath)
+		fmt.Fprintf(&b, "ENV MAVEN_ARGS=--settings %s ${MAVEN_ARGS}\n", injection.mavenSettingsPath)
 	}
 	return b.String()
 }

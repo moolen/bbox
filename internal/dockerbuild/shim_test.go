@@ -225,6 +225,7 @@ func TestPlanForArgsInjectsTrustBundleBeforeEveryRun(t *testing.T) {
 		javaTruststorePath: injectedJavaTruststorePath,
 		javaTruststoreType: bboxJavaTruststoreType,
 		javaTruststorePass: bboxJavaTruststorePassword,
+		mavenSettingsPath:  injectedMavenSettingsPath,
 	})
 	if strings.Count(got, "COPY --from=bbox_mitm_trust /bbox-trust-bundle.pem /etc/ssl/certs/ca-certificates.crt") != 3 {
 		t.Fatalf("expected trust copy before each RUN, got:\n%s", got)
@@ -398,5 +399,47 @@ func TestTrustBundleInjectionSnippetIncludesExpandedClientEnv(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
+	}
+}
+
+func TestTrustBundleInjectionSnippetInjectsJavaTrustWithoutMaven(t *testing.T) {
+	got := trustBundleInjectionSnippet(trustInjectionOptions{
+		pemPath:            injectedTrustBundlePrimaryPath,
+		javaTruststorePath: injectedJavaTruststorePath,
+		javaTruststoreType: bboxJavaTruststoreType,
+		javaTruststorePass: bboxJavaTruststorePassword,
+	})
+
+	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
+		t.Fatalf("expected truststore copy in %s", got)
+	}
+	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS}") {
+		t.Fatalf("expected JAVA_TOOL_OPTIONS truststore config preserving existing values in %s", got)
+	}
+	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
+		t.Fatalf("did not expect Maven settings copy in %s", got)
+	}
+	if strings.Contains(got, "ENV MAVEN_ARGS=") {
+		t.Fatalf("did not expect MAVEN_ARGS injection in %s", got)
+	}
+}
+
+func TestTrustBundleInjectionSnippetInjectsMavenWithoutJavaTrust(t *testing.T) {
+	got := trustBundleInjectionSnippet(trustInjectionOptions{
+		pemPath:           injectedTrustBundlePrimaryPath,
+		mavenSettingsPath: injectedMavenSettingsPath,
+	})
+
+	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
+		t.Fatalf("did not expect truststore copy in %s", got)
+	}
+	if strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=") {
+		t.Fatalf("did not expect JAVA_TOOL_OPTIONS injection in %s", got)
+	}
+	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
+		t.Fatalf("expected Maven settings copy in %s", got)
+	}
+	if !strings.Contains(got, "ENV MAVEN_ARGS=--settings /etc/maven/bbox-settings.xml ${MAVEN_ARGS}") {
+		t.Fatalf("expected MAVEN_ARGS injection preserving existing values in %s", got)
 	}
 }
