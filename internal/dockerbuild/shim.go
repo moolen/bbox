@@ -178,6 +178,7 @@ type buildInputs struct {
 	FrontendOpts   []string
 	CleanupPaths   []string
 	Truststore     generatedTruststore
+	MavenSettings  string
 }
 
 type trustInjectionOptions struct {
@@ -209,17 +210,13 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 	if err != nil {
 		return buildInputs{}, fmt.Errorf("read dockerfile %s: %w", dockerfileAbs, err)
 	}
-	trustInjection := trustInjectionOptions{
-		pemPath:            injectedTrustBundlePrimaryPath,
-		javaTruststorePath: injectedJavaTruststorePath,
-		javaTruststoreType: bboxJavaTruststoreType,
-		javaTruststorePass: bboxJavaTruststorePassword,
-	}
-	rewritten, err := rewriteDockerfileWithTrustBundle(original, trustInjection)
+	rewrittenWithPEMOnly, err := rewriteDockerfileWithTrustBundle(original, trustInjectionOptions{
+		pemPath: injectedTrustBundlePrimaryPath,
+	})
 	if err != nil {
 		return buildInputs{}, fmt.Errorf("rewrite dockerfile %s for trust injection: %w", dockerfileAbs, err)
 	}
-	if bytes.Equal(rewritten, original) {
+	if bytes.Equal(rewrittenWithPEMOnly, original) {
 		return inputs, nil
 	}
 
@@ -234,10 +231,6 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 	}
 
 	rewrittenPath := filepath.Join(stageDir, filepath.Base(dockerfileAbs))
-	if err := os.WriteFile(rewrittenPath, rewritten, 0o644); err != nil {
-		_ = os.RemoveAll(stageDir)
-		return buildInputs{}, fmt.Errorf("write rewritten dockerfile %s: %w", rewrittenPath, err)
-	}
 	if err := os.WriteFile(filepath.Join(stageDir, bboxTrustBundleFileName), trustBundle, 0o644); err != nil {
 		_ = os.RemoveAll(stageDir)
 		return buildInputs{}, fmt.Errorf("write staged trust bundle: %w", err)
@@ -249,10 +242,23 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 			return buildInputs{}, fmt.Errorf("write staged JVM truststore: %w", err)
 		}
 		inputs.Truststore = truststore
-		if _, err := writeMavenSettings(stageDir, truststore); err != nil {
+		settingsPath, err := writeMavenSettings(stageDir, truststore)
+		if err != nil {
 			_ = os.RemoveAll(stageDir)
 			return buildInputs{}, fmt.Errorf("write staged Maven settings: %w", err)
 		}
+		inputs.MavenSettings = settingsPath
+	}
+
+	trustInjection := trustInjectionOptionsFromStagedAssets(inputs)
+	rewritten, err := rewriteDockerfileWithTrustBundle(original, trustInjection)
+	if err != nil {
+		_ = os.RemoveAll(stageDir)
+		return buildInputs{}, fmt.Errorf("rewrite dockerfile %s for trust injection: %w", dockerfileAbs, err)
+	}
+	if err := os.WriteFile(rewrittenPath, rewritten, 0o644); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return buildInputs{}, fmt.Errorf("write rewritten dockerfile %s: %w", rewrittenPath, err)
 	}
 
 	inputs.DockerfileDir = stageDir
@@ -261,6 +267,29 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 	inputs.FrontendOpts = append(inputs.FrontendOpts, "context:"+bboxTrustContextName+"=local:"+bboxTrustContextName)
 	inputs.CleanupPaths = append(inputs.CleanupPaths, stageDir)
 	return inputs, nil
+}
+
+func trustInjectionOptionsFromStagedAssets(inputs buildInputs) trustInjectionOptions {
+	opts := trustInjectionOptions{
+		pemPath: injectedTrustBundlePrimaryPath,
+	}
+	if strings.TrimSpace(inputs.Truststore.Path) == "" ||
+		strings.TrimSpace(inputs.Truststore.Type) == "" ||
+		strings.TrimSpace(inputs.Truststore.Password) == "" ||
+		strings.TrimSpace(inputs.MavenSettings) == "" {
+		return opts
+	}
+	if _, err := os.Stat(inputs.Truststore.Path); err != nil {
+		return opts
+	}
+	if _, err := os.Stat(inputs.MavenSettings); err != nil {
+		return opts
+	}
+
+	opts.javaTruststorePath = injectedJavaTruststorePath
+	opts.javaTruststoreType = inputs.Truststore.Type
+	opts.javaTruststorePass = inputs.Truststore.Password
+	return opts
 }
 
 func resolveTrustBundlePath(env []string) (string, bool) {

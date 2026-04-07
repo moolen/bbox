@@ -128,7 +128,7 @@ func TestPlanForArgsInjectsTrustBundleIntoRunStages(t *testing.T) {
 	}
 
 	trustBundlePath := filepath.Join(cwd, "bbox-trust.pem")
-	if err := os.WriteFile(trustBundlePath, []byte("test trust bundle\n"), 0o644); err != nil {
+	if err := os.WriteFile(trustBundlePath, []byte(testTrustBundlePEM), 0o644); err != nil {
 		t.Fatalf("write trust bundle: %v", err)
 	}
 
@@ -182,6 +182,61 @@ func TestPlanForArgsInjectsTrustBundleIntoRunStages(t *testing.T) {
 	}
 	if strings.Contains(got, "FROM scratch AS final\nCOPY --from=bbox_mitm_trust /bbox-trust-bundle.pem") {
 		t.Fatalf("did not expect scratch stage without RUN to receive trust injection:\n%s", got)
+	}
+}
+
+func TestPlanForArgsInjectsTrustBundleBeforeEveryRun(t *testing.T) {
+	cwd := t.TempDir()
+	dockerfilePath := filepath.Join(cwd, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte(strings.Join([]string{
+		"FROM alpine:3.18 AS curl-stage",
+		"RUN apk add --no-cache ca-certificates curl",
+		"RUN curl -fsSL https://example.com/ -o /tmp/out",
+		"FROM busybox:1.36",
+		"RUN echo runtime",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	trustBundlePath := filepath.Join(cwd, "bbox-trust.pem")
+	if err := os.WriteFile(trustBundlePath, []byte(testTrustBundlePEM), 0o644); err != nil {
+		t.Fatalf("write trust bundle: %v", err)
+	}
+
+	plan, err := PlanForArgs([]string{"build", "."}, []string{
+		"BBOX_TRUST_BUNDLE_PATH=" + trustBundlePath,
+	}, cwd)
+	if err != nil {
+		t.Fatalf("PlanForArgs failed: %v", err)
+	}
+
+	dockerfileLocal := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "dockerfile=")
+	filename := argValueForOpt(plan.BuildctlArgs, "filename=")
+	rewrittenPath := filepath.Join(dockerfileLocal, filename)
+	content, err := os.ReadFile(rewrittenPath)
+	if err != nil {
+		t.Fatalf("read rewritten Dockerfile %q: %v", rewrittenPath, err)
+	}
+
+	got := string(content)
+	expectedSnippet := trustBundleInjectionSnippet(trustInjectionOptions{
+		pemPath:            injectedTrustBundlePrimaryPath,
+		javaTruststorePath: injectedJavaTruststorePath,
+		javaTruststoreType: bboxJavaTruststoreType,
+		javaTruststorePass: bboxJavaTruststorePassword,
+	})
+	if strings.Count(got, "COPY --from=bbox_mitm_trust /bbox-trust-bundle.pem /etc/ssl/certs/ca-certificates.crt") != 3 {
+		t.Fatalf("expected trust copy before each RUN, got:\n%s", got)
+	}
+	if !strings.Contains(got, expectedSnippet+"RUN apk add --no-cache ca-certificates curl\n") {
+		t.Fatalf("expected trust injection immediately before first RUN, got:\n%s", got)
+	}
+	if !strings.Contains(got, expectedSnippet+"RUN curl -fsSL https://example.com/ -o /tmp/out\n") {
+		t.Fatalf("expected trust injection immediately before second RUN, got:\n%s", got)
+	}
+	if !strings.Contains(got, expectedSnippet+"RUN echo runtime\n") {
+		t.Fatalf("expected trust injection immediately before each RUN, got:\n%s", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package dockerbuild
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
@@ -110,5 +111,26 @@ func TestPrepareBuildInputsStagesJavaTruststoreAndMavenSettings(t *testing.T) {
 	}
 	if settingsInfo.Size() == 0 {
 		t.Fatal("expected staged Maven settings to be non-empty")
+	}
+
+	dockerfileLocal := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "dockerfile=")
+	filename := argValueForOpt(plan.BuildctlArgs, "filename=")
+	rewrittenPath := filepath.Join(dockerfileLocal, filename)
+	rewritten, err := os.ReadFile(rewrittenPath)
+	if err != nil {
+		t.Fatalf("read rewritten Dockerfile %q: %v", rewrittenPath, err)
+	}
+	got := string(rewritten)
+	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
+		t.Fatalf("expected staged JVM truststore copy to be injected, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit") {
+		t.Fatalf("expected JAVA_TOOL_OPTIONS truststore config to be injected, got:\n%s", got)
+	}
+	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
+		t.Fatalf("expected staged Maven settings copy to be injected, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ENV MAVEN_ARGS=--settings /etc/maven/bbox-settings.xml") {
+		t.Fatalf("expected MAVEN_ARGS settings path to be injected, got:\n%s", got)
 	}
 }
