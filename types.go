@@ -180,6 +180,8 @@ type SandboxOptions struct {
 	// DockerSocket overrides manager Docker socket mediation settings when
 	// non-zero.
 	DockerSocket DockerSocketOptions
+	// DockerBuild enables the in-sandbox docker-build compatibility path.
+	DockerBuild DockerBuildOptions
 }
 
 // DockerSocketOptions configures Docker socket mediation for a manager or

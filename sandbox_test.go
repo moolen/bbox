@@ -2,6 +2,7 @@ package bbox
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -188,6 +189,21 @@ func TestValidateSandboxOptionsRejectsTransparentModeWithoutMITM(t *testing.T) {
 
 	if err := validateSandboxOptions(opts, false); err == nil {
 		t.Fatal("expected transparent mode without MITM to fail validation")
+	}
+}
+
+func TestValidateSandboxOptionsRejectsDockerBuildOutsideProxyMode(t *testing.T) {
+	opts := SandboxOptions{
+		TrafficMode: TrafficModeTransparent,
+		DockerBuild: DockerBuildOptions{Enabled: true},
+	}
+
+	err := validateSandboxOptions(opts, true)
+	if err == nil {
+		t.Fatal("expected docker build support in transparent mode to fail validation")
+	}
+	if got := err.Error(); got == "" || !strings.Contains(got, "proxy") {
+		t.Fatalf("expected proxy-mode validation error, got %v", err)
 	}
 }
 

@@ -144,6 +144,33 @@ Current build enforcement is intentionally narrow:
 
 Important limitation: allowing `docker build` does not preserve `bbox` network isolation by itself. Build steps execute on the Docker daemon or BuildKit side, not inside the `bbox` sandbox, so build-time network exfiltration still depends on daemon-side controls outside this proxy.
 
+## Rootless `docker build` Inside `bbox`
+
+On Linux, `bbox` can also stage a rootless BuildKit toolchain into the sandbox and expose a narrow `docker build` compatibility shim. This keeps the build itself inside the existing `bbox` proxy-mode egress boundary instead of sending the build to a host Docker daemon.
+
+Current scope and trade-offs:
+
+- supported today: `docker build`
+- supported flags: `-f`, `-t`, `--build-arg`, `--target`
+- network mode: proxy mode only
+- proxy handling: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase variants are forwarded into the build as build args
+- output: OCI archive written to `.bbox-docker-build.oci.tar` in the sandbox working directory
+
+Required host prerequisites:
+
+- `bwrap`
+- `podman`
+- `buildkitd`
+- `buildctl`
+- `runc`
+- `newuidmap`
+- `newgidmap`
+- subordinate ID mappings for the current user in `/etc/subuid` and `/etc/subgid`
+
+Current limitation: this path relies on proxy-aware build steps. `bbox` remains the network policy engine, but the in-sandbox builder currently runs in proxy mode rather than transparent mode. Workloads that ignore proxy environment variables are not yet supported by this builder path under strict policy.
+
+The integration suite now includes a live default-path verification that clones `github.com/moolen/spectre` and builds its provided `Dockerfile` inside `bbox` using the `builder` target. The test fails hard when the Linux/rootless builder prerequisites above are missing.
+
 Merge precedence is:
 1. CLI defaults
 2. `bbox.yaml` (if present)

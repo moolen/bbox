@@ -1,6 +1,7 @@
 package bbox
 
 import (
+	"reflect"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -95,6 +96,34 @@ func TestDefaultSeccompHelpers(t *testing.T) {
 	}
 	if rule.Errno != int(unix.EPERM) {
 		t.Fatalf("unexpected errno: got %d", rule.Errno)
+	}
+}
+
+func TestEffectiveSeccompOptionsDisablesDefaultProfileForDockerBuild(t *testing.T) {
+	got := effectiveSeccompOptions(SandboxOptions{
+		DockerBuild: DockerBuildOptions{Enabled: true},
+	})
+
+	if !got.Disabled {
+		t.Fatalf("expected docker-build sandbox to disable default seccomp, got %#v", got)
+	}
+}
+
+func TestEffectiveSeccompOptionsPreservesExplicitSeccompForDockerBuild(t *testing.T) {
+	want := SeccompOptions{
+		Profile: SeccompProfileRestricted,
+		Rules: []SeccompRule{
+			DenySyscall("open_by_handle_at"),
+		},
+	}
+
+	got := effectiveSeccompOptions(SandboxOptions{
+		Seccomp:     want,
+		DockerBuild: DockerBuildOptions{Enabled: true},
+	})
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("effectiveSeccompOptions() = %#v, want %#v", got, want)
 	}
 }
 

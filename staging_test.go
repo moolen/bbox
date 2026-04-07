@@ -111,6 +111,10 @@ func TestWriteSandboxConfigWritesDNSLookupConfigInProxyMode(t *testing.T) {
 func TestWriteSandboxConfigWritesMITMTrustFilesUnderRoot(t *testing.T) {
 	root := t.TempDir()
 	caPEM := []byte("test mitm ca\n")
+	hostTrust, err := hostTrustBundleContent()
+	if err != nil {
+		t.Fatalf("hostTrustBundleContent failed: %v", err)
+	}
 
 	if err := writeSandboxConfig(root, caPEM, TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
@@ -126,14 +130,21 @@ func TestWriteSandboxConfigWritesMITMTrustFilesUnderRoot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected MITM trust file at %q: %v", path, err)
 		}
-		if string(content) != string(caPEM) {
-			t.Fatalf("unexpected trust content at %q: got %q want %q", path, string(content), string(caPEM))
+		if !strings.HasPrefix(string(content), string(hostTrust)) {
+			t.Fatalf("expected staged trust file %q to start with host trust bundle", path)
+		}
+		if !strings.HasSuffix(string(content), string(caPEM)) {
+			t.Fatalf("expected staged trust file %q to end with MITM CA", path)
 		}
 	}
 }
 
-func TestWriteSandboxConfigSkipsMITMTrustFilesWhenDisabled(t *testing.T) {
+func TestWriteSandboxConfigWritesHostTrustFilesWhenMITMDisabled(t *testing.T) {
 	root := t.TempDir()
+	hostTrust, err := hostTrustBundleContent()
+	if err != nil {
+		t.Fatalf("hostTrustBundleContent failed: %v", err)
+	}
 
 	if err := writeSandboxConfig(root, nil, TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
@@ -145,14 +156,22 @@ func TestWriteSandboxConfigSkipsMITMTrustFilesWhenDisabled(t *testing.T) {
 		filepath.Join("etc", "ssl", "cert.pem"),
 	} {
 		path := filepath.Join(root, relPath)
-		if _, err := os.Stat(path); err == nil {
-			t.Fatalf("did not expect MITM trust file at %q", path)
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("expected host trust file at %q: %v", path, err)
+		}
+		if string(content) != string(hostTrust) {
+			t.Fatalf("unexpected host trust content at %q", path)
 		}
 	}
 }
 
 func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
 	bboxPath := writeBBoxFixture(t)
+	hostTrust, err := hostTrustBundleContent()
+	if err != nil {
+		t.Fatalf("hostTrustBundleContent failed: %v", err)
+	}
 	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, []byte("test mitm ca\n"), TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
@@ -164,8 +183,11 @@ func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected staged MITM trust file at %q: %v", path, err)
 	}
-	if string(content) != "test mitm ca\n" {
-		t.Fatalf("unexpected staged trust content: got %q", string(content))
+	if !strings.HasPrefix(string(content), string(hostTrust)) {
+		t.Fatalf("expected staged trust content to include host trust bundle")
+	}
+	if !strings.HasSuffix(string(content), "test mitm ca\n") {
+		t.Fatalf("expected staged trust content to append MITM CA, got %q", string(content))
 	}
 }
 
@@ -183,6 +205,45 @@ func TestStageSandboxRootCopiesBBoxEntrypoint(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(root, "app", "bbox")); err != nil {
 		t.Fatalf("expected /app/bbox: %v", err)
+	}
+}
+
+func TestStageSandboxRootStagesDockerBuildTools(t *testing.T) {
+	dir := t.TempDir()
+	bboxPath := writeExecutableFixture(t, dir, "bbox")
+	buildkitdPath := writeExecutableFixture(t, dir, "buildkitd")
+	buildctlPath := writeExecutableFixture(t, dir, "buildctl")
+	runcPath := writeExecutableFixture(t, dir, "runc")
+	podmanPath := writeExecutableFixture(t, dir, "podman")
+	newuidmapPath := writeExecutableFixture(t, dir, "newuidmap")
+	newgidmapPath := writeExecutableFixture(t, dir, "newgidmap")
+
+	root, err := stageSandboxRoot(SandboxOptions{
+		DockerBuild: DockerBuildOptions{
+			Enabled:       true,
+			BuildkitdPath: buildkitdPath,
+			BuildctlPath:  buildctlPath,
+			RuncPath:      runcPath,
+			PodmanPath:    podmanPath,
+			NewuidmapPath: newuidmapPath,
+			NewgidmapPath: newgidmapPath,
+		},
+	}, bboxPath, nil, TrafficModeProxy)
+	if err != nil {
+		t.Fatalf("stageSandboxRoot failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	for _, sandboxPath := range []string{
+		defaultSandboxDockerShimPath,
+		defaultSandboxBuildkitdPath,
+		defaultSandboxBuildctlPath,
+		defaultSandboxRuncPath,
+	} {
+		staged := filepath.Join(root, strings.TrimPrefix(sandboxPath, string(filepath.Separator)))
+		if _, err := os.Stat(staged); err != nil {
+			t.Fatalf("expected staged docker build tool at %q: %v", staged, err)
+		}
 	}
 }
 
@@ -501,6 +562,16 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func writeExecutableFixture(t *testing.T, dir string, name string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write executable fixture %q: %v", path, err)
+	}
+	return path
 }
 
 func linuxGNUDirs(root string) []string {

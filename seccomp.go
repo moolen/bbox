@@ -105,6 +105,16 @@ type preparedSeccompProgram struct {
 	cleanup func() error
 }
 
+func effectiveSeccompOptions(opts SandboxOptions) SeccompOptions {
+	if !opts.DockerBuild.Enabled {
+		return opts.Seccomp
+	}
+	if opts.Seccomp.Disabled || opts.Seccomp.Profile != "" || len(opts.Seccomp.Rules) > 0 {
+		return opts.Seccomp
+	}
+	return SeccompOptions{Disabled: true}
+}
+
 func (p *preparedSeccompProgram) Close() error {
 	if p == nil {
 		return nil

@@ -341,7 +341,13 @@ func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {
 	if mode == TrafficModeTransparent && !mitmEnabled {
 		return errors.New("transparent traffic mode requires MITM to be enabled")
 	}
+	if opts.DockerBuild.Enabled && mode != TrafficModeProxy {
+		return errors.New("docker build sandbox support currently requires proxy traffic mode")
+	}
 	if err := validateSeccompOptions(opts.Seccomp); err != nil {
+		return err
+	}
+	if _, err := resolveDockerBuildSupport(opts.DockerBuild); err != nil {
 		return err
 	}
 	return nil

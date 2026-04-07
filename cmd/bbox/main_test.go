@@ -752,6 +752,7 @@ func TestDispatchRunsInternalHelperWithoutCobra(t *testing.T) {
 			return nil
 		},
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -774,12 +775,40 @@ func TestDispatchRunsInternalLauncherWithoutCobra(t *testing.T) {
 			}
 			return nil
 		},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !launcherCalled {
 		t.Fatal("expected internal launcher dispatch")
+	}
+}
+
+func TestDispatchRunsInternalDockerBuildWithoutCobra(t *testing.T) {
+	var stdout bytes.Buffer
+	dockerBuildCalled := false
+	err := dispatch(
+		[]string{"internal-docker-build", "build", "."},
+		commandDeps{stdout: &stdout, stderr: io.Discard},
+		nil,
+		nil,
+		func(args []string, env []string, stdout io.Writer, stderr io.Writer) error {
+			dockerBuildCalled = true
+			if len(args) < 2 || args[0] != "build" {
+				t.Fatalf("args = %v", args)
+			}
+			if stdout == nil || stderr == nil {
+				t.Fatal("expected stdio writers to be forwarded")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dockerBuildCalled {
+		t.Fatal("expected internal docker build dispatch")
 	}
 }
 
