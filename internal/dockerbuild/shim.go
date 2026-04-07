@@ -170,6 +170,25 @@ func proxyBuildArgsFromEnv(env []string) []string {
 	return values
 }
 
+func hasProxyEnvConfigured(env []string) bool {
+	keys := []string{
+		"HTTP_PROXY",
+		"HTTPS_PROXY",
+		"http_proxy",
+		"https_proxy",
+	}
+	for _, key := range keys {
+		value, ok := lookupEnvValue(env, key)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 type buildInputs struct {
 	ContextDir     string
 	DockerfileDir  string
@@ -243,12 +262,14 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 			return buildInputs{}, fmt.Errorf("write staged JVM truststore: %w", err)
 		}
 		inputs.Truststore = truststore
-		settingsPath, err := writeMavenSettings(stageDir, truststore)
-		if err != nil {
-			_ = os.RemoveAll(stageDir)
-			return buildInputs{}, fmt.Errorf("write staged Maven settings: %w", err)
+		if hasProxyEnvConfigured(env) {
+			settingsPath, err := writeMavenSettings(stageDir, truststore)
+			if err != nil {
+				_ = os.RemoveAll(stageDir)
+				return buildInputs{}, fmt.Errorf("write staged Maven settings: %w", err)
+			}
+			inputs.MavenSettings = settingsPath
 		}
-		inputs.MavenSettings = settingsPath
 	}
 
 	trustInjection := trustInjectionOptionsFromStagedAssets(inputs)
@@ -320,9 +341,19 @@ func rewriteDockerfileWithTrustBundle(content []byte, opts trustInjectionOptions
 	}
 
 	injectBeforeLine := make(map[int]struct{})
+	injectStageBootstrapBeforeLine := make(map[int]struct{})
+	currentStageSawRun := false
 	for _, child := range result.AST.Children {
-		if strings.EqualFold(strings.TrimSpace(child.Value), "run") && child.StartLine > 0 {
+		instruction := strings.ToLower(strings.TrimSpace(child.Value))
+		if instruction == "from" {
+			currentStageSawRun = false
+		}
+		if instruction == "run" && child.StartLine > 0 {
 			injectBeforeLine[child.StartLine] = struct{}{}
+			if !currentStageSawRun {
+				injectStageBootstrapBeforeLine[child.StartLine] = struct{}{}
+				currentStageSawRun = true
+			}
 		}
 	}
 	if len(injectBeforeLine) == 0 {
@@ -337,8 +368,11 @@ func rewriteDockerfileWithTrustBundle(content []byte, opts trustInjectionOptions
 	var out strings.Builder
 	for i, line := range lines {
 		lineNo := i + 1
+		if _, ok := injectStageBootstrapBeforeLine[lineNo]; ok {
+			out.WriteString(trustStageBootstrapSnippet(opts))
+		}
 		if _, ok := injectBeforeLine[lineNo]; ok {
-			out.WriteString(trustBundleInjectionSnippet(opts))
+			out.WriteString(trustBundlePerRunInjectionSnippet(opts))
 		}
 		out.WriteString(line)
 	}
@@ -347,6 +381,10 @@ func rewriteDockerfileWithTrustBundle(content []byte, opts trustInjectionOptions
 }
 
 func trustBundleInjectionSnippet(opts ...trustInjectionOptions) string {
+	return trustStageBootstrapSnippet(opts...) + trustBundlePerRunInjectionSnippet(opts...)
+}
+
+func trustBundlePerRunInjectionSnippet(opts ...trustInjectionOptions) string {
 	injection := trustInjectionOptions{
 		pemPath: injectedTrustBundlePrimaryPath,
 	}
@@ -368,6 +406,16 @@ func trustBundleInjectionSnippet(opts ...trustInjectionOptions) string {
 	fmt.Fprintf(&b, "ENV REQUESTS_CA_BUNDLE=%s\n", injection.pemPath)
 	fmt.Fprintf(&b, "ENV PIP_CERT=%s\n", injection.pemPath)
 	fmt.Fprintf(&b, "ENV GIT_SSL_CAINFO=%s\n", injection.pemPath)
+	return b.String()
+}
+
+func trustStageBootstrapSnippet(opts ...trustInjectionOptions) string {
+	injection := trustInjectionOptions{}
+	if len(opts) > 0 {
+		injection = opts[0]
+	}
+
+	var b strings.Builder
 	if strings.TrimSpace(injection.javaTruststorePath) != "" {
 		fmt.Fprintf(&b, "COPY --from=%s /%s %s\n", bboxTrustContextName, bboxJavaTruststoreFileName, injection.javaTruststorePath)
 	}

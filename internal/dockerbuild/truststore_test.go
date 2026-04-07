@@ -133,6 +133,64 @@ func TestPrepareBuildInputsStagesJavaTruststoreAndMavenSettings(t *testing.T) {
 	if !strings.Contains(got, "ENV MAVEN_ARGS=--settings /etc/maven/bbox-settings.xml ${MAVEN_ARGS}") {
 		t.Fatalf("expected MAVEN_ARGS settings path to be injected, got:\n%s", got)
 	}
+
+	t.Run("without proxy, maven settings are not staged or injected", func(t *testing.T) {
+		cwd := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cwd, "Dockerfile"), []byte(strings.Join([]string{
+			"FROM alpine:3.18",
+			"RUN echo test",
+			"",
+		}, "\n")), 0o644); err != nil {
+			t.Fatalf("write Dockerfile: %v", err)
+		}
+
+		trustBundlePath := filepath.Join(cwd, "bbox-trust.pem")
+		if err := os.WriteFile(trustBundlePath, []byte(testTrustBundlePEM), 0o644); err != nil {
+			t.Fatalf("write trust bundle: %v", err)
+		}
+
+		plan, err := PlanForArgs([]string{"build", "."}, []string{
+			"BBOX_TRUST_BUNDLE_PATH=" + trustBundlePath,
+		}, cwd)
+		if err != nil {
+			t.Fatalf("PlanForArgs failed: %v", err)
+		}
+		t.Cleanup(func() {
+			cleanupPaths(plan.CleanupPaths)
+		})
+
+		stagingDir := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "bbox_mitm_trust=")
+		if stagingDir == "" {
+			t.Fatal("expected trust staging dir")
+		}
+		if _, err := os.Stat(filepath.Join(stagingDir, bboxMavenSettingsFileName)); !os.IsNotExist(err) {
+			t.Fatalf("expected no staged Maven settings without proxy env, got: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(stagingDir, bboxJavaTruststoreFileName)); err != nil {
+			t.Fatalf("expected staged JVM truststore without proxy env, got: %v", err)
+		}
+
+		dockerfileLocal := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "dockerfile=")
+		filename := argValueForOpt(plan.BuildctlArgs, "filename=")
+		rewrittenPath := filepath.Join(dockerfileLocal, filename)
+		rewritten, err := os.ReadFile(rewrittenPath)
+		if err != nil {
+			t.Fatalf("read rewritten Dockerfile %q: %v", rewrittenPath, err)
+		}
+		got := string(rewritten)
+		if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
+			t.Fatalf("expected JVM truststore copy to be injected, got:\n%s", got)
+		}
+		if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS}") {
+			t.Fatalf("expected JAVA_TOOL_OPTIONS truststore config to be injected, got:\n%s", got)
+		}
+		if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
+			t.Fatalf("did not expect Maven settings copy without proxy env, got:\n%s", got)
+		}
+		if strings.Contains(got, "ENV MAVEN_ARGS=") {
+			t.Fatalf("did not expect MAVEN_ARGS injection without proxy env, got:\n%s", got)
+		}
+	})
 }
 
 func TestTrustInjectionOptionsFromStagedAssetsDecouplesJavaAndMaven(t *testing.T) {

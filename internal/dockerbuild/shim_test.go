@@ -180,6 +180,15 @@ func TestPlanForArgsInjectsTrustBundleIntoRunStages(t *testing.T) {
 	if strings.Count(got, "ENV NPM_CONFIG_CAFILE=/etc/ssl/certs/ca-certificates.crt") != 2 {
 		t.Fatalf("expected NPM_CONFIG_CAFILE env injection for the two RUN stages, got:\n%s", got)
 	}
+	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS=") != 2 {
+		t.Fatalf("expected JAVA_TOOL_OPTIONS injection only once per stage, got:\n%s", got)
+	}
+	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
+		t.Fatalf("did not expect Maven settings copy without proxy env, got:\n%s", got)
+	}
+	if strings.Contains(got, "ENV MAVEN_ARGS=") {
+		t.Fatalf("did not expect MAVEN_ARGS without proxy env, got:\n%s", got)
+	}
 	if strings.Contains(got, "FROM scratch AS final\nCOPY --from=bbox_mitm_trust /bbox-trust-bundle.pem") {
 		t.Fatalf("did not expect scratch stage without RUN to receive trust injection:\n%s", got)
 	}
@@ -220,24 +229,95 @@ func TestPlanForArgsInjectsTrustBundleBeforeEveryRun(t *testing.T) {
 	}
 
 	got := string(content)
-	expectedSnippet := trustBundleInjectionSnippet(trustInjectionOptions{
+	expectedPerRunSnippet := trustBundlePerRunInjectionSnippet(trustInjectionOptions{
+		pemPath: injectedTrustBundlePrimaryPath,
+	})
+	expectedStageBootstrap := trustStageBootstrapSnippet(trustInjectionOptions{
 		pemPath:            injectedTrustBundlePrimaryPath,
+		javaTruststorePath: injectedJavaTruststorePath,
+		javaTruststoreType: bboxJavaTruststoreType,
+		javaTruststorePass: bboxJavaTruststorePassword,
+	})
+	if strings.Count(got, "COPY --from=bbox_mitm_trust /bbox-trust-bundle.pem /etc/ssl/certs/ca-certificates.crt") != 3 {
+		t.Fatalf("expected trust copy before each RUN, got:\n%s", got)
+	}
+	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS=") != 2 {
+		t.Fatalf("expected JAVA_TOOL_OPTIONS injection once per stage, got:\n%s", got)
+	}
+	if strings.Count(got, "ENV MAVEN_ARGS=") != 0 {
+		t.Fatalf("did not expect MAVEN_ARGS without proxy env, got:\n%s", got)
+	}
+	if !strings.Contains(got, expectedStageBootstrap+expectedPerRunSnippet+"RUN apk add --no-cache ca-certificates curl\n") {
+		t.Fatalf("expected trust injection immediately before first RUN, got:\n%s", got)
+	}
+	if !strings.Contains(got, expectedPerRunSnippet+"RUN curl -fsSL https://example.com/ -o /tmp/out\n") {
+		t.Fatalf("expected trust injection immediately before second RUN, got:\n%s", got)
+	}
+	if strings.Contains(got, expectedStageBootstrap+expectedPerRunSnippet+"RUN curl -fsSL https://example.com/ -o /tmp/out\n") {
+		t.Fatalf("did not expect JAVA bootstrap snippet before second RUN in same stage, got:\n%s", got)
+	}
+	if !strings.Contains(got, expectedStageBootstrap+expectedPerRunSnippet+"RUN echo runtime\n") {
+		t.Fatalf("expected trust injection immediately before each RUN, got:\n%s", got)
+	}
+}
+
+func TestPlanForArgsInjectsMavenOnlyOnFirstRunPerStageWhenProxyPresent(t *testing.T) {
+	cwd := t.TempDir()
+	dockerfilePath := filepath.Join(cwd, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte(strings.Join([]string{
+		"FROM alpine:3.18",
+		"RUN echo one",
+		"RUN echo two",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	trustBundlePath := filepath.Join(cwd, "bbox-trust.pem")
+	if err := os.WriteFile(trustBundlePath, []byte(testTrustBundlePEM), 0o644); err != nil {
+		t.Fatalf("write trust bundle: %v", err)
+	}
+
+	plan, err := PlanForArgs([]string{"build", "."}, []string{
+		"BBOX_TRUST_BUNDLE_PATH=" + trustBundlePath,
+		"HTTPS_PROXY=http://127.0.0.1:3128",
+	}, cwd)
+	if err != nil {
+		t.Fatalf("PlanForArgs failed: %v", err)
+	}
+
+	dockerfileLocal := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "dockerfile=")
+	filename := argValueForOpt(plan.BuildctlArgs, "filename=")
+	rewrittenPath := filepath.Join(dockerfileLocal, filename)
+	content, err := os.ReadFile(rewrittenPath)
+	if err != nil {
+		t.Fatalf("read rewritten Dockerfile %q: %v", rewrittenPath, err)
+	}
+
+	got := string(content)
+	expectedPerRunSnippet := trustBundlePerRunInjectionSnippet(trustInjectionOptions{
+		pemPath: injectedTrustBundlePrimaryPath,
+	})
+	expectedStageBootstrap := trustStageBootstrapSnippet(trustInjectionOptions{
 		javaTruststorePath: injectedJavaTruststorePath,
 		javaTruststoreType: bboxJavaTruststoreType,
 		javaTruststorePass: bboxJavaTruststorePassword,
 		mavenSettingsPath:  injectedMavenSettingsPath,
 	})
-	if strings.Count(got, "COPY --from=bbox_mitm_trust /bbox-trust-bundle.pem /etc/ssl/certs/ca-certificates.crt") != 3 {
-		t.Fatalf("expected trust copy before each RUN, got:\n%s", got)
+	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS=") != 1 {
+		t.Fatalf("expected single JAVA_TOOL_OPTIONS injection for one stage, got:\n%s", got)
 	}
-	if !strings.Contains(got, expectedSnippet+"RUN apk add --no-cache ca-certificates curl\n") {
-		t.Fatalf("expected trust injection immediately before first RUN, got:\n%s", got)
+	if strings.Count(got, "ENV MAVEN_ARGS=") != 1 {
+		t.Fatalf("expected single MAVEN_ARGS injection for one stage, got:\n%s", got)
 	}
-	if !strings.Contains(got, expectedSnippet+"RUN curl -fsSL https://example.com/ -o /tmp/out\n") {
-		t.Fatalf("expected trust injection immediately before second RUN, got:\n%s", got)
+	if !strings.Contains(got, expectedStageBootstrap+expectedPerRunSnippet+"RUN echo one\n") {
+		t.Fatalf("expected stage bootstrap before first RUN, got:\n%s", got)
 	}
-	if !strings.Contains(got, expectedSnippet+"RUN echo runtime\n") {
-		t.Fatalf("expected trust injection immediately before each RUN, got:\n%s", got)
+	if !strings.Contains(got, expectedPerRunSnippet+"RUN echo two\n") {
+		t.Fatalf("expected per-run trust injection before second RUN, got:\n%s", got)
+	}
+	if strings.Contains(got, expectedStageBootstrap+expectedPerRunSnippet+"RUN echo two\n") {
+		t.Fatalf("did not expect stage bootstrap before second RUN in same stage, got:\n%s", got)
 	}
 }
 
