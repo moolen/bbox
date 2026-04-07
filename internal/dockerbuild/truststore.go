@@ -98,7 +98,7 @@ func writeMavenSettings(stageDir string, truststore generatedTruststore) (string
     <activeProfile>bbox-mitm</activeProfile>
   </activeProfiles>
 </settings>
-`, truststore.Path, truststore.Type, truststore.Password))
+`, injectedJavaTruststorePath, truststore.Type, truststore.Password))
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		return "", fmt.Errorf("write Maven settings %s: %w", path, err)
 	}
