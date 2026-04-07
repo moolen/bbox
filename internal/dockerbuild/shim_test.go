@@ -239,6 +239,9 @@ func TestWithBuilderRuntimeEnvDropsProxyEnvWhenOnlyBuildArgsShouldUseProxy(t *te
 		"HTTP_PROXY=http://127.0.0.1:31111",
 		"HTTPS_PROXY=http://127.0.0.1:31111",
 		"NO_PROXY=localhost",
+		"http_proxy=http://127.0.0.1:31111",
+		"https_proxy=http://127.0.0.1:31111",
+		"no_proxy=localhost",
 	})
 
 	if containsEnvKey(got, "HTTP_PROXY") {
@@ -249,6 +252,15 @@ func TestWithBuilderRuntimeEnvDropsProxyEnvWhenOnlyBuildArgsShouldUseProxy(t *te
 	}
 	if containsEnvKey(got, "NO_PROXY") {
 		t.Fatalf("expected NO_PROXY to be stripped from builder runtime env: %v", got)
+	}
+	if containsEnvKey(got, "http_proxy") {
+		t.Fatalf("expected http_proxy to be stripped from builder runtime env: %v", got)
+	}
+	if containsEnvKey(got, "https_proxy") {
+		t.Fatalf("expected https_proxy to be stripped from builder runtime env: %v", got)
+	}
+	if containsEnvKey(got, "no_proxy") {
+		t.Fatalf("expected no_proxy to be stripped from builder runtime env: %v", got)
 	}
 	if containsEnvKey(got, bboxProxyArgsOnlyEnvKey) {
 		t.Fatalf("expected internal proxy-only control env to be stripped from builder runtime env: %v", got)
