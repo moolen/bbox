@@ -57,9 +57,9 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 		seccompProgram        *preparedSeccompProgram
 	)
 	if mode == TrafficModeTransparent {
-		payloadSeccompBPFPath, err = stageTransparentPayloadSeccompProgram(root, opts.Seccomp)
+		payloadSeccompBPFPath, err = stageTransparentPayloadSeccompProgram(root, effectiveSeccompOptions(opts))
 	} else {
-		seccompProgram, err = prepareSeccompProgram(opts.Seccomp)
+		seccompProgram, err = prepareSeccompProgram(effectiveSeccompOptions(opts))
 	}
 	if err != nil {
 		if seccompProgram != nil {
@@ -81,23 +81,33 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 		extraFiles = append(extraFiles, seccompProgram.file)
 	}
 
-	cmd := exec.Command("bwrap", buildBwrapArgs(bwrapArgsConfig{
-		root:                  root,
-		helperPath:            defaultSandboxBBoxPath,
-		proxyListenAddr:       m.listenAddr,
-		mitm:                  m.mitm,
-		unshareUser:           os.Geteuid() != 0,
-		maxRequestBodyBytes:   m.requestBodyLimitBytes,
-		mounts:                opts.Mounts,
-		dockerSocketMount:     dockerMount,
-		trafficMode:           mode,
-		payloadSeccompBPFPath: payloadSeccompBPFPath,
-		bridgeFD:              bridgeFD,
-		seccompFD:             seccompFD,
-	})...)
+	cmd, err := buildLinuxSandboxCommand(bwrapCommandConfig{
+		runtimeBinary:      runtimeBinary,
+		root:               root,
+		proxyListenAddr:    m.listenAddr,
+		mitm:               m.mitm,
+		opts:               opts,
+		mode:               mode,
+		payloadSeccompPath: payloadSeccompBPFPath,
+		bridgeFD:           bridgeFD,
+		seccompFD:          seccompFD,
+		extraFiles:         extraFiles,
+		dockerSocketMount:  dockerMount,
+		maxRequestBody:     m.requestBodyLimitBytes,
+	})
+	if err != nil {
+		if seccompProgram != nil {
+			_ = seccompProgram.Close()
+		}
+		_ = helperLog.Close()
+		_ = os.Remove(helperLog.Name())
+		_ = childBridge.Close()
+		_ = parentBridge.Close()
+		_ = os.RemoveAll(root)
+		return nil, err
+	}
 	cmd.Stderr = helperLog
 	cmd.Stdout = helperLog
-	cmd.ExtraFiles = extraFiles
 
 	if err := cmd.Start(); err != nil {
 		if seccompProgram != nil {

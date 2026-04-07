@@ -181,6 +181,10 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 	if err != nil {
 		return "", err
 	}
+	dockerBuildSupport, err := resolveDockerBuildSupport(opts.DockerBuild)
+	if err != nil {
+		return "", err
+	}
 
 	var files []string
 	for _, requested := range opts.Binaries {
@@ -193,6 +197,24 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 			return "", err
 		}
 		files = append(files, commandFiles...)
+	}
+	if dockerBuildSupport != nil {
+		for _, hostPath := range []string{
+			dockerBuildSupport.buildkitdPath,
+			dockerBuildSupport.buildctlPath,
+			dockerBuildSupport.runcPath,
+		} {
+			commandFiles, err := filesForCommand(hostPath)
+			if err != nil {
+				return "", err
+			}
+			files = append(files, commandFiles...)
+		}
+		shellFiles, err := filesForCommand("/bin/sh")
+		if err != nil {
+			return "", err
+		}
+		files = append(files, shellFiles...)
 	}
 
 	bboxRuntimeFiles, err := filesForCommand(bboxHostPath)
@@ -236,12 +258,41 @@ func stageSandboxRoot(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byt
 	if err := copyFileToPath(root, bboxHostPath, defaultSandboxBBoxPath); err != nil {
 		return "", err
 	}
+	if dockerBuildSupport != nil {
+		for sandboxPath, hostPath := range map[string]string{
+			defaultSandboxBuildkitdPath: dockerBuildSupport.buildkitdPath,
+			defaultSandboxBuildctlPath:  dockerBuildSupport.buildctlPath,
+			defaultSandboxRuncPath:      dockerBuildSupport.runcPath,
+		} {
+			if err := copyFileToPath(root, hostPath, sandboxPath); err != nil {
+				return "", err
+			}
+		}
+		if err := writeDockerBuildShim(root); err != nil {
+			return "", err
+		}
+	}
 
 	if err := writeSandboxConfig(root, mitmCAPEM, mode); err != nil {
 		return "", err
 	}
 
 	return root, nil
+}
+
+func writeDockerBuildShim(root string) error {
+	content := "#!/bin/sh\nexec /app/bbox internal-docker-build \"$@\"\n"
+	path, err := sandboxPathInRoot(root, defaultSandboxDockerShimPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create docker shim dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		return fmt.Errorf("write docker shim: %w", err)
+	}
+	return nil
 }
 
 func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
@@ -255,10 +306,15 @@ func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
 		return err
 	}
 	files["/etc/resolv.conf"] = content
+	trustBundle, err := hostTrustBundleContent()
+	if err != nil {
+		return err
+	}
 	if len(mitmCAPEM) > 0 {
-		for _, path := range mitmTrustBundlePaths {
-			files[path] = string(mitmCAPEM)
-		}
+		trustBundle = appendTrustBundlePEM(trustBundle, mitmCAPEM)
+	}
+	for _, path := range mitmTrustBundlePaths {
+		files[path] = string(trustBundle)
 	}
 	for path, content := range files {
 		dest, err := sandboxPathInRoot(root, path)
@@ -273,6 +329,30 @@ func writeSandboxConfig(root string, mitmCAPEM []byte, mode TrafficMode) error {
 		}
 	}
 	return nil
+}
+
+func hostTrustBundleContent() ([]byte, error) {
+	path, ok := firstExistingPath(mitmTrustBundlePaths)
+	if !ok {
+		return nil, fmt.Errorf("no host trust bundle found in %v", mitmTrustBundlePaths)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read host trust bundle %q: %w", path, err)
+	}
+	if len(content) == 0 {
+		return nil, fmt.Errorf("host trust bundle %q is empty", path)
+	}
+	return content, nil
+}
+
+func appendTrustBundlePEM(base []byte, extra []byte) []byte {
+	combined := append([]byte(nil), base...)
+	if len(combined) > 0 && combined[len(combined)-1] != '\n' {
+		combined = append(combined, '\n')
+	}
+	combined = append(combined, extra...)
+	return combined
 }
 
 func stageTransparentPayloadSeccompProgram(root string, opts SeccompOptions) (string, error) {

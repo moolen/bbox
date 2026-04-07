@@ -72,6 +72,7 @@ type bwrapArgsConfig struct {
 	proxyListenAddr       string
 	mitm                  MITMOptions
 	unshareUser           bool
+	capSysAdmin           bool
 	maxRequestBodyBytes   int64
 	mounts                []Mount
 	dockerSocketMount     *dockerSocketMount
@@ -101,6 +102,9 @@ func buildBwrapArgs(cfg bwrapArgsConfig) []string {
 	}
 	if cfg.seccompFD >= 0 {
 		args = append(args, "--seccomp", strconv.Itoa(cfg.seccompFD))
+	}
+	if cfg.capSysAdmin {
+		args = append(args, "--cap-add", "CAP_SYS_ADMIN")
 	}
 
 	for _, dir := range []string{"app", "usr", "etc", "lib", "lib64", "bin", "sbin"} {

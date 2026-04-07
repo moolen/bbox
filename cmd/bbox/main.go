@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/moolen/bbox"
+	"github.com/moolen/bbox/internal/dockerbuild"
 	"github.com/moolen/bbox/internal/helperentrypoint"
 	"github.com/moolen/bbox/internal/launcherentrypoint"
 	"github.com/spf13/cobra"
@@ -85,7 +86,7 @@ func main() {
 		getwd:   os.Getwd,
 		environ: os.Environ,
 		run:     runSandbox,
-	}, helperentrypoint.Run, launcherentrypoint.Run)
+	}, helperentrypoint.Run, launcherentrypoint.Run, dockerbuild.RunCLI)
 	if err != nil {
 		var exitErr exitCodeError
 		if errors.As(err, &exitErr) {
@@ -96,12 +97,15 @@ func main() {
 	}
 }
 
-func dispatch(args []string, deps commandDeps, runHelper func([]string) error, runLauncher func([]string) error) error {
+func dispatch(args []string, deps commandDeps, runHelper func([]string) error, runLauncher func([]string) error, runDockerBuild func([]string, []string, io.Writer, io.Writer) error) error {
 	if runHelper != nil && len(args) > 0 && args[0] == "internal-helper" {
 		return runHelper(args[1:])
 	}
 	if runLauncher != nil && len(args) > 0 && args[0] == "internal-launcher" {
 		return runLauncher(args[1:])
+	}
+	if runDockerBuild != nil && len(args) > 0 && args[0] == "internal-docker-build" {
+		return runDockerBuild(args[1:], os.Environ(), deps.stdout, deps.stderr)
 	}
 
 	cmd := newRootCommand(deps)
