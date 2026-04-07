@@ -1,6 +1,7 @@
 package dockerbuild
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -9,18 +10,33 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/moby/buildkit/frontend/dockerfile/parser"
 )
 
 type Plan struct {
 	BuildctlArgs []string
 	OutputPath   string
+	CleanupPaths []string
 }
 
 const (
-	buildkitSocketPath = "/tmp/bbox-buildkitd.sock"
-	buildkitRootPath   = "/tmp/bbox-buildkitd-root"
-	buildkitLogPath    = "/tmp/bbox-buildkitd.log"
+	buildkitSocketPath      = "/tmp/bbox-buildkitd.sock"
+	buildkitRootPath        = "/tmp/bbox-buildkitd-root"
+	buildkitLogPath         = "/tmp/bbox-buildkitd.log"
+	bboxTrustBundleEnvKey   = "BBOX_TRUST_BUNDLE_PATH"
+	bboxProxyArgsOnlyEnvKey = "BBOX_DOCKER_BUILD_PROXY_ARGS_ONLY"
+	bboxTrustContextName    = "bbox_mitm_trust"
+	bboxTrustBundleFileName = "bbox-trust-bundle.pem"
 )
+
+var injectedTrustBundleDestinations = []string{
+	"/etc/ssl/certs/ca-certificates.crt",
+	"/etc/ssl/cert.pem",
+	"/etc/pki/tls/certs/ca-bundle.crt",
+}
+
+const injectedTrustBundlePrimaryPath = "/etc/ssl/certs/ca-certificates.crt"
 
 func PlanForArgs(args []string, env []string, cwd string) (Plan, error) {
 	if len(args) == 0 {
@@ -93,22 +109,29 @@ func PlanForArgs(args []string, env []string, cwd string) (Plan, error) {
 	if err != nil {
 		return Plan{}, fmt.Errorf("resolve dockerfile path: %w", err)
 	}
-	dockerfileDir := filepath.Dir(dockerfileAbs)
-	dockerfileName := filepath.Base(dockerfileAbs)
-
 	outputName := "bbox-build"
 	if len(tags) > 0 {
 		outputName = tags[0]
 	}
 	outputPath := filepath.Join(cwd, ".bbox-docker-build.oci.tar")
+	inputs, err := prepareBuildInputs(contextAbs, dockerfileAbs, env)
+	if err != nil {
+		return Plan{}, err
+	}
 
 	buildctlArgs := []string{
 		"build",
 		"--progress=plain",
 		"--frontend", "dockerfile.v0",
-		"--local", "context=" + contextAbs,
-		"--local", "dockerfile=" + dockerfileDir,
-		"--opt", "filename=" + dockerfileName,
+		"--local", "context=" + inputs.ContextDir,
+		"--local", "dockerfile=" + inputs.DockerfileDir,
+		"--opt", "filename=" + inputs.DockerfileName,
+	}
+	for _, local := range inputs.ExtraLocals {
+		buildctlArgs = append(buildctlArgs, "--local", local)
+	}
+	for _, opt := range inputs.FrontendOpts {
+		buildctlArgs = append(buildctlArgs, "--opt", opt)
 	}
 
 	for _, buildArg := range append(buildArgs, proxyBuildArgsFromEnv(env)...) {
@@ -123,6 +146,7 @@ func PlanForArgs(args []string, env []string, cwd string) (Plan, error) {
 	return Plan{
 		BuildctlArgs: buildctlArgs,
 		OutputPath:   outputPath,
+		CleanupPaths: inputs.CleanupPaths,
 	}, nil
 }
 
@@ -142,6 +166,160 @@ func proxyBuildArgsFromEnv(env []string) []string {
 		}
 	}
 	return values
+}
+
+type buildInputs struct {
+	ContextDir     string
+	DockerfileDir  string
+	DockerfileName string
+	ExtraLocals    []string
+	FrontendOpts   []string
+	CleanupPaths   []string
+}
+
+func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (buildInputs, error) {
+	inputs := buildInputs{
+		ContextDir:     contextAbs,
+		DockerfileDir:  filepath.Dir(dockerfileAbs),
+		DockerfileName: filepath.Base(dockerfileAbs),
+	}
+
+	trustBundlePath, ok := resolveTrustBundlePath(env)
+	if !ok {
+		return inputs, nil
+	}
+	if _, err := os.Stat(dockerfileAbs); err != nil {
+		if os.IsNotExist(err) {
+			return inputs, nil
+		}
+		return buildInputs{}, fmt.Errorf("stat dockerfile %s: %w", dockerfileAbs, err)
+	}
+
+	original, err := os.ReadFile(dockerfileAbs)
+	if err != nil {
+		return buildInputs{}, fmt.Errorf("read dockerfile %s: %w", dockerfileAbs, err)
+	}
+	rewritten, err := rewriteDockerfileWithTrustBundle(original)
+	if err != nil {
+		return buildInputs{}, fmt.Errorf("rewrite dockerfile %s for trust injection: %w", dockerfileAbs, err)
+	}
+	if bytes.Equal(rewritten, original) {
+		return inputs, nil
+	}
+
+	trustBundle, err := os.ReadFile(trustBundlePath)
+	if err != nil {
+		return buildInputs{}, fmt.Errorf("read trust bundle %s: %w", trustBundlePath, err)
+	}
+
+	stageDir, err := os.MkdirTemp("", "bbox-build-inputs-")
+	if err != nil {
+		return buildInputs{}, fmt.Errorf("create build input staging dir: %w", err)
+	}
+
+	rewrittenPath := filepath.Join(stageDir, filepath.Base(dockerfileAbs))
+	if err := os.WriteFile(rewrittenPath, rewritten, 0o644); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return buildInputs{}, fmt.Errorf("write rewritten dockerfile %s: %w", rewrittenPath, err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, bboxTrustBundleFileName), trustBundle, 0o644); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return buildInputs{}, fmt.Errorf("write staged trust bundle: %w", err)
+	}
+
+	inputs.DockerfileDir = stageDir
+	inputs.DockerfileName = filepath.Base(rewrittenPath)
+	inputs.ExtraLocals = append(inputs.ExtraLocals, bboxTrustContextName+"="+stageDir)
+	inputs.FrontendOpts = append(inputs.FrontendOpts, "context:"+bboxTrustContextName+"=local:"+bboxTrustContextName)
+	inputs.CleanupPaths = append(inputs.CleanupPaths, stageDir)
+	return inputs, nil
+}
+
+func resolveTrustBundlePath(env []string) (string, bool) {
+	if value, ok := lookupEnvValue(env, bboxTrustBundleEnvKey); ok {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", false
+		}
+		if _, err := os.Stat(value); err == nil {
+			return value, true
+		}
+		return "", false
+	}
+
+	const defaultTrustBundlePath = "/etc/ssl/certs/ca-certificates.crt"
+	if _, err := os.Stat(defaultTrustBundlePath); err == nil {
+		return defaultTrustBundlePath, true
+	}
+	return "", false
+}
+
+func rewriteDockerfileWithTrustBundle(content []byte) ([]byte, error) {
+	result, err := parser.Parse(bytes.NewReader(content))
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || result.AST == nil {
+		return append([]byte(nil), content...), nil
+	}
+
+	injectAfterLine := make(map[int]struct{})
+	currentFromEndLine := 0
+	currentStageHasRun := false
+	for _, child := range result.AST.Children {
+		switch strings.ToLower(strings.TrimSpace(child.Value)) {
+		case "from":
+			if currentFromEndLine > 0 && currentStageHasRun {
+				injectAfterLine[currentFromEndLine] = struct{}{}
+			}
+			currentFromEndLine = child.EndLine
+			currentStageHasRun = false
+		case "run":
+			if currentFromEndLine > 0 {
+				currentStageHasRun = true
+			}
+		}
+	}
+	if currentFromEndLine > 0 && currentStageHasRun {
+		injectAfterLine[currentFromEndLine] = struct{}{}
+	}
+	if len(injectAfterLine) == 0 {
+		return append([]byte(nil), content...), nil
+	}
+
+	lines := strings.SplitAfter(string(content), "\n")
+	if len(lines) == 0 {
+		lines = []string{string(content)}
+	}
+
+	var out strings.Builder
+	for i, line := range lines {
+		lineNo := i + 1
+		out.WriteString(line)
+		if _, ok := injectAfterLine[lineNo]; ok {
+			out.WriteString(trustBundleInjectionSnippet())
+		}
+	}
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		lastLine := len(lines)
+		if _, ok := injectAfterLine[lastLine]; ok {
+			out.WriteByte('\n')
+			out.WriteString(trustBundleInjectionSnippet())
+		}
+	}
+
+	return []byte(out.String()), nil
+}
+
+func trustBundleInjectionSnippet() string {
+	var b strings.Builder
+	for _, dest := range injectedTrustBundleDestinations {
+		fmt.Fprintf(&b, "COPY --from=%s /%s %s\n", bboxTrustContextName, bboxTrustBundleFileName, dest)
+	}
+	fmt.Fprintf(&b, "ENV SSL_CERT_FILE=%s\n", injectedTrustBundlePrimaryPath)
+	fmt.Fprintf(&b, "ENV NODE_EXTRA_CA_CERTS=%s\n", injectedTrustBundlePrimaryPath)
+	fmt.Fprintf(&b, "ENV NPM_CONFIG_CAFILE=%s\n", injectedTrustBundlePrimaryPath)
+	return b.String()
 }
 
 func lookupEnvValue(env []string, key string) (string, bool) {
@@ -177,13 +355,15 @@ func RunCLI(args []string, env []string, stdout io.Writer, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	if err := ensureBuildkitd(env); err != nil {
+	defer cleanupPaths(plan.CleanupPaths)
+	builderEnv := withBuilderRuntimeEnv(env)
+	if err := ensureBuildkitd(builderEnv); err != nil {
 		return err
 	}
 
 	buildctlArgs := append([]string{"--addr", "unix://" + buildkitSocketPath}, plan.BuildctlArgs...)
 	cmd := exec.Command("buildctl", buildctlArgs...)
-	cmd.Env = env
+	cmd.Env = builderEnv
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
@@ -233,6 +413,21 @@ func ensureBuildkitd(env []string) error {
 	return fmt.Errorf("buildkitd did not become ready; see %s", buildkitLogPath)
 }
 
+func withBuilderRuntimeEnv(env []string) []string {
+	out := filterBuilderControlEnv(env)
+	if value, ok := lookupEnvValue(env, bboxProxyArgsOnlyEnvKey); ok && strings.TrimSpace(value) == "1" {
+		out = filterBuilderProxyEnv(out)
+	}
+	godebug, ok := lookupEnvValue(out, "GODEBUG")
+	if !ok || strings.TrimSpace(godebug) == "" {
+		return append(out, "GODEBUG=netdns=cgo")
+	}
+	if strings.Contains(godebug, "netdns=") {
+		return out
+	}
+	return append(out, "GODEBUG="+godebug+",netdns=cgo")
+}
+
 func buildkitdReady() bool {
 	conn, err := net.DialTimeout("unix", buildkitSocketPath, 200*time.Millisecond)
 	if err != nil {
@@ -240,4 +435,56 @@ func buildkitdReady() bool {
 	}
 	_ = conn.Close()
 	return true
+}
+
+func filterBuilderProxyEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := splitEnvEntry(entry)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy":
+			continue
+		default:
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+func filterBuilderControlEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := splitEnvEntry(entry)
+		if !ok {
+			continue
+		}
+		if key == bboxProxyArgsOnlyEnvKey {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func splitEnvEntry(entry string) (string, string, bool) {
+	if entry == "" {
+		return "", "", false
+	}
+	split := strings.IndexByte(entry, '=')
+	if split < 0 {
+		return entry, "", true
+	}
+	return entry[:split], entry[split+1:], true
+}
+
+func cleanupPaths(paths []string) {
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		_ = os.RemoveAll(path)
+	}
 }

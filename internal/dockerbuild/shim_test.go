@@ -1,6 +1,7 @@
 package dockerbuild
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,6 +112,149 @@ func TestPlanForArgsForwardsEqualsTargetStage(t *testing.T) {
 	}
 }
 
+func TestPlanForArgsInjectsTrustBundleIntoRunStages(t *testing.T) {
+	cwd := t.TempDir()
+	dockerfilePath := filepath.Join(cwd, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte(strings.Join([]string{
+		"FROM alpine:3.18 AS builder",
+		"RUN echo builder",
+		"FROM scratch AS final",
+		"COPY --from=builder /tmp/out /tmp/out",
+		"FROM busybox:1.36",
+		"RUN echo runtime",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	trustBundlePath := filepath.Join(cwd, "bbox-trust.pem")
+	if err := os.WriteFile(trustBundlePath, []byte("test trust bundle\n"), 0o644); err != nil {
+		t.Fatalf("write trust bundle: %v", err)
+	}
+
+	plan, err := PlanForArgs([]string{"build", "."}, []string{
+		"BBOX_TRUST_BUNDLE_PATH=" + trustBundlePath,
+	}, cwd)
+	if err != nil {
+		t.Fatalf("PlanForArgs failed: %v", err)
+	}
+	if len(plan.CleanupPaths) == 0 {
+		t.Fatal("expected temporary shim inputs to be tracked for cleanup")
+	}
+
+	dockerfileLocal := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "dockerfile=")
+	if dockerfileLocal == "" {
+		t.Fatalf("expected rewritten dockerfile local in %v", plan.BuildctlArgs)
+	}
+	bboxTrustLocal := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "bbox_mitm_trust=")
+	if bboxTrustLocal == "" {
+		t.Fatalf("expected trust bundle local context in %v", plan.BuildctlArgs)
+	}
+	if !containsArgSequence(plan.BuildctlArgs, []string{"--opt", "context:bbox_mitm_trust=local:bbox_mitm_trust"}) {
+		t.Fatalf("expected named local context mapping in %v", plan.BuildctlArgs)
+	}
+	if filepath.Clean(dockerfileLocal) != filepath.Clean(bboxTrustLocal) {
+		t.Fatalf("expected wrapper Dockerfile and trust bundle to share staging dir, got dockerfile=%q trust=%q", dockerfileLocal, bboxTrustLocal)
+	}
+
+	filename := argValueForOpt(plan.BuildctlArgs, "filename=")
+	if filename == "" {
+		t.Fatalf("expected rewritten filename in %v", plan.BuildctlArgs)
+	}
+
+	rewrittenPath := filepath.Join(dockerfileLocal, filename)
+	content, err := os.ReadFile(rewrittenPath)
+	if err != nil {
+		t.Fatalf("read rewritten Dockerfile %q: %v", rewrittenPath, err)
+	}
+	got := string(content)
+	if strings.Count(got, "COPY --from=bbox_mitm_trust /bbox-trust-bundle.pem /etc/ssl/certs/ca-certificates.crt") != 2 {
+		t.Fatalf("expected trust copy into Linux CA bundle for the two RUN stages, got:\n%s", got)
+	}
+	if strings.Count(got, "ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt") != 2 {
+		t.Fatalf("expected SSL_CERT_FILE env injection for the two RUN stages, got:\n%s", got)
+	}
+	if strings.Count(got, "ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt") != 2 {
+		t.Fatalf("expected NODE_EXTRA_CA_CERTS env injection for the two RUN stages, got:\n%s", got)
+	}
+	if strings.Count(got, "ENV NPM_CONFIG_CAFILE=/etc/ssl/certs/ca-certificates.crt") != 2 {
+		t.Fatalf("expected NPM_CONFIG_CAFILE env injection for the two RUN stages, got:\n%s", got)
+	}
+	if strings.Contains(got, "FROM scratch AS final\nCOPY --from=bbox_mitm_trust /bbox-trust-bundle.pem") {
+		t.Fatalf("did not expect scratch stage without RUN to receive trust injection:\n%s", got)
+	}
+}
+
+func TestWithBuilderRuntimeEnvAddsCgoResolverWhenUnset(t *testing.T) {
+	got := withBuilderRuntimeEnv([]string{"PATH=/usr/bin"})
+	if !containsEnvEntry(got, "GODEBUG=netdns=cgo") {
+		t.Fatalf("expected GODEBUG=netdns=cgo in %v", got)
+	}
+}
+
+func TestWithBuilderRuntimeEnvAppendsCgoResolverToExistingGODEBUG(t *testing.T) {
+	got := withBuilderRuntimeEnv([]string{"PATH=/usr/bin", "GODEBUG=http2client=0"})
+	if !containsEnvEntry(got, "GODEBUG=http2client=0,netdns=cgo") {
+		t.Fatalf("expected merged GODEBUG in %v", got)
+	}
+}
+
+func TestWithBuilderRuntimeEnvPreservesExistingNetdnsSetting(t *testing.T) {
+	got := withBuilderRuntimeEnv([]string{"PATH=/usr/bin", "GODEBUG=http2client=0,netdns=go"})
+	if !containsEnvEntry(got, "GODEBUG=http2client=0,netdns=go") {
+		t.Fatalf("expected existing netdns setting in %v", got)
+	}
+}
+
+func TestWithBuilderRuntimeEnvPreservesProxyEnvByDefault(t *testing.T) {
+	got := withBuilderRuntimeEnv([]string{
+		"PATH=/usr/bin",
+		"HTTP_PROXY=http://127.0.0.1:31111",
+		"HTTPS_PROXY=http://127.0.0.1:31111",
+		"NO_PROXY=localhost",
+		"http_proxy=http://127.0.0.1:31111",
+		"https_proxy=http://127.0.0.1:31111",
+		"no_proxy=localhost",
+	})
+
+	for _, want := range []string{
+		"HTTP_PROXY=http://127.0.0.1:31111",
+		"HTTPS_PROXY=http://127.0.0.1:31111",
+		"NO_PROXY=localhost",
+		"http_proxy=http://127.0.0.1:31111",
+		"https_proxy=http://127.0.0.1:31111",
+		"no_proxy=localhost",
+		"GODEBUG=netdns=cgo",
+	} {
+		if !containsEnvEntry(got, want) {
+			t.Fatalf("expected %q in %v", want, got)
+		}
+	}
+}
+
+func TestWithBuilderRuntimeEnvDropsProxyEnvWhenOnlyBuildArgsShouldUseProxy(t *testing.T) {
+	got := withBuilderRuntimeEnv([]string{
+		"PATH=/usr/bin",
+		"BBOX_DOCKER_BUILD_PROXY_ARGS_ONLY=1",
+		"HTTP_PROXY=http://127.0.0.1:31111",
+		"HTTPS_PROXY=http://127.0.0.1:31111",
+		"NO_PROXY=localhost",
+	})
+
+	if containsEnvKey(got, "HTTP_PROXY") {
+		t.Fatalf("expected HTTP_PROXY to be stripped from builder runtime env: %v", got)
+	}
+	if containsEnvKey(got, "HTTPS_PROXY") {
+		t.Fatalf("expected HTTPS_PROXY to be stripped from builder runtime env: %v", got)
+	}
+	if containsEnvKey(got, "NO_PROXY") {
+		t.Fatalf("expected NO_PROXY to be stripped from builder runtime env: %v", got)
+	}
+	if containsEnvKey(got, bboxProxyArgsOnlyEnvKey) {
+		t.Fatalf("expected internal proxy-only control env to be stripped from builder runtime env: %v", got)
+	}
+}
+
 func containsArgSequence(args []string, want []string) bool {
 	if len(want) == 0 || len(args) < len(want) {
 		return false
@@ -128,4 +272,46 @@ func containsArgSequence(args []string, want []string) bool {
 		}
 	}
 	return false
+}
+
+func containsEnvEntry(env []string, want string) bool {
+	for _, entry := range env {
+		if entry == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEnvKey(env []string, key string) bool {
+	for _, entry := range env {
+		if strings.HasPrefix(entry, key+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func argValueForRepeatedFlag(args []string, flag string, prefix string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] != flag {
+			continue
+		}
+		if strings.HasPrefix(args[i+1], prefix) {
+			return strings.TrimPrefix(args[i+1], prefix)
+		}
+	}
+	return ""
+}
+
+func argValueForOpt(args []string, prefix string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] != "--opt" {
+			continue
+		}
+		if strings.HasPrefix(args[i+1], prefix) {
+			return strings.TrimPrefix(args[i+1], prefix)
+		}
+	}
+	return ""
 }
