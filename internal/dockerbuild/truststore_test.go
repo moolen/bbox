@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 const testTrustBundlePEM = `-----BEGIN CERTIFICATE-----
@@ -26,6 +28,48 @@ mlxwYWuxkcq/zrb0fnUYQRu114h/S/bZrgldPADYGCie4Mc0mdVdFEzC9kCfV36W
 z4ccCnH2QtqGR13dkQ==
 -----END CERTIFICATE-----
 `
+
+func TestWritePKCS12Truststore(t *testing.T) {
+	t.Run("writes PKCS12 truststore from PEM bundle", func(t *testing.T) {
+		stageDir := t.TempDir()
+
+		got, err := writePKCS12Truststore(stageDir, []byte(testTrustBundlePEM))
+		if err != nil {
+			t.Fatalf("writePKCS12Truststore failed: %v", err)
+		}
+		if got.Type != bboxJavaTruststoreType {
+			t.Fatalf("expected truststore type %q, got %q", bboxJavaTruststoreType, got.Type)
+		}
+		if got.Password == "" {
+			t.Fatal("expected non-empty truststore password")
+		}
+		if filepath.Base(got.Path) != bboxJavaTruststoreFileName {
+			t.Fatalf("expected truststore filename %q, got %q", bboxJavaTruststoreFileName, got.Path)
+		}
+
+		encoded, err := os.ReadFile(got.Path)
+		if err != nil {
+			t.Fatalf("read generated truststore %q: %v", got.Path, err)
+		}
+		if len(encoded) == 0 {
+			t.Fatal("expected non-empty truststore contents")
+		}
+		decoded, err := pkcs12.DecodeTrustStore(encoded, got.Password)
+		if err != nil {
+			t.Fatalf("expected generated truststore to decode with returned password: %v", err)
+		}
+		if len(decoded) == 0 {
+			t.Fatal("expected decoded truststore to contain at least one certificate")
+		}
+	})
+
+	t.Run("fails when bundle has no certificates", func(t *testing.T) {
+		_, err := writePKCS12Truststore(t.TempDir(), []byte("not a certificate bundle"))
+		if err == nil {
+			t.Fatal("expected writePKCS12Truststore to fail for invalid PEM")
+		}
+	})
+}
 
 func TestPrepareBuildInputsStagesJavaTruststoreAndMavenSettings(t *testing.T) {
 	cwd := t.TempDir()
