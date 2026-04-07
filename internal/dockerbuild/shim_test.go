@@ -327,3 +327,17 @@ func argValueForOpt(args []string, prefix string) string {
 	}
 	return ""
 }
+
+func TestTrustBundleInjectionSnippetIncludesExpandedClientEnv(t *testing.T) {
+	got := trustBundleInjectionSnippet()
+	for _, want := range []string{
+		"ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
+		"ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
+		"ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt",
+		"ENV GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+}
