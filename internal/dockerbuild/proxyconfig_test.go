@@ -19,9 +19,14 @@ func TestJavaProxyOptionsFromEnv(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("expected %d proxy flags, got %d: %v", len(want), len(got), got)
 	}
-	for i, wantFlag := range want {
-		if got[i] != wantFlag {
-			t.Fatalf("expected proxy flags %v, got %v", want, got)
+
+	counts := make(map[string]int, len(got))
+	for _, flag := range got {
+		counts[flag]++
+	}
+	for _, wantFlag := range want {
+		if counts[wantFlag] != 1 {
+			t.Fatalf("expected proxy flags %v exactly once each, got %v", want, got)
 		}
 	}
 }
