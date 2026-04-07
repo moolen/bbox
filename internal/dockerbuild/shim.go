@@ -170,25 +170,6 @@ func proxyBuildArgsFromEnv(env []string) []string {
 	return values
 }
 
-func hasProxyEnvConfigured(env []string) bool {
-	keys := []string{
-		"HTTP_PROXY",
-		"HTTPS_PROXY",
-		"http_proxy",
-		"https_proxy",
-	}
-	for _, key := range keys {
-		value, ok := lookupEnvValue(env, key)
-		if !ok {
-			continue
-		}
-		if strings.TrimSpace(value) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 type buildInputs struct {
 	ContextDir     string
 	DockerfileDir  string
@@ -255,6 +236,11 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 		_ = os.RemoveAll(stageDir)
 		return buildInputs{}, fmt.Errorf("write staged trust bundle: %w", err)
 	}
+	proxyCfg, err := proxyConfigFromEnv(env)
+	if err != nil {
+		_ = os.RemoveAll(stageDir)
+		return buildInputs{}, fmt.Errorf("parse proxy config from env: %w", err)
+	}
 	if len(trustBundle) > 0 {
 		truststore, err := writePKCS12Truststore(stageDir, trustBundle)
 		if err != nil {
@@ -262,14 +248,19 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 			return buildInputs{}, fmt.Errorf("write staged JVM truststore: %w", err)
 		}
 		inputs.Truststore = truststore
-		if hasProxyEnvConfigured(env) {
-			settingsPath, err := writeMavenSettings(stageDir, truststore)
-			if err != nil {
-				_ = os.RemoveAll(stageDir)
-				return buildInputs{}, fmt.Errorf("write staged Maven settings: %w", err)
-			}
-			inputs.MavenSettings = settingsPath
+	}
+	if proxyCfg.Enabled() {
+		settingsXML, err := renderMavenSettings(proxyCfg)
+		if err != nil {
+			_ = os.RemoveAll(stageDir)
+			return buildInputs{}, fmt.Errorf("render Maven settings: %w", err)
 		}
+		settingsPath := filepath.Join(stageDir, bboxMavenSettingsFileName)
+		if err := os.WriteFile(settingsPath, settingsXML, 0o644); err != nil {
+			_ = os.RemoveAll(stageDir)
+			return buildInputs{}, fmt.Errorf("write staged Maven settings: %w", err)
+		}
+		inputs.MavenSettings = settingsPath
 	}
 
 	trustInjection := trustInjectionOptionsFromStagedAssets(inputs)
@@ -595,10 +586,6 @@ func splitEnvEntry(entry string) (string, string, bool) {
 		return entry, "", true
 	}
 	return entry[:split], entry[split+1:], true
-}
-
-func javaProxyOptionsFromEnv(env []string) ([]string, error) {
-	return nil, fmt.Errorf("java proxy options are not implemented")
 }
 
 func cleanupPaths(paths []string) {
