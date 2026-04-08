@@ -250,41 +250,22 @@ func TestStageSandboxRootStagesDockerBuildTools(t *testing.T) {
 func TestStageSandboxRootUsesResolvedBuilderTooling(t *testing.T) {
 	dir := t.TempDir()
 	bboxPath := writeExecutableFixture(t, dir, "bbox")
-	buildkitdPath := writeExecutableFixture(t, dir, "buildkitd")
-	buildctlPath := writeExecutableFixture(t, dir, "buildctl")
-	runcPath := writeExecutableFixture(t, dir, "runc")
-	podmanPath := writeExecutableFixture(t, dir, "podman")
-	newuidmapPath := writeExecutableFixture(t, dir, "newuidmap")
-	newgidmapPath := writeExecutableFixture(t, dir, "newgidmap")
+	missingBuildkitdPath := filepath.Join(dir, "missing-buildkitd")
 
 	root, err := stageSandboxRoot(SandboxOptions{
 		DockerBuild: DockerBuildOptions{
 			Enabled:       true,
-			BuildkitdPath: buildkitdPath,
-			BuildctlPath:  buildctlPath,
-			RuncPath:      runcPath,
-			PodmanPath:    podmanPath,
-			NewuidmapPath: newuidmapPath,
-			NewgidmapPath: newgidmapPath,
+			BuildkitdPath: missingBuildkitdPath,
 		},
 	}, bboxPath, nil, TrafficModeProxy)
-	if err != nil {
-		t.Fatalf("stageSandboxRoot failed: %v", err)
+	if err == nil {
+		t.Fatalf("expected stageSandboxRoot to fail when builder tool resolution fails, got root=%q", root)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-
-	for _, sandboxPath := range []string{
-		defaultSandboxBuildkitdPath,
-		defaultSandboxBuildctlPath,
-		defaultSandboxRuncPath,
-	} {
-		staged := filepath.Join(root, strings.TrimPrefix(sandboxPath, string(filepath.Separator)))
-		if _, err := os.Stat(staged); err != nil {
-			t.Fatalf("expected staged builder tool at %q: %v", staged, err)
-		}
+	if !strings.Contains(err.Error(), "resolve buildkitd") {
+		t.Fatalf("expected buildkitd resolve error, got %v", err)
 	}
 
-	t.Fatalf("characterization: staging still resolves and stages builder tooling in one path without an independent seam")
+	t.Fatalf("characterization: stageSandboxRoot still depends on builder tool resolution/prereq wiring instead of an independent staging seam")
 }
 
 func TestStageSandboxRootDoesNotStageSeccompLauncher(t *testing.T) {

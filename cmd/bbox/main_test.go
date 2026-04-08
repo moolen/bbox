@@ -53,20 +53,31 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectory(t *testing.T) {
 func TestBuildConfigNormalizesFileFlagsAndEnvironmentIntoOneEffectiveShape(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested")
+	certsDir := filepath.Join(root, "certs")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(certsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	writeBBoxYAML(t, root, `
 workdir: ./from-file
+mount_ro:
+  - ./certs:/etc/ssl/certs
 env:
   - FROM_FILE=1
-clear_env: false
+clear_env: true
+traffic_mode: transparent
 `)
 
 	opts := cliOptions{
-		workDir: "./from-flag",
-		env:     []string{"FROM_FLAG=1"},
+		workDir:     "./from-flag",
+		env:         []string{"FROM_FLAG=1"},
+		trafficMode: "proxy",
+		flagOverrides: cliFlagOverrides{
+			TrafficMode: stringPtr("proxy"),
+		},
 	}
 	opts.clearEnvSet = true
 	opts.clearEnv = false
@@ -79,6 +90,17 @@ clear_env: false
 	wantWorkDir := filepath.Join(nested, "from-flag")
 	if cfg.sandbox.WorkDir != wantWorkDir {
 		t.Fatalf("workdir = %q want %q", cfg.sandbox.WorkDir, wantWorkDir)
+	}
+	if cfg.sandbox.TrafficMode != bbox.TrafficModeProxy {
+		t.Fatalf("traffic mode = %q want %q", cfg.sandbox.TrafficMode, bbox.TrafficModeProxy)
+	}
+	wantMount := bbox.Mount{
+		Source:   certsDir,
+		Target:   "/etc/ssl/certs",
+		ReadOnly: true,
+	}
+	if !containsMount(cfg.sandbox.Mounts, wantMount) {
+		t.Fatalf("expected file-relative mount to be resolved and included, mounts=%v want=%#v", cfg.sandbox.Mounts, wantMount)
 	}
 	if !containsString(cfg.sandbox.Env, "FROM_FLAG=1") || !containsString(cfg.sandbox.Env, "FROM_HOST=1") {
 		t.Fatalf("expected merged environment entries in sandbox env, got %v", cfg.sandbox.Env)

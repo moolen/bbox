@@ -392,12 +392,21 @@ func TestPlanForArgsInjectsProxyOnlyMavenBootstrapWithoutTrustBundle(t *testing.
 }
 
 func TestPlanForArgsDoesNotStartBuildkitd(t *testing.T) {
-	plan, err := PlanForArgs([]string{"build", "."}, nil, t.TempDir())
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	plan, err := PlanForArgs([]string{"build", "."}, nil, cwd)
 	if err != nil {
 		t.Fatalf("PlanForArgs failed: %v", err)
 	}
 	if len(plan.BuildctlArgs) == 0 {
 		t.Fatalf("expected plan to include buildctl invocation args, got %#v", plan)
+	}
+	if !containsArgSequence(plan.BuildctlArgs, []string{"--local", "context=" + cwd}) {
+		t.Fatalf("expected context path in plan args, got %v", plan.BuildctlArgs)
 	}
 
 	t.Fatalf("characterization: planner and buildkitd execution are not yet split behind independent seams")

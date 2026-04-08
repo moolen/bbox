@@ -1,6 +1,7 @@
 package ingress
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,8 +73,12 @@ func TestServeTransparentTCPConnAcceptsFragmentedTLSClientHelloPrefix(t *testing
 	<-done
 }
 
-func TestServeTransparentTCPConnCharacterizesIngressSeamGap(t *testing.T) {
-	t.Skip("characterization anchor: transparent ingress handshake, authorize, and relay behavior are still coupled in one unit")
+func TestDetectTransparentTCPProtocolReturnsUnknownForOpaquePayload(t *testing.T) {
+	reader := bufio.NewReaderSize(io.MultiReader(strings.NewReader("\x01\x02\x03opaque")), 32)
+	got := detectTransparentTCPProtocol(reader)
+	if got != transparentTCPProtocolUnknown {
+		t.Fatalf("protocol = %q want %q", got, transparentTCPProtocolUnknown)
+	}
 }
 
 func awaitSignal(t *testing.T, ch <-chan struct{}, label string) {

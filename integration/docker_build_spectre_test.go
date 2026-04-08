@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -97,7 +98,21 @@ func TestDockerBuildProxyModeFailsClosedForNonProxyAwareClient(t *testing.T) {
 }
 
 func TestDockerBuildSpectreCharacterizesPlannerExecutorBoundary(t *testing.T) {
-	t.Skip("characterization anchor: integration coverage still exercises docker build planning and execution as one flow")
+	path := filepath.Join(t.TempDir(), "subuid")
+	if err := os.WriteFile(path, []byte("nobody:100000:65536\n"), 0o644); err != nil {
+		t.Fatalf("write subordinate id file: %v", err)
+	}
+
+	err := requireSubordinateIDMapping(path)
+	if err == nil {
+		t.Fatalf("expected subordinate id mapping check to fail for missing current user entry in %q", path)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("expected error to reference %q, got %v", path, err)
+	}
+	if !strings.Contains(err.Error(), "does not contain an entry for") {
+		t.Fatalf("expected missing-entry error detail, got %v", err)
+	}
 }
 
 type dockerBuildRunSpec struct {
