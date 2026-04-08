@@ -8,6 +8,7 @@ import (
 )
 
 type cliOptions struct {
+	configPath          string
 	name                string
 	workDir             string
 	binaries            []string
@@ -67,6 +68,7 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 	}
 
 	flags := cmd.Flags()
+	flags.StringVar(&opts.configPath, "config", "", "path to bbox config file")
 	flags.StringVar(&opts.name, "name", "", "sandbox name")
 	flags.StringVar(&opts.workDir, "workdir", "", "working directory inside the sandbox")
 	flags.StringArrayVar(&opts.binaries, "bin", nil, "extra binary to stage into the sandbox")

@@ -241,6 +241,58 @@ func TestLoadCLIFileConfigAcceptsEmptyFile(t *testing.T) {
 	}
 }
 
+func TestLoadEffectiveCLIConfigUsesExplicitConfigPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "bbox.yaml"), []byte("traffic_mode: proxy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configDir := filepath.Join(root, "configs")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	explicitPath := filepath.Join(configDir, "explicit.yaml")
+	if err := os.WriteFile(explicitPath, []byte("traffic_mode: transparent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loadEffectiveCLIConfig(cliOptions{configPath: filepath.Join("configs", "explicit.yaml")}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TrafficMode != "transparent" {
+		t.Fatalf("got traffic_mode %q want %q", got.TrafficMode, "transparent")
+	}
+}
+
+func TestLoadEffectiveCLIConfigExplicitPathErrorsWhenMissing(t *testing.T) {
+	root := t.TempDir()
+
+	_, err := loadEffectiveCLIConfig(cliOptions{configPath: "missing.yaml"}, root)
+	if err == nil {
+		t.Fatal("expected missing explicit config to fail")
+	}
+	if !strings.Contains(err.Error(), "missing.yaml") {
+		t.Fatalf("expected missing path in error, got %v", err)
+	}
+}
+
+func TestLoadEffectiveCLIConfigExplicitPathErrorsForDirectory(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "configs")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadEffectiveCLIConfig(cliOptions{configPath: "configs"}, root)
+	if err == nil {
+		t.Fatal("expected directory explicit config to fail")
+	}
+	if !strings.Contains(err.Error(), "configs") {
+		t.Fatalf("expected directory path in error, got %v", err)
+	}
+}
+
 func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 	defaults := defaultCLIFileConfig()
 	fileCfg := cliFileConfig{

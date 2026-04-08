@@ -412,6 +412,53 @@ report_request_summary: false
 	}
 }
 
+func TestRootCommandConfigFlagLoadsExplicitConfigAndStillAllowsFlagOverrides(t *testing.T) {
+	root := t.TempDir()
+	writeBBoxYAML(t, root, `
+traffic_mode: proxy
+access_log: json
+`)
+
+	configDir := filepath.Join(root, "configs")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	explicitPath := filepath.Join(configDir, "explicit.yaml")
+	if err := os.WriteFile(explicitPath, []byte("traffic_mode: transparent\naccess_log: off\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var got runConfig
+	cmd := newRootCommand(commandDeps{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getwd: func() (string, error) {
+			return root, nil
+		},
+		environ: func() []string { return nil },
+		run: func(cfg runConfig) error {
+			got = cfg
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{
+		"--config", filepath.Join("configs", "explicit.yaml"),
+		"--traffic-mode=proxy",
+		"--",
+		"bash",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got.sandbox.TrafficMode != bbox.TrafficModeProxy {
+		t.Fatalf("expected changed traffic-mode flag to win, got %q", got.sandbox.TrafficMode)
+	}
+	if got.accessLogMode != "off" {
+		t.Fatalf("expected explicit config access_log to be loaded, got %q", got.accessLogMode)
+	}
+}
+
 func TestBuildConfigWiresDockerSocketOptionsIntoManagerAndSandbox(t *testing.T) {
 	root := t.TempDir()
 	writeBBoxYAML(t, root, `

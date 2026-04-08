@@ -52,23 +52,35 @@ func loadEffectiveCLIConfig(opts cliOptions, absCWD string) (effectiveCLIConfig,
 	defaults.MaxRequestBodyBytes = 64 << 10
 	defaults.hasMaxRequestBodyBytes = true
 
-	var fileCfg cliFileConfig
-	configPath, err := findConfigFile(absCWD)
+	fileCfg, err := loadSelectedCLIFileConfig(opts.configPath, absCWD)
 	if err != nil {
 		return effectiveCLIConfig{}, err
-	}
-	if configPath != "" {
-		loaded, err := loadCLIFileConfig(configPath)
-		if err != nil {
-			return effectiveCLIConfig{}, err
-		}
-		fileCfg = loaded
 	}
 
 	mergedCfg := mergeCLIConfig(defaults, fileCfg, opts.flagOverrides, opts.audit)
 	mergedCfg = mergeCLIConfigLayer(mergedCfg, buildRuntimeCLIConfigLayer(opts))
 
 	return toEffectiveCLIConfig(mergedCfg, absCWD), nil
+}
+
+func loadSelectedCLIFileConfig(configPath string, absCWD string) (cliFileConfig, error) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath != "" {
+		resolvedPath, err := absPathFromCWD(configPath, absCWD)
+		if err != nil {
+			return cliFileConfig{}, fmt.Errorf("resolve config file %q: %w", configPath, err)
+		}
+		return loadCLIFileConfig(resolvedPath)
+	}
+
+	discoveredPath, err := findConfigFile(absCWD)
+	if err != nil {
+		return cliFileConfig{}, err
+	}
+	if discoveredPath == "" {
+		return cliFileConfig{}, nil
+	}
+	return loadCLIFileConfig(discoveredPath)
 }
 
 func buildRuntimeCLIConfigLayer(opts cliOptions) cliFileConfig {
