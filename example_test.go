@@ -113,7 +113,7 @@ func ExampleProxyManager_NewSandbox() {
 		Name:     "docs-example",
 		Binaries: []string{"curl"},
 		Mounts: []bbox.Mount{
-			{Source: "/tmp", Target: "/workspace"},
+			{Type: bbox.MountTypeBind, Source: "/tmp", Target: "/workspace"},
 		},
 		Policy: bbox.NetworkPolicy{
 			Rules: []bbox.PolicyRule{

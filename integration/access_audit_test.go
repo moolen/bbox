@@ -286,7 +286,7 @@ func main() {
 		sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
 			Name:        "audit-dns-mode",
 			Binaries:    []string{dnsClient},
-			Mounts:      []bbox.Mount{{Source: filepath.Dir(dnsClient), Target: "/workspace", ReadOnly: true}},
+			Mounts:      []bbox.Mount{{Type: bbox.MountTypeBind, Source: filepath.Dir(dnsClient), Target: "/workspace", ReadOnly: true}},
 			TrafficMode: bbox.TrafficModeTransparent,
 			PolicyMode:  bbox.PolicyModeAudit,
 			Policy: bbox.NetworkPolicy{

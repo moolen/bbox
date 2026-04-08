@@ -245,7 +245,7 @@ func main() {
 		Name:     "proxy-mode-https-tunnel",
 		Binaries: []string{clientPath},
 		Mounts: []bbox.Mount{
-			{Source: filepath.Dir(clientPath), Target: "/workspace", ReadOnly: true},
+			{Type: bbox.MountTypeBind, Source: filepath.Dir(clientPath), Target: "/workspace", ReadOnly: true},
 		},
 		Policy: bbox.NetworkPolicy{
 			Rules: []bbox.PolicyRule{

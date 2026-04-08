@@ -324,11 +324,8 @@ func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {
 		if mode == TrafficModeTransparent {
 			return errUnsupportedPlatformFeature("darwin", "transparent traffic mode")
 		}
-		for _, mount := range opts.Mounts {
-			if mount.ReadOnly {
-				return errUnsupportedPlatformFeature("darwin", "mount_ro")
-			}
-			return errUnsupportedPlatformFeature("darwin", "mount_rw")
+		if len(opts.Mounts) > 0 {
+			return fmt.Errorf("mounts are not supported on darwin")
 		}
 		if !isZeroSeccompOptions(opts.Seccomp) {
 			return errUnsupportedPlatformFeature("darwin", "seccomp")

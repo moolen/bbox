@@ -253,6 +253,7 @@ func TestNewSandboxRejectsDockerSocketMountPathOverlap(t *testing.T) {
 		Name: "docker-overlap",
 		Mounts: []Mount{
 			{
+				Type:     MountTypeBind,
 				Source:   t.TempDir(),
 				Target:   "/var/run",
 				ReadOnly: false,

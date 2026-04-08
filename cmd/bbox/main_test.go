@@ -576,7 +576,7 @@ docker_socket:
 	}
 }
 
-func TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime(t *testing.T) {
+func TestBuildConfigDarwinRejectsStructuredMountsAtRuntime(t *testing.T) {
 	prevPlatform := cliPlatform
 	cliPlatform = "darwin"
 	t.Cleanup(func() {
@@ -607,7 +607,7 @@ func TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime(t *testing
 	if err == nil {
 		t.Fatal("expected explicit mount to fail on darwin")
 	}
-	if !strings.Contains(err.Error(), "mount_ro is not supported on darwin") {
+	if !strings.Contains(err.Error(), "mounts are not supported on darwin") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -934,7 +934,7 @@ func TestBuildConfigAuditShorthandEnablesAuditModeAndReporting(t *testing.T) {
 	}
 }
 
-func TestBuildConfigResolvesRequestedBinariesAgainstEffectivePATHAndAddsPathMounts(t *testing.T) {
+func TestBuildConfigPathAvailabilityMountsUseTypedBindMounts(t *testing.T) {
 	cwd := t.TempDir()
 	pathRoot := filepath.Join(t.TempDir(), "toolchain")
 	pathDir := filepath.Join(pathRoot, "bin")
@@ -963,7 +963,13 @@ func TestBuildConfigResolvesRequestedBinariesAgainstEffectivePATHAndAddsPathMoun
 	if got := envValue(cfg.sandbox.Env, "PATH"); got != pathDir {
 		t.Fatalf("expected sandbox PATH %q, got %q", pathDir, got)
 	}
-	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: pathRoot, Target: pathRoot, ReadOnly: true}) {
+	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{
+		Type:     bbox.MountTypeBind,
+		Source:   pathRoot,
+		Target:   pathRoot,
+		ReadOnly: true,
+		Mode:     0,
+	}) {
 		t.Fatalf("expected PATH root mount for %q in %v", pathRoot, cfg.sandbox.Mounts)
 	}
 }
@@ -1134,11 +1140,25 @@ func containsString(values []string, want string) bool {
 
 func containsMount(values []bbox.Mount, want bbox.Mount) bool {
 	for _, value := range values {
-		if value == want {
+		if mountsEqual(value, want) {
 			return true
 		}
 	}
 	return false
+}
+
+func mountsEqual(got bbox.Mount, want bbox.Mount) bool {
+	if got.Type != want.Type {
+		return false
+	}
+	if want.Type == bbox.MountTypeBind {
+		return got.Type == want.Type &&
+			got.Source == want.Source &&
+			got.Target == want.Target &&
+			got.ReadOnly == want.ReadOnly &&
+			got.Mode == want.Mode
+	}
+	return got == want
 }
 
 func envValue(values []string, key string) string {

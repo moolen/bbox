@@ -78,12 +78,12 @@ func TestNewSandboxDarwinRejectsMounts(t *testing.T) {
 	defer manager.Close()
 
 	_, err = manager.NewSandbox(context.Background(), SandboxOptions{
-		Mounts: []Mount{{Source: t.TempDir(), Target: "/workspace", ReadOnly: true}},
+		Mounts: []Mount{{Type: MountTypeBind, Source: t.TempDir(), Target: "/workspace", ReadOnly: true}},
 	})
 	if err == nil {
 		t.Fatal("expected mounts to fail on darwin")
 	}
-	if !strings.Contains(err.Error(), "mount_ro is not supported on darwin") {
+	if !strings.Contains(err.Error(), "mounts are not supported on darwin") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
