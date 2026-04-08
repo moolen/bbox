@@ -202,6 +202,20 @@ func TestValidateSandboxOptionsAllowsDockerBuildInTransparentModeWithMITM(t *tes
 	}
 }
 
+func TestValidateSandboxOptionsDoesNotResolveDockerBuildTooling(t *testing.T) {
+	opts := SandboxOptions{
+		TrafficMode: TrafficModeTransparent,
+		DockerBuild: DockerBuildOptions{
+			Enabled:       true,
+			BuildkitdPath: filepath.Join(t.TempDir(), "missing-buildkitd"),
+		},
+	}
+
+	if err := validateSandboxOptions(opts, true); err != nil {
+		t.Fatalf("expected validation to ignore docker build host tooling resolution, got %v", err)
+	}
+}
+
 func TestValidateSandboxOptionsRejectsUnknownPolicyMode(t *testing.T) {
 	opts := SandboxOptions{PolicyMode: PolicyMode("broken")}
 
