@@ -71,6 +71,10 @@ func TestServeTransparentTCPConnAcceptsFragmentedTLSClientHelloPrefix(t *testing
 	<-done
 }
 
+func TestServeTransparentTCPConnCharacterizesIngressSeamGap(t *testing.T) {
+	t.Skip("characterization anchor: transparent ingress handshake, authorize, and relay behavior are still coupled in one unit")
+}
+
 func awaitSignal(t *testing.T, ch <-chan struct{}, label string) {
 	t.Helper()
 

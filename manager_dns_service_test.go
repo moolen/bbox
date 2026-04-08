@@ -2,7 +2,9 @@ package bbox
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"io"
 	"net"
@@ -220,6 +222,81 @@ func TestProxyManagerHandleDNSRequestStripsAAAAInTransparentMode(t *testing.T) {
 	if msg.Answers[0].Header.Type != dnsmessage.TypeA {
 		t.Fatalf("answer type = %v, want %v", msg.Answers[0].Header.Type, dnsmessage.TypeA)
 	}
+}
+
+func TestHelperClientRunRoundTripPreservesStreamOrdering(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	client := newHelperClient(nil, "sandbox-a", clientSide)
+	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = serverSide.Close() })
+
+	go func() {
+		client.loopDone <- client.readLoop()
+	}()
+
+	var (
+		stdout bytes.Buffer
+		stderr bytes.Buffer
+	)
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(serverSide)
+		enc := gob.NewEncoder(serverSide)
+
+		var req helperproto.Envelope
+		if err := dec.Decode(&req); err != nil {
+			serverErrCh <- err
+			return
+		}
+		if req.ExecRequest == nil {
+			serverErrCh <- errors.New("expected exec request")
+			return
+		}
+
+		for _, frame := range []helperproto.StreamFrame{
+			{Stream: helperproto.StreamStdout, Data: []byte("stdout-one\n")},
+			{Stream: helperproto.StreamStdout, Data: []byte("stdout-two\n")},
+			{Stream: helperproto.StreamStderr, Data: []byte("stderr-one\n")},
+			{Stream: helperproto.StreamStderr, Data: []byte("stderr-two\n")},
+		} {
+			if err := enc.Encode(&helperproto.Envelope{ID: req.ID, StreamFrame: &frame}); err != nil {
+				serverErrCh <- err
+				return
+			}
+		}
+
+		serverErrCh <- enc.Encode(&helperproto.Envelope{
+			ID: req.ID,
+			ExecResult: &helperproto.ExecResult{
+				ExitCode: 0,
+			},
+		})
+	}()
+
+	result, err := client.Run(context.Background(), []string{"/bin/sh"}, RunOptions{
+		Interactive: true,
+		Stdout:      &stdout,
+		Stderr:      &stderr,
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("unexpected run result: %#v", result)
+	}
+	if got := stdout.String(); got != "stdout-one\nstdout-two\n" {
+		t.Fatalf("stdout ordering = %q", got)
+	}
+	if got := stderr.String(); got != "stderr-one\nstderr-two\n" {
+		t.Fatalf("stderr ordering = %q", got)
+	}
+
+	if err := <-serverErrCh; err != nil {
+		t.Fatalf("server side failed: %v", err)
+	}
+
+	t.Fatalf("characterization: helper client run round-trip and stream routing are not yet isolated behind an independent seam")
 }
 
 func stubDNSRoundTripConn(query []byte, response []byte) net.Conn {

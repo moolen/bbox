@@ -247,6 +247,46 @@ func TestStageSandboxRootStagesDockerBuildTools(t *testing.T) {
 	}
 }
 
+func TestStageSandboxRootUsesResolvedBuilderTooling(t *testing.T) {
+	dir := t.TempDir()
+	bboxPath := writeExecutableFixture(t, dir, "bbox")
+	buildkitdPath := writeExecutableFixture(t, dir, "buildkitd")
+	buildctlPath := writeExecutableFixture(t, dir, "buildctl")
+	runcPath := writeExecutableFixture(t, dir, "runc")
+	podmanPath := writeExecutableFixture(t, dir, "podman")
+	newuidmapPath := writeExecutableFixture(t, dir, "newuidmap")
+	newgidmapPath := writeExecutableFixture(t, dir, "newgidmap")
+
+	root, err := stageSandboxRoot(SandboxOptions{
+		DockerBuild: DockerBuildOptions{
+			Enabled:       true,
+			BuildkitdPath: buildkitdPath,
+			BuildctlPath:  buildctlPath,
+			RuncPath:      runcPath,
+			PodmanPath:    podmanPath,
+			NewuidmapPath: newuidmapPath,
+			NewgidmapPath: newgidmapPath,
+		},
+	}, bboxPath, nil, TrafficModeProxy)
+	if err != nil {
+		t.Fatalf("stageSandboxRoot failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	for _, sandboxPath := range []string{
+		defaultSandboxBuildkitdPath,
+		defaultSandboxBuildctlPath,
+		defaultSandboxRuncPath,
+	} {
+		staged := filepath.Join(root, strings.TrimPrefix(sandboxPath, string(filepath.Separator)))
+		if _, err := os.Stat(staged); err != nil {
+			t.Fatalf("expected staged builder tool at %q: %v", staged, err)
+		}
+	}
+
+	t.Fatalf("characterization: staging still resolves and stages builder tooling in one path without an independent seam")
+}
+
 func TestStageSandboxRootDoesNotStageSeccompLauncher(t *testing.T) {
 	bboxPath := filepath.Join(t.TempDir(), "bbox")
 	if err := os.WriteFile(bboxPath, []byte("#!/bin/sh\n"), 0o755); err != nil {

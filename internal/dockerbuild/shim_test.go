@@ -391,6 +391,18 @@ func TestPlanForArgsInjectsProxyOnlyMavenBootstrapWithoutTrustBundle(t *testing.
 	}
 }
 
+func TestPlanForArgsDoesNotStartBuildkitd(t *testing.T) {
+	plan, err := PlanForArgs([]string{"build", "."}, nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("PlanForArgs failed: %v", err)
+	}
+	if len(plan.BuildctlArgs) == 0 {
+		t.Fatalf("expected plan to include buildctl invocation args, got %#v", plan)
+	}
+
+	t.Fatalf("characterization: planner and buildkitd execution are not yet split behind independent seams")
+}
+
 func TestWithBuilderRuntimeEnvAddsCgoResolverWhenUnset(t *testing.T) {
 	got := withBuilderRuntimeEnv([]string{"PATH=/usr/bin"})
 	if !containsEnvEntry(got, "GODEBUG=netdns=cgo") {

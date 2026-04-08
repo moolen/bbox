@@ -412,6 +412,19 @@ func TestMergeCLIConfigPreservesDockerBuildConfig(t *testing.T) {
 	}
 }
 
+func TestMergeCLIConfigLeavesPathNormalizationToBuildConfig(t *testing.T) {
+	defaults := defaultCLIFileConfig()
+	fileCfg := cliFileConfig{
+		WorkDir:    "./workspace",
+		hasWorkDir: true,
+	}
+
+	got := mergeCLIConfig(defaults, fileCfg, cliFlagOverrides{}, false)
+	if got.WorkDir != "./workspace" {
+		t.Fatalf("got workdir %q want %q", got.WorkDir, "./workspace")
+	}
+}
+
 func stringPtr(v string) *string { return &v }
 
 func boolPtr(v bool) *bool { return &v }

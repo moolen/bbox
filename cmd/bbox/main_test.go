@@ -50,6 +50,43 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestBuildConfigNormalizesFileFlagsAndEnvironmentIntoOneEffectiveShape(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeBBoxYAML(t, root, `
+workdir: ./from-file
+env:
+  - FROM_FILE=1
+clear_env: false
+`)
+
+	opts := cliOptions{
+		workDir: "./from-flag",
+		env:     []string{"FROM_FLAG=1"},
+	}
+	opts.clearEnvSet = true
+	opts.clearEnv = false
+
+	cfg, err := buildConfig(opts, []string{"bash", "-lc", "pwd"}, nested, []string{"FROM_HOST=1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantWorkDir := filepath.Join(nested, "from-flag")
+	if cfg.sandbox.WorkDir != wantWorkDir {
+		t.Fatalf("workdir = %q want %q", cfg.sandbox.WorkDir, wantWorkDir)
+	}
+	if !containsString(cfg.sandbox.Env, "FROM_FLAG=1") || !containsString(cfg.sandbox.Env, "FROM_HOST=1") {
+		t.Fatalf("expected merged environment entries in sandbox env, got %v", cfg.sandbox.Env)
+	}
+
+	t.Fatalf("characterization: effective config normalization is still spread across buildConfig, loadCLIFileConfig, and merge helpers")
+}
+
 func TestBuildCLIProcessRunOptionsForwardsStdinWithoutTTY(t *testing.T) {
 	stdin, err := os.Open(os.DevNull)
 	if err != nil {

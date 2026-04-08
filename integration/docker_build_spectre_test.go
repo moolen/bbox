@@ -96,6 +96,10 @@ func TestDockerBuildProxyModeFailsClosedForNonProxyAwareClient(t *testing.T) {
 	}
 }
 
+func TestDockerBuildSpectreCharacterizesPlannerExecutorBoundary(t *testing.T) {
+	t.Skip("characterization anchor: integration coverage still exercises docker build planning and execution as one flow")
+}
+
 type dockerBuildRunSpec struct {
 	name        string
 	trafficMode bbox.TrafficMode
