@@ -19,9 +19,9 @@ type AccessLogEntry struct {
 	SandboxID          string
 	TrafficMode        TrafficMode
 	Kind               string
-	Protocol           string
-	ProtocolSource     string
-	ProtocolConfidence string
+	Protocol           string `json:"Protocol,omitempty"`
+	ProtocolSource     string `json:"ProtocolSource,omitempty"`
+	ProtocolConfidence string `json:"ProtocolConfidence,omitempty"`
 	Host               string
 	Port               int
 	Method             string

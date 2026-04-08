@@ -663,6 +663,38 @@ func TestAccessLogEntryIncludesProtocolMetadata(t *testing.T) {
 	}
 }
 
+func TestDefaultJSONAccessLoggerOmitsEmptyProtocolMetadata(t *testing.T) {
+	var buf strings.Builder
+	logger := newDefaultJSONAccessLoggerWithMode(&buf, false)
+
+	logger.LogAccess(AccessLogEntry{
+		Time:          time.Date(2026, 4, 8, 10, 5, 0, 0, time.UTC),
+		SandboxID:     "sandbox-a",
+		TrafficMode:   TrafficModeTransparent,
+		Kind:          "http",
+		Host:          "example.com",
+		Port:          443,
+		Method:        "GET",
+		Path:          "/healthz",
+		Allowed:       true,
+		StatusCode:    200,
+		Result:        "allowed",
+		PolicyMode:    PolicyModeEnforce,
+		PolicyAllowed: true,
+	})
+
+	out := buf.String()
+	if strings.Contains(out, "\"Protocol\":") {
+		t.Fatalf("expected empty Protocol to be omitted, got %q", out)
+	}
+	if strings.Contains(out, "\"ProtocolSource\":") {
+		t.Fatalf("expected empty ProtocolSource to be omitted, got %q", out)
+	}
+	if strings.Contains(out, "\"ProtocolConfidence\":") {
+		t.Fatalf("expected empty ProtocolConfidence to be omitted, got %q", out)
+	}
+}
+
 func TestAccessedDomainsTracksTrafficModeKinds(t *testing.T) {
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
