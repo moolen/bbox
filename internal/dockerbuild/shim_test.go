@@ -180,13 +180,13 @@ func TestPlanForArgsInjectsTrustBundleIntoRunStages(t *testing.T) {
 	if strings.Count(got, "ENV NPM_CONFIG_CAFILE=/etc/ssl/certs/ca-certificates.crt") != 2 {
 		t.Fatalf("expected NPM_CONFIG_CAFILE env injection for the two RUN stages, got:\n%s", got)
 	}
-	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS=") != 2 {
+	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS ") != 2 {
 		t.Fatalf("expected JAVA_TOOL_OPTIONS injection only once per stage, got:\n%s", got)
 	}
 	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
 		t.Fatalf("did not expect Maven settings copy without proxy env, got:\n%s", got)
 	}
-	if strings.Contains(got, "ENV MAVEN_ARGS=") {
+	if strings.Contains(got, "ENV MAVEN_ARGS ") {
 		t.Fatalf("did not expect MAVEN_ARGS without proxy env, got:\n%s", got)
 	}
 	if strings.Contains(got, "FROM scratch AS final\nCOPY --from=bbox_mitm_trust /bbox-trust-bundle.pem") {
@@ -235,16 +235,15 @@ func TestPlanForArgsInjectsTrustBundleBeforeEveryRun(t *testing.T) {
 	expectedStageBootstrap := trustStageBootstrapSnippet(trustInjectionOptions{
 		pemPath:            injectedTrustBundlePrimaryPath,
 		javaTruststorePath: injectedJavaTruststorePath,
-		javaTruststoreType: bboxJavaTruststoreType,
-		javaTruststorePass: bboxJavaTruststorePassword,
+		javaToolOptions:    javaTruststoreOptions(generatedTruststore{Path: "staged", Type: bboxJavaTruststoreType, Password: bboxJavaTruststorePassword}),
 	})
 	if strings.Count(got, "COPY --from=bbox_mitm_trust /bbox-trust-bundle.pem /etc/ssl/certs/ca-certificates.crt") != 3 {
 		t.Fatalf("expected trust copy before each RUN, got:\n%s", got)
 	}
-	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS=") != 2 {
+	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS ") != 2 {
 		t.Fatalf("expected JAVA_TOOL_OPTIONS injection once per stage, got:\n%s", got)
 	}
-	if strings.Count(got, "ENV MAVEN_ARGS=") != 0 {
+	if strings.Count(got, "ENV MAVEN_ARGS ") != 0 {
 		t.Fatalf("did not expect MAVEN_ARGS without proxy env, got:\n%s", got)
 	}
 	if !strings.Contains(got, expectedStageBootstrap+expectedPerRunSnippet+"RUN apk add --no-cache ca-certificates curl\n") {
@@ -300,14 +299,17 @@ func TestPlanForArgsInjectsMavenOnlyOnFirstRunPerStageWhenProxyPresent(t *testin
 	})
 	expectedStageBootstrap := trustStageBootstrapSnippet(trustInjectionOptions{
 		javaTruststorePath: injectedJavaTruststorePath,
-		javaTruststoreType: bboxJavaTruststoreType,
-		javaTruststorePass: bboxJavaTruststorePassword,
-		mavenSettingsPath:  injectedMavenSettingsPath,
+		javaToolOptions: append(
+			javaTruststoreOptions(generatedTruststore{Path: "staged", Type: bboxJavaTruststoreType, Password: bboxJavaTruststorePassword}),
+			"-Dhttps.proxyHost=127.0.0.1",
+			"-Dhttps.proxyPort=3128",
+		),
+		mavenSettingsPath: injectedMavenSettingsPath,
 	})
-	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS=") != 1 {
+	if strings.Count(got, "ENV JAVA_TOOL_OPTIONS ") != 1 {
 		t.Fatalf("expected single JAVA_TOOL_OPTIONS injection for one stage, got:\n%s", got)
 	}
-	if strings.Count(got, "ENV MAVEN_ARGS=") != 1 {
+	if strings.Count(got, "ENV MAVEN_ARGS ") != 1 {
 		t.Fatalf("expected single MAVEN_ARGS injection for one stage, got:\n%s", got)
 	}
 	if !strings.Contains(got, expectedStageBootstrap+expectedPerRunSnippet+"RUN echo one\n") {
@@ -318,6 +320,74 @@ func TestPlanForArgsInjectsMavenOnlyOnFirstRunPerStageWhenProxyPresent(t *testin
 	}
 	if strings.Contains(got, expectedStageBootstrap+expectedPerRunSnippet+"RUN echo two\n") {
 		t.Fatalf("did not expect stage bootstrap before second RUN in same stage, got:\n%s", got)
+	}
+}
+
+func TestPlanForArgsInjectsProxyOnlyMavenBootstrapWithoutTrustBundle(t *testing.T) {
+	cwd := t.TempDir()
+	dockerfilePath := filepath.Join(cwd, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte(strings.Join([]string{
+		"FROM maven:3.9.9-eclipse-temurin-21",
+		"RUN mvn -v",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	plan, err := PlanForArgs([]string{"build", "."}, []string{
+		"BBOX_TRUST_BUNDLE_PATH=" + filepath.Join(cwd, "missing-trust-bundle.pem"),
+		"HTTPS_PROXY=http://127.0.0.1:3128",
+	}, cwd)
+	if err != nil {
+		t.Fatalf("PlanForArgs failed: %v", err)
+	}
+
+	dockerfileLocal := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "dockerfile=")
+	if dockerfileLocal == "" {
+		t.Fatalf("expected rewritten dockerfile local in %v", plan.BuildctlArgs)
+	}
+	bboxTrustLocal := argValueForRepeatedFlag(plan.BuildctlArgs, "--local", "bbox_mitm_trust=")
+	if bboxTrustLocal == "" {
+		t.Fatalf("expected staged local context for Maven settings in %v", plan.BuildctlArgs)
+	}
+
+	settingsPath := filepath.Join(bboxTrustLocal, bboxMavenSettingsFileName)
+	info, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatalf("expected staged Maven settings without trust bundle: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("expected staged Maven settings to be non-empty")
+	}
+	if _, err := os.Stat(filepath.Join(bboxTrustLocal, bboxTrustBundleFileName)); !os.IsNotExist(err) {
+		t.Fatalf("expected no staged trust bundle without trust input, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bboxTrustLocal, bboxJavaTruststoreFileName)); !os.IsNotExist(err) {
+		t.Fatalf("expected no staged Java truststore without trust input, got %v", err)
+	}
+
+	filename := argValueForOpt(plan.BuildctlArgs, "filename=")
+	rewrittenPath := filepath.Join(dockerfileLocal, filename)
+	content, err := os.ReadFile(rewrittenPath)
+	if err != nil {
+		t.Fatalf("read rewritten Dockerfile %q: %v", rewrittenPath, err)
+	}
+
+	got := string(content)
+	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
+		t.Fatalf("expected Maven settings copy without trust bundle, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ENV MAVEN_ARGS --settings /etc/maven/bbox-settings.xml ${MAVEN_ARGS}") {
+		t.Fatalf("expected MAVEN_ARGS injection without trust bundle, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=3128 ${JAVA_TOOL_OPTIONS}") {
+		t.Fatalf("expected proxy-only JAVA_TOOL_OPTIONS injection without trust bundle, got:\n%s", got)
+	}
+	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-trust-bundle.pem") {
+		t.Fatalf("did not expect PEM trust injection without trust bundle, got:\n%s", got)
+	}
+	if strings.Contains(got, "ENV SSL_CERT_FILE=") {
+		t.Fatalf("did not expect SSL_CERT_FILE injection without trust bundle, got:\n%s", got)
 	}
 }
 
@@ -486,21 +556,39 @@ func TestTrustBundleInjectionSnippetInjectsJavaTrustWithoutMaven(t *testing.T) {
 	got := trustBundleInjectionSnippet(trustInjectionOptions{
 		pemPath:            injectedTrustBundlePrimaryPath,
 		javaTruststorePath: injectedJavaTruststorePath,
-		javaTruststoreType: bboxJavaTruststoreType,
-		javaTruststorePass: bboxJavaTruststorePassword,
+		javaToolOptions:    javaTruststoreOptions(generatedTruststore{Path: "staged", Type: bboxJavaTruststoreType, Password: bboxJavaTruststorePassword}),
 	})
 
 	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
 		t.Fatalf("expected truststore copy in %s", got)
 	}
-	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS}") {
+	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS -Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS}") {
 		t.Fatalf("expected JAVA_TOOL_OPTIONS truststore config preserving existing values in %s", got)
 	}
 	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
 		t.Fatalf("did not expect Maven settings copy in %s", got)
 	}
-	if strings.Contains(got, "ENV MAVEN_ARGS=") {
+	if strings.Contains(got, "ENV MAVEN_ARGS ") {
 		t.Fatalf("did not expect MAVEN_ARGS injection in %s", got)
+	}
+}
+
+func TestTrustBundleInjectionSnippetInjectsJavaProxyWithoutTruststore(t *testing.T) {
+	got := trustBundleInjectionSnippet(trustInjectionOptions{
+		javaToolOptions: []string{
+			"-Dhttps.proxyHost=proxy.internal",
+			"-Dhttps.proxyPort=8443",
+		},
+	})
+
+	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
+		t.Fatalf("did not expect truststore copy in %s", got)
+	}
+	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS -Dhttps.proxyHost=proxy.internal -Dhttps.proxyPort=8443 ${JAVA_TOOL_OPTIONS}") {
+		t.Fatalf("expected proxy JAVA_TOOL_OPTIONS injection in %s", got)
+	}
+	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-trust-bundle.pem") {
+		t.Fatalf("did not expect PEM trust injection in %s", got)
 	}
 }
 
@@ -513,13 +601,13 @@ func TestTrustBundleInjectionSnippetInjectsMavenWithoutJavaTrust(t *testing.T) {
 	if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
 		t.Fatalf("did not expect truststore copy in %s", got)
 	}
-	if strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=") {
+	if strings.Contains(got, "ENV JAVA_TOOL_OPTIONS ") {
 		t.Fatalf("did not expect JAVA_TOOL_OPTIONS injection in %s", got)
 	}
 	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
 		t.Fatalf("expected Maven settings copy in %s", got)
 	}
-	if !strings.Contains(got, "ENV MAVEN_ARGS=--settings /etc/maven/bbox-settings.xml ${MAVEN_ARGS}") {
+	if !strings.Contains(got, "ENV MAVEN_ARGS --settings /etc/maven/bbox-settings.xml ${MAVEN_ARGS}") {
 		t.Fatalf("expected MAVEN_ARGS injection preserving existing values in %s", got)
 	}
 }

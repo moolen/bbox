@@ -176,6 +176,37 @@ func dnsQuestionHosts(payload []byte) ([]string, error) {
 	return hosts, nil
 }
 
+func stripAAAARecords(payload []byte) ([]byte, error) {
+	var msg dnsmessage.Message
+	if err := msg.Unpack(payload); err != nil {
+		return nil, fmt.Errorf("parse dns response: %w", err)
+	}
+
+	msg.Answers = filterAAAAResources(msg.Answers)
+	msg.Authorities = filterAAAAResources(msg.Authorities)
+	msg.Additionals = filterAAAAResources(msg.Additionals)
+
+	filtered, err := msg.Pack()
+	if err != nil {
+		return nil, fmt.Errorf("pack dns response: %w", err)
+	}
+	return filtered, nil
+}
+
+func filterAAAAResources(resources []dnsmessage.Resource) []dnsmessage.Resource {
+	if len(resources) == 0 {
+		return nil
+	}
+	filtered := make([]dnsmessage.Resource, 0, len(resources))
+	for _, resource := range resources {
+		if resource.Header.Type == dnsmessage.TypeAAAA {
+			continue
+		}
+		filtered = append(filtered, resource)
+	}
+	return filtered
+}
+
 func normalizeDNSNetwork(network string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(network)) {
 	case "", "udp", "udp4", "udp6":

@@ -124,13 +124,13 @@ func TestPrepareBuildInputsStagesJavaTruststoreAndMavenSettings(t *testing.T) {
 	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
 		t.Fatalf("expected staged JVM truststore copy to be injected, got:\n%s", got)
 	}
-	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS}") {
+	if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS -Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=3128 ${JAVA_TOOL_OPTIONS}") {
 		t.Fatalf("expected JAVA_TOOL_OPTIONS truststore config to be injected, got:\n%s", got)
 	}
 	if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
 		t.Fatalf("expected staged Maven settings copy to be injected, got:\n%s", got)
 	}
-	if !strings.Contains(got, "ENV MAVEN_ARGS=--settings /etc/maven/bbox-settings.xml ${MAVEN_ARGS}") {
+	if !strings.Contains(got, "ENV MAVEN_ARGS --settings /etc/maven/bbox-settings.xml ${MAVEN_ARGS}") {
 		t.Fatalf("expected MAVEN_ARGS settings path to be injected, got:\n%s", got)
 	}
 
@@ -181,13 +181,13 @@ func TestPrepareBuildInputsStagesJavaTruststoreAndMavenSettings(t *testing.T) {
 		if !strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-truststore.p12 /etc/ssl/certs/bbox-truststore.p12") {
 			t.Fatalf("expected JVM truststore copy to be injected, got:\n%s", got)
 		}
-		if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS}") {
+		if !strings.Contains(got, "ENV JAVA_TOOL_OPTIONS -Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit ${JAVA_TOOL_OPTIONS}") {
 			t.Fatalf("expected JAVA_TOOL_OPTIONS truststore config to be injected, got:\n%s", got)
 		}
 		if strings.Contains(got, "COPY --from=bbox_mitm_trust /bbox-maven-settings.xml /etc/maven/bbox-settings.xml") {
 			t.Fatalf("did not expect Maven settings copy without proxy env, got:\n%s", got)
 		}
-		if strings.Contains(got, "ENV MAVEN_ARGS=") {
+		if strings.Contains(got, "ENV MAVEN_ARGS ") {
 			t.Fatalf("did not expect MAVEN_ARGS injection without proxy env, got:\n%s", got)
 		}
 	})
@@ -195,6 +195,10 @@ func TestPrepareBuildInputsStagesJavaTruststoreAndMavenSettings(t *testing.T) {
 
 func TestTrustInjectionOptionsFromStagedAssetsDecouplesJavaAndMaven(t *testing.T) {
 	stageDir := t.TempDir()
+	trustBundlePath := filepath.Join(stageDir, bboxTrustBundleFileName)
+	if err := os.WriteFile(trustBundlePath, []byte(testTrustBundlePEM), 0o644); err != nil {
+		t.Fatalf("write trust bundle fixture: %v", err)
+	}
 	truststorePath := filepath.Join(stageDir, bboxJavaTruststoreFileName)
 	if err := os.WriteFile(truststorePath, []byte("pkcs12"), 0o644); err != nil {
 		t.Fatalf("write truststore fixture: %v", err)
@@ -206,21 +210,27 @@ func TestTrustInjectionOptionsFromStagedAssetsDecouplesJavaAndMaven(t *testing.T
 
 	t.Run("truststore drives java injection without maven settings", func(t *testing.T) {
 		opts := trustInjectionOptionsFromStagedAssets(buildInputs{
+			TrustBundle: trustBundlePath,
 			Truststore: generatedTruststore{
 				Path:     truststorePath,
 				Type:     bboxJavaTruststoreType,
 				Password: bboxJavaTruststorePassword,
 			},
+			JavaToolOpts: javaTruststoreOptions(generatedTruststore{
+				Path:     truststorePath,
+				Type:     bboxJavaTruststoreType,
+				Password: bboxJavaTruststorePassword,
+			}),
 		})
 
+		if opts.pemPath != injectedTrustBundlePrimaryPath {
+			t.Fatalf("expected PEM path %q, got %q", injectedTrustBundlePrimaryPath, opts.pemPath)
+		}
 		if opts.javaTruststorePath != injectedJavaTruststorePath {
 			t.Fatalf("expected java truststore path %q, got %q", injectedJavaTruststorePath, opts.javaTruststorePath)
 		}
-		if opts.javaTruststoreType != bboxJavaTruststoreType {
-			t.Fatalf("expected java truststore type %q, got %q", bboxJavaTruststoreType, opts.javaTruststoreType)
-		}
-		if opts.javaTruststorePass != bboxJavaTruststorePassword {
-			t.Fatalf("expected java truststore password to be set")
+		if got := strings.Join(opts.javaToolOptions, " "); got != "-Djavax.net.ssl.trustStore=/etc/ssl/certs/bbox-truststore.p12 -Djavax.net.ssl.trustStoreType=PKCS12 -Djavax.net.ssl.trustStorePassword=changeit" {
+			t.Fatalf("expected java tool options to include truststore config, got %q", got)
 		}
 		if opts.mavenSettingsPath != "" {
 			t.Fatalf("did not expect maven settings path, got %q", opts.mavenSettingsPath)
@@ -238,11 +248,8 @@ func TestTrustInjectionOptionsFromStagedAssetsDecouplesJavaAndMaven(t *testing.T
 		if opts.javaTruststorePath != "" {
 			t.Fatalf("did not expect java truststore path, got %q", opts.javaTruststorePath)
 		}
-		if opts.javaTruststoreType != "" {
-			t.Fatalf("did not expect java truststore type, got %q", opts.javaTruststoreType)
-		}
-		if opts.javaTruststorePass != "" {
-			t.Fatal("did not expect java truststore password")
+		if len(opts.javaToolOptions) != 0 {
+			t.Fatalf("did not expect java tool options, got %v", opts.javaToolOptions)
 		}
 	})
 }

@@ -1,82 +1,112 @@
-# Copy this file to `bbox.yaml` to activate it.
+# Copy this file to the root of a `github.com/moolen/spectre` checkout as `bbox.yaml`.
+# Then run `bbox -- docker build .` from that checkout.
+#
+# This example is tuned for the spectre Dockerfile in transparent mode so all
+# build egress stays inside the bwrap netns and is policed by bbox MITM.
+# Use transparent mode when you do not fully control the upstream Dockerfile or
+# you need non-proxy-aware clients to keep working. If every networked RUN step
+# is proxy-aware, you can switch this to `proxy`; direct-socket clients will
+# then fail closed by design.
 
-name: demo-sandbox
-workdir: ./workspace
-
-bin:
-  - curl
-
-mount_ro:
-  - ./certs:/etc/ssl/certs
-  # Linux only. Remove on macOS.
-
-mount_rw:
-  - ../shared:/workspace/shared
-  # Linux only. Remove on macOS.
+name: spectre-builder
+workdir: .
 
 env:
-  - API_TOKEN=redacted
   - PATH=/usr/local/bin:/usr/bin:/bin
 
 clear_env: false
-traffic_mode: proxy
-# macOS currently supports only proxy mode.
-max_request_body_bytes: 65536
+traffic_mode: transparent
+# traffic_mode: proxy
 access_log: json
 report_policy_violations: true
 report_access_summary: true
 report_request_summary: true
 
+docker_build:
+  enabled: true
+  # Optional explicit host tool overrides:
+  # buildkitd_path: /usr/bin/buildkitd
+  # buildctl_path: /usr/bin/buildctl
+  # runc_path: /usr/bin/runc
+  # podman_path: /usr/bin/podman
+  # newuidmap_path: /usr/bin/newuidmap
+  # newgidmap_path: /usr/bin/newgidmap
+
 policy:
   rules:
     - host_patterns:
-        - "^api[.]github[.]com$"
-      http_methods:
-        - GET
-      path_patterns:
-        - "^/repos/"
-
+        - "^auth[.]docker[.]io$"
     - host_patterns:
-        - "^api[.]github[.]com$"
+        - "^auth[.]docker[.]io$"
       connect_ports:
         - "443"
 
     - host_patterns:
-        - "^foo[.]example[.]org$"
-      http_methods:
-        - GET
-        - POST
-      header_patterns:
-        x-trace-id:
-          - "^trace-[0-9]+$"
-      body_patterns:
-        - "^safe="
+        - "^index[.]docker[.]io$"
+    - host_patterns:
+        - "^index[.]docker[.]io$"
+      connect_ports:
+        - "443"
 
-docker_socket:
-  enabled: true
-  mount_path: /var/run/docker.sock
-  target_socket_path: /var/run/docker.sock
-  default_action: deny
-  rules:
-    - action: allow
-      operations:
-        - image_pull
+    - host_patterns:
+        - "^registry-1[.]docker[.]io$"
+    - host_patterns:
+        - "^registry-1[.]docker[.]io$"
+      connect_ports:
+        - "443"
 
-    - action: allow
-      operations:
-        - image_inspect
+    - host_patterns:
+        - "^docker-images-prod[.]6aa30f8b08e16409b46e0173d6de2f56[.]r2[.]cloudflarestorage[.]com$"
+    - host_patterns:
+        - "^docker-images-prod[.]6aa30f8b08e16409b46e0173d6de2f56[.]r2[.]cloudflarestorage[.]com$"
+      connect_ports:
+        - "443"
 
-    - action: allow
-      operations:
-        - build
-      build:
-        context: local_only
-        dockerfile_paths:
-          - "^Dockerfile$"
-          - "^docker/.*$"
+    - host_patterns:
+        - "^dl-cdn[.]alpinelinux[.]org$"
+    - host_patterns:
+        - "^dl-cdn[.]alpinelinux[.]org$"
+      connect_ports:
+        - "443"
 
-    - action: deny
-      operations:
-        - image_push
-        - exec_create
-        - exec_start
+    - host_patterns:
+        - "^github[.]com$"
+    - host_patterns:
+        - "^github[.]com$"
+      connect_ports:
+        - "443"
+
+    - host_patterns:
+        - "^release-assets[.]githubusercontent[.]com$"
+    - host_patterns:
+        - "^release-assets[.]githubusercontent[.]com$"
+      connect_ports:
+        - "443"
+
+    - host_patterns:
+        - "^proxy[.]golang[.]org$"
+    - host_patterns:
+        - "^proxy[.]golang[.]org$"
+      connect_ports:
+        - "443"
+
+    - host_patterns:
+        - "^registry[.]npmjs[.]org$"
+    - host_patterns:
+        - "^registry[.]npmjs[.]org$"
+      connect_ports:
+        - "443"
+
+    - host_patterns:
+        - "^sum[.]golang[.]org$"
+    - host_patterns:
+        - "^sum[.]golang[.]org$"
+      connect_ports:
+        - "443"
+
+    - host_patterns:
+        - "^storage[.]googleapis[.]com$"
+    - host_patterns:
+        - "^storage[.]googleapis[.]com$"
+      connect_ports:
+        - "443"

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -20,14 +19,96 @@ func TestDockerBuildsSpectre(t *testing.T) {
 	requireDockerBuildSandboxPrereqs(t)
 	requireDockerBuildPrereqs(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 
-	repoDir := cloneRepository(t, ctx, "https://github.com/moolen/spectre")
-	sandboxRepoDir := "/workspace/spectre"
-	outputPath := filepath.Join(repoDir, ".bbox-docker-build.oci.tar")
+	fixture := writeDockerBuildMatrixFixture(t)
+	result := runDockerBuildFixture(t, ctx, bbox.NewProxyManager, bbox.ProxyOptions{
+		MITM: bbox.MITMOptions{Enabled: true},
+	}, dockerBuildRunSpec{
+		name:        "docker-build-proxy-matrix",
+		trafficMode: bbox.TrafficModeProxy,
+		policy:      dockerBuildMatrixNetworkPolicy(),
+		fixture:     fixture,
+	})
 
-	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{})
+	if result.ExitCode != 0 {
+		t.Fatalf("docker build failed: exit=%d stdout=%q stderr=%q", result.ExitCode, string(result.Stdout), string(result.Stderr))
+	}
+	if _, err := os.Stat(fixture.outputPath); err != nil {
+		t.Fatalf("expected docker build artifact at %s: %v", fixture.outputPath, err)
+	}
+}
+
+func TestDockerBuildsSpectreTransparent(t *testing.T) {
+	requireDockerBuildSandboxPrereqs(t)
+	requireDockerBuildPrereqs(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	fixture := writeDockerBuildMatrixFixture(t)
+	result := runDockerBuildFixture(t, ctx, bbox.NewProxyManager, bbox.ProxyOptions{
+		MITM: bbox.MITMOptions{Enabled: true},
+	}, dockerBuildRunSpec{
+		name:        "docker-build-transparent-matrix",
+		trafficMode: bbox.TrafficModeTransparent,
+		policy:      dockerBuildMatrixNetworkPolicy(),
+		fixture:     fixture,
+	})
+
+	if result.ExitCode != 0 {
+		t.Fatalf("docker build failed in transparent mode: exit=%d stdout=%q stderr=%q", result.ExitCode, string(result.Stdout), string(result.Stderr))
+	}
+	if _, err := os.Stat(fixture.outputPath); err != nil {
+		t.Fatalf("expected docker build artifact at %s: %v", fixture.outputPath, err)
+	}
+}
+
+func TestDockerBuildProxyModeFailsClosedForNonProxyAwareClient(t *testing.T) {
+	requireDockerBuildSandboxPrereqs(t)
+	requireDockerBuildPrereqs(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	fixture := writeDockerBuildProxyFailClosedFixture(t)
+	result := runDockerBuildFixture(t, ctx, bbox.NewProxyManager, bbox.ProxyOptions{
+		MITM: bbox.MITMOptions{Enabled: true},
+	}, dockerBuildRunSpec{
+		name:        "docker-build-proxy-fail-closed",
+		trafficMode: bbox.TrafficModeProxy,
+		policy:      dockerBuildMatrixNetworkPolicy(),
+		fixture:     fixture,
+	})
+
+	if result.ExitCode == 0 {
+		t.Fatalf("expected non-proxy-aware docker build to fail, stdout=%q stderr=%q", string(result.Stdout), string(result.Stderr))
+	}
+	combined := strings.ToLower(string(result.Stdout) + "\n" + string(result.Stderr))
+	if !strings.Contains(combined, "raw-client-direct-connect-failed:") {
+		t.Fatalf("expected direct-connect failure marker, stdout=%q stderr=%q", string(result.Stdout), string(result.Stderr))
+	}
+	if _, err := os.Stat(fixture.outputPath); err == nil {
+		t.Fatalf("did not expect docker build artifact at %s", fixture.outputPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat docker build artifact %s: %v", fixture.outputPath, err)
+	}
+}
+
+type dockerBuildRunSpec struct {
+	name        string
+	trafficMode bbox.TrafficMode
+	policy      bbox.NetworkPolicy
+	fixture     dockerBuildFixture
+}
+
+type proxyManagerFactory func(bbox.ProxyOptions) (*bbox.ProxyManager, error)
+
+func runDockerBuildFixture(t *testing.T, ctx context.Context, newManager proxyManagerFactory, managerOpts bbox.ProxyOptions, spec dockerBuildRunSpec) *bbox.RunResult {
+	t.Helper()
+
+	manager, err := newManager(managerOpts)
 	if err != nil {
 		t.Fatalf("create manager: %v", err)
 	}
@@ -38,14 +119,14 @@ func TestDockerBuildsSpectre(t *testing.T) {
 	}()
 
 	sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
-		Name:        "docker-build-spectre",
-		TrafficMode: bbox.TrafficModeProxy,
+		Name:        spec.name,
+		TrafficMode: spec.trafficMode,
 		PolicyMode:  bbox.PolicyModeEnforce,
-		Policy:      spectreBuilderNetworkPolicy(),
-		WorkDir:     sandboxRepoDir,
+		Policy:      spec.policy,
+		WorkDir:     spec.fixture.sandboxRepoDir,
 		Mounts: []bbox.Mount{{
-			Source:   repoDir,
-			Target:   sandboxRepoDir,
+			Source:   spec.fixture.repoDir,
+			Target:   spec.fixture.sandboxRepoDir,
 			ReadOnly: false,
 		}},
 		DockerBuild: bbox.DockerBuildOptions{
@@ -61,47 +142,14 @@ func TestDockerBuildsSpectre(t *testing.T) {
 		}
 	}()
 
-	result, err := sandbox.Run(ctx, []string{"docker", "build", "--target", "builder", "."}, bbox.RunOptions{})
+	result, err := sandbox.Run(ctx, []string{"docker", "build", "."}, bbox.RunOptions{})
 	if err != nil {
 		t.Fatalf("docker build transport failed: %v", err)
 	}
-	if result.ExitCode != 0 {
-		t.Fatalf("docker build failed: exit=%d stdout=%q stderr=%q", result.ExitCode, string(result.Stdout), string(result.Stderr))
+	if result == nil {
+		t.Fatal("expected docker build result")
 	}
-	if _, err := os.Stat(outputPath); err != nil {
-		t.Fatalf("expected docker build artifact at %s: %v", outputPath, err)
-	}
-}
-
-func spectreBuilderNetworkPolicy() bbox.NetworkPolicy {
-	httpsHosts := []string{
-		`^auth[.]docker[.]io$`,
-		`^registry-1[.]docker[.]io$`,
-		`^docker-images-prod[.]6aa30f8b08e16409b46e0173d6de2f56[.]r2[.]cloudflarestorage[.]com$`,
-		`^proxy[.]golang[.]org$`,
-		`^sum[.]golang[.]org$`,
-		`^storage[.]googleapis[.]com$`,
-	}
-	httpHosts := []string{
-		`^dl-cdn[.]alpinelinux[.]org$`,
-	}
-
-	rules := make([]bbox.PolicyRule, 0, len(httpsHosts)*2+len(httpHosts)*2)
-	for _, host := range httpsHosts {
-		rules = append(rules, bbox.PolicyRule{HostPatterns: []string{host}})
-		rules = append(rules, bbox.PolicyRule{
-			HostPatterns: []string{host},
-			ConnectPorts: []string{"443"},
-		})
-	}
-	for _, host := range httpHosts {
-		rules = append(rules, bbox.PolicyRule{HostPatterns: []string{host}})
-		rules = append(rules, bbox.PolicyRule{
-			HostPatterns: []string{host},
-			ConnectPorts: []string{"443"},
-		})
-	}
-	return bbox.NetworkPolicy{Rules: rules}
+	return result
 }
 
 func requireDockerBuildSandboxPrereqs(t *testing.T) {
@@ -155,15 +203,4 @@ func requireSubordinateIDMapping(path string) error {
 		return fmt.Errorf("scan %s: %w", path, err)
 	}
 	return fmt.Errorf("%s does not contain an entry for %s", path, username)
-}
-
-func cloneRepository(t *testing.T, ctx context.Context, remote string) string {
-	t.Helper()
-	dir := filepath.Join(t.TempDir(), "repo")
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", remote, dir)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("clone %s: %v: %s", remote, err, string(output))
-	}
-	return dir
 }

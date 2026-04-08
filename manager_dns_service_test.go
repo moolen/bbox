@@ -96,6 +96,27 @@ func TestProxyManagerHandleDNSRequestAppliesPolicyAndAudit(t *testing.T) {
 	}
 }
 
+func TestStripAAAARecordsRemovesIPv6Answers(t *testing.T) {
+	query := mustDNSQueryOfType(t, 7, "allowed.example.com.", dnsmessage.TypeAAAA)
+	payload := mustDNSResponseWithAAndAAAA(t, query, [4]byte{127, 0, 0, 1}, [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+
+	filtered, err := stripAAAARecords(payload)
+	if err != nil {
+		t.Fatalf("stripAAAARecords() error = %v", err)
+	}
+
+	var msg dnsmessage.Message
+	if err := msg.Unpack(filtered); err != nil {
+		t.Fatalf("Unpack() error = %v", err)
+	}
+	if len(msg.Answers) != 1 {
+		t.Fatalf("len(Answers) = %d, want 1", len(msg.Answers))
+	}
+	if msg.Answers[0].Header.Type != dnsmessage.TypeA {
+		t.Fatalf("answer type = %v, want %v", msg.Answers[0].Header.Type, dnsmessage.TypeA)
+	}
+}
+
 func hostNameserverAddrs(t *testing.T) []string {
 	t.Helper()
 
@@ -125,6 +146,10 @@ func hostNameserverAddrs(t *testing.T) []string {
 }
 
 func mustDNSQuery(t *testing.T, id uint16, host string) []byte {
+	return mustDNSQueryOfType(t, id, host, dnsmessage.TypeA)
+}
+
+func mustDNSQueryOfType(t *testing.T, id uint16, host string, qType dnsmessage.Type) []byte {
 	t.Helper()
 
 	name, err := dnsmessage.NewName(host)
@@ -138,11 +163,57 @@ func mustDNSQuery(t *testing.T, id uint16, host string) []byte {
 		},
 		Questions: []dnsmessage.Question{{
 			Name:  name,
-			Type:  dnsmessage.TypeA,
+			Type:  qType,
 			Class: dnsmessage.ClassINET,
 		}},
 	}
 	payload, err := msg.Pack()
+	if err != nil {
+		t.Fatalf("Pack() error = %v", err)
+	}
+	return payload
+}
+
+func mustDNSResponseWithAAndAAAA(t *testing.T, query []byte, addr4 [4]byte, addr6 [16]byte) []byte {
+	t.Helper()
+
+	var msg dnsmessage.Message
+	if err := msg.Unpack(query); err != nil {
+		t.Fatalf("Unpack() error = %v", err)
+	}
+
+	response := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 msg.Header.ID,
+			Response:           true,
+			RecursionAvailable: true,
+		},
+		Questions: msg.Questions,
+	}
+	for _, question := range msg.Questions {
+		response.Answers = append(response.Answers,
+			dnsmessage.Resource{
+				Header: dnsmessage.ResourceHeader{
+					Name:  question.Name,
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+					TTL:   60,
+				},
+				Body: &dnsmessage.AResource{A: addr4},
+			},
+			dnsmessage.Resource{
+				Header: dnsmessage.ResourceHeader{
+					Name:  question.Name,
+					Type:  dnsmessage.TypeAAAA,
+					Class: dnsmessage.ClassINET,
+					TTL:   60,
+				},
+				Body: &dnsmessage.AAAAResource{AAAA: addr6},
+			},
+		)
+	}
+
+	payload, err := response.Pack()
 	if err != nil {
 		t.Fatalf("Pack() error = %v", err)
 	}

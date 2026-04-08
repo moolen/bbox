@@ -30,6 +30,7 @@ import (
 	bridgepkg "github.com/moolen/bbox/internal/helperruntime/bridge"
 	"github.com/moolen/bbox/internal/helperruntime/ingress"
 	"github.com/moolen/bbox/internal/helperruntime/seccompnotify"
+	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
 
@@ -78,6 +79,49 @@ func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
 	}
 
 	closeReadLoop(t, peer, errCh)
+}
+
+func TestRecordRawTCPOriginUsesRememberedDNSHostname(t *testing.T) {
+	b := &bridge{
+		rawTCPOrigins: make(map[string]rawTCPDestination),
+		dnsHostByIP:   make(map[string]dnsResolutionEntry),
+	}
+
+	query, err := (&dnsmessage.Message{
+		Questions: []dnsmessage.Question{{
+			Name:  dnsmessage.MustNewName("registry-1.docker.io."),
+			Type:  dnsmessage.TypeA,
+			Class: dnsmessage.ClassINET,
+		}},
+	}).Pack()
+	if err != nil {
+		t.Fatalf("pack dns query: %v", err)
+	}
+	response, err := (&dnsmessage.Message{
+		Answers: []dnsmessage.Resource{{
+			Header: dnsmessage.ResourceHeader{
+				Name:  dnsmessage.MustNewName("registry-1.docker.io."),
+				Type:  dnsmessage.TypeA,
+				Class: dnsmessage.ClassINET,
+				TTL:   60,
+			},
+			Body: &dnsmessage.AResource{A: [4]byte{52, 71, 123, 245}},
+		}},
+	}).Pack()
+	if err != nil {
+		t.Fatalf("pack dns response: %v", err)
+	}
+
+	b.rememberDNSResolution(query, response)
+	b.recordRawTCPOrigin("127.0.0.1:54321", "52.71.123.245", 443)
+
+	host, port, ok := b.takeRawTCPOrigin("127.0.0.1:54321")
+	if !ok {
+		t.Fatal("expected raw tcp origin to be recorded")
+	}
+	if host != "registry-1.docker.io" || port != 443 {
+		t.Fatalf("unexpected raw tcp origin: host=%q port=%d", host, port)
+	}
 }
 
 func TestRunSupervisedExecStartsSupervisor(t *testing.T) {
@@ -445,6 +489,157 @@ func TestTransparentHTTPSRequestsLeafCertForSNIHost(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for leaf cert request")
+	}
+}
+
+func TestTransparentHTTPSAuthorizesOriginalDestinationBeforeMITM(t *testing.T) {
+	bridgeSide, peerSide := net.Pipe()
+	defer bridgeSide.Close()
+	defer peerSide.Close()
+
+	bridge := newBridge(bridgeSide, log.New(io.Discard, "", 0), "")
+	bridge.mitmEnabled = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	readLoopErrCh := make(chan error, 1)
+	go func() {
+		readLoopErrCh <- bridge.readLoop(ctx)
+	}()
+
+	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for transparent ingress: %v", err)
+	}
+	defer listener.Close()
+
+	acceptCh := make(chan net.Conn, 1)
+	acceptErrCh := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			acceptErrCh <- err
+			return
+		}
+		acceptCh <- conn
+	}()
+
+	peerErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(peerSide)
+		enc := gob.NewEncoder(peerSide)
+
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if connectReq.ConnectRequest == nil {
+			peerErrCh <- fmt.Errorf("expected transparent connect request, got %#v", connectReq)
+			return
+		}
+		if !connectReq.ConnectRequest.Transparent {
+			peerErrCh <- fmt.Errorf("expected transparent connect request, got %#v", connectReq.ConnectRequest)
+			return
+		}
+		if connectReq.ConnectRequest.Host != "example.com" || connectReq.ConnectRequest.Port != 443 {
+			peerErrCh <- fmt.Errorf("unexpected transparent connect payload: %#v", connectReq.ConnectRequest)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		var certReq helperproto.Envelope
+		if err := dec.Decode(&certReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if certReq.LeafCertRequest == nil || certReq.LeafCertRequest.Host != "example.com" {
+			peerErrCh <- fmt.Errorf("expected leaf cert request for example.com, got %#v", certReq)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: certReq.ID,
+			LeafCertResponse: &helperproto.LeafCertResponse{
+				CertPEM: certPEM,
+				KeyPEM:  keyPEM,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
+		peerErrCh <- nil
+	}()
+
+	clientConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial transparent ingress listener: %v", err)
+	}
+	defer clientConn.Close()
+
+	bridge.recordRawTCPOrigin(clientConn.LocalAddr().String(), "example.com", 443)
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-acceptCh:
+	case err := <-acceptErrCh:
+		t.Fatalf("accept transparent ingress connection: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent ingress accept")
+	}
+	defer serverConn.Close()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		bridge.handleTransparentTCPConn(serverConn)
+	}()
+
+	tlsConn := tls.Client(clientConn, &tls.Config{
+		RootCAs:    roots,
+		ServerName: "example.com",
+		NextProtos: []string{"http/1.1"},
+	})
+	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
+		t.Fatalf("handshake through transparent ingress: %v", err)
+	}
+	_ = tlsConn.Close()
+
+	select {
+	case err := <-peerErrCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent authorization sequence")
+	}
+
+	cancel()
+	_ = peerSide.Close()
+	select {
+	case err := <-readLoopErrCh:
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+			t.Fatalf("unexpected readLoop shutdown error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent bridge shutdown")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for transparent connection handler to exit")
 	}
 }
 
@@ -2651,7 +2846,6 @@ func startProxyRuntimeBridge(t *testing.T, maxRequestBodyBytes int64) (*helperpr
 
 	return ready.Ready, peerSide, enc, dec, shutdown
 }
-
 
 func issueTestLeafCertPEM(t *testing.T, host string) (*x509.CertPool, []byte, []byte) {
 	t.Helper()

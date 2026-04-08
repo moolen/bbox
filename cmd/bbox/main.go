@@ -318,15 +318,16 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 		return runConfig{}, err
 	}
 	if cliPlatform != "darwin" {
-		pathMounts, err := pathAvailabilityMounts(envEntries, absCWD, mounts)
+		pathMounts, err := pathAvailabilityMounts(envEntries, absCWD, mounts, mergedCfg.DockerBuild.Enabled)
 		if err != nil {
 			return runConfig{}, err
 		}
 		mounts = append(mounts, pathMounts...)
 	}
 
+	dockerBuild := buildDockerBuildOptions(mergedCfg.DockerBuild)
 	binaries := make([]string, 0, 1+len(mergedCfg.Bin))
-	binaries, err = resolveRequestedBinaries(append([]string{payload[0]}, mergedCfg.Bin...), envEntries, absCWD)
+	binaries, err = resolveRequestedBinaries(append([]string{payload[0]}, mergedCfg.Bin...), envEntries, absCWD, dockerBuild)
 	if err != nil {
 		return runConfig{}, err
 	}
@@ -359,6 +360,7 @@ func buildConfig(opts cliOptions, payload []string, cwd string, environ []string
 			Policy:       buildNetworkPolicy(mergedCfg.Policy),
 			WorkDir:      workDir,
 			DockerSocket: buildDockerSocketOptions(mergedCfg.DockerSocket),
+			DockerBuild:  dockerBuild,
 		},
 		argv:          append([]string(nil), payload...),
 		printPolicy:   opts.printPolicy,
@@ -394,10 +396,13 @@ func buildSandboxEnv(opts cliOptions, environ []string) ([]string, error) {
 	return envEntries, nil
 }
 
-func resolveRequestedBinaries(requested []string, envEntries []string, cwd string) ([]string, error) {
+func resolveRequestedBinaries(requested []string, envEntries []string, cwd string, dockerBuild bbox.DockerBuildOptions) ([]string, error) {
 	pathValue, hasPATH := lastEnvValue(envEntries, "PATH")
 	binaries := make([]string, 0, len(requested))
 	for _, binary := range requested {
+		if dockerBuild.Enabled && binary == "docker" {
+			continue
+		}
 		resolved := binary
 		var err error
 		if hasPATH || strings.Contains(binary, string(filepath.Separator)) {
@@ -494,7 +499,7 @@ func lastEnvValue(env []string, key string) (string, bool) {
 	return "", false
 }
 
-func pathAvailabilityMounts(envEntries []string, cwd string, existing []bbox.Mount) ([]bbox.Mount, error) {
+func pathAvailabilityMounts(envEntries []string, cwd string, existing []bbox.Mount, dockerBuildEnabled bool) ([]bbox.Mount, error) {
 	pathValue, ok := lastEnvValue(envEntries, "PATH")
 	if !ok {
 		return nil, nil
@@ -504,6 +509,9 @@ func pathAvailabilityMounts(envEntries []string, cwd string, existing []bbox.Mou
 		mount, ok, err := pathMountForDir(dir)
 		if err != nil {
 			return nil, err
+		}
+		if dockerBuildEnabled && mount.Target == "/usr" {
+			continue
 		}
 		if !ok || mountOverlapsAny(mount, append(existing, mounts...)) {
 			continue
@@ -685,6 +693,18 @@ func buildDockerSocketOptions(cfg cliDockerSocketConfig) bbox.DockerSocketOption
 			DefaultAction: bbox.DockerRuleAction(strings.ToLower(strings.TrimSpace(cfg.DefaultAction))),
 			Rules:         rules,
 		},
+	}
+}
+
+func buildDockerBuildOptions(cfg cliDockerBuildConfig) bbox.DockerBuildOptions {
+	return bbox.DockerBuildOptions{
+		Enabled:       cfg.Enabled,
+		BuildkitdPath: strings.TrimSpace(cfg.BuildkitdPath),
+		BuildctlPath:  strings.TrimSpace(cfg.BuildctlPath),
+		RuncPath:      strings.TrimSpace(cfg.RuncPath),
+		PodmanPath:    strings.TrimSpace(cfg.PodmanPath),
+		NewuidmapPath: strings.TrimSpace(cfg.NewuidmapPath),
+		NewgidmapPath: strings.TrimSpace(cfg.NewgidmapPath),
 	}
 }
 

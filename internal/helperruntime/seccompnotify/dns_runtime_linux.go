@@ -22,7 +22,7 @@ type rawMmsghdr struct {
 }
 
 func (s *Supervisor) emulateDNSSendTo(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
-	state, ok := s.lookupManagedUDPSocket(req)
+	state, ok := s.lookupManagedUDPSocket(pid, req)
 	if !ok {
 		return 0, false, nil
 	}
@@ -52,8 +52,29 @@ func (s *Supervisor) emulateDNSSendTo(pid int, req *seccomp.ScmpNotifReq) (int, 
 	return len(payload), true, nil
 }
 
+func (s *Supervisor) emulateDNSRead(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
+	state, ok := s.lookupManagedUDPSocket(pid, req)
+	if !ok {
+		return 0, false, nil
+	}
+
+	resp, err := takePendingDNSResponse(state, 0)
+	if err != nil {
+		return 0, true, err
+	}
+
+	n, err := writeProcessPayload(pid, uintptr(req.Data.Args[1]), int(req.Data.Args[2]), resp.Payload)
+	if err != nil {
+		return 0, true, err
+	}
+
+	state.PendingDNSResponses = state.PendingDNSResponses[1:]
+	s.registry.Insert(state)
+	return n, true, nil
+}
+
 func (s *Supervisor) emulateDNSRecvFrom(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
-	state, ok := s.lookupManagedUDPSocket(req)
+	state, ok := s.lookupManagedUDPSocket(pid, req)
 	if !ok {
 		return 0, false, nil
 	}
@@ -79,8 +100,39 @@ func (s *Supervisor) emulateDNSRecvFrom(pid int, req *seccomp.ScmpNotifReq) (int
 	return n, true, nil
 }
 
+func (s *Supervisor) emulateDNSWrite(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
+	state, ok := s.lookupManagedUDPSocket(pid, req)
+	if !ok {
+		return 0, false, nil
+	}
+
+	payload, err := readProcessPayload(pid, uintptr(req.Data.Args[1]), int(req.Data.Args[2]))
+	if err != nil {
+		return 0, true, err
+	}
+	destination, isDNS, err := resolveDNSDestination(pid, state, 0, 0)
+	if err != nil {
+		return 0, true, err
+	}
+	if !isDNS {
+		return 0, false, nil
+	}
+	reply, err := s.dnsRoundTrip(destination, payload)
+	if err != nil {
+		return 0, true, err
+	}
+
+	state.DNSManaged = true
+	state.PendingDNSResponses = append(state.PendingDNSResponses, dnsPacketResponse{
+		Payload: reply,
+		Source:  destination,
+	})
+	s.registry.Insert(state)
+	return len(payload), true, nil
+}
+
 func (s *Supervisor) emulateDNSSendMsg(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
-	state, ok := s.lookupManagedUDPSocket(req)
+	state, ok := s.lookupManagedUDPSocket(pid, req)
 	if !ok {
 		return 0, false, nil
 	}
@@ -119,7 +171,7 @@ func (s *Supervisor) emulateDNSSendMsg(pid int, req *seccomp.ScmpNotifReq) (int,
 }
 
 func (s *Supervisor) emulateDNSRecvMsg(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
-	state, ok := s.lookupManagedUDPSocket(req)
+	state, ok := s.lookupManagedUDPSocket(pid, req)
 	if !ok {
 		return 0, false, nil
 	}
@@ -160,7 +212,7 @@ func (s *Supervisor) emulateDNSRecvMsg(pid int, req *seccomp.ScmpNotifReq) (int,
 }
 
 func (s *Supervisor) emulateDNSSendMMsg(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
-	state, ok := s.lookupManagedUDPSocket(req)
+	state, ok := s.lookupManagedUDPSocket(pid, req)
 	if !ok {
 		return 0, false, nil
 	}
@@ -230,7 +282,7 @@ func (s *Supervisor) emulateDNSSendMMsg(pid int, req *seccomp.ScmpNotifReq) (int
 }
 
 func (s *Supervisor) emulateDNSRecvMMsg(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
-	state, ok := s.lookupManagedUDPSocket(req)
+	state, ok := s.lookupManagedUDPSocket(pid, req)
 	if !ok {
 		return 0, false, nil
 	}
@@ -302,7 +354,7 @@ func (s *Supervisor) emulateDNSPPoll(pid int, req *seccomp.ScmpNotifReq) (int, b
 	return s.emulateDNSPollFDs(pid, uintptr(req.Data.Args[0]), int(req.Data.Args[1]))
 }
 
-func (s *Supervisor) lookupManagedUDPSocket(req *seccomp.ScmpNotifReq) (SocketState, bool) {
+func (s *Supervisor) lookupManagedUDPSocket(pid int, req *seccomp.ScmpNotifReq) (SocketState, bool) {
 	if s == nil || req == nil {
 		return SocketState{}, false
 	}
@@ -310,7 +362,7 @@ func (s *Supervisor) lookupManagedUDPSocket(req *seccomp.ScmpNotifReq) (SocketSt
 	if childFD < 0 {
 		return SocketState{}, false
 	}
-	state, ok := s.registry.Lookup(childFD)
+	state, ok := s.registry.LookupForPID(pid, childFD)
 	if !ok || state.Kind != KindUDP {
 		return SocketState{}, false
 	}
@@ -338,7 +390,7 @@ func (s *Supervisor) emulateDNSPollFDs(pid int, fdsPtr uintptr, fdCount int) (in
 			pfd.Revents = 0
 			continue
 		}
-		state, ok := s.registry.Lookup(int(pfd.Fd))
+		state, ok := s.registry.LookupForPID(pid, int(pfd.Fd))
 		if !ok || state.Kind != KindUDP || len(state.PendingDNSResponses) == 0 {
 			pfd.Revents = 0
 			continue

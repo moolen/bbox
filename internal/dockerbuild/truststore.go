@@ -77,30 +77,3 @@ func parseTrustBundleCertificates(pemBundle []byte) ([]*x509.Certificate, error)
 	}
 	return certs, nil
 }
-
-func writeMavenSettings(stageDir string, truststore generatedTruststore) (string, error) {
-	path := filepath.Join(stageDir, bboxMavenSettingsFileName)
-	content := []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
-  <profiles>
-    <profile>
-      <id>bbox-mitm</id>
-      <properties>
-        <bbox.java.truststore.path>%s</bbox.java.truststore.path>
-        <bbox.java.truststore.type>%s</bbox.java.truststore.type>
-        <bbox.java.truststore.password>%s</bbox.java.truststore.password>
-      </properties>
-    </profile>
-  </profiles>
-  <activeProfiles>
-    <activeProfile>bbox-mitm</activeProfile>
-  </activeProfiles>
-</settings>
-`, injectedJavaTruststorePath, truststore.Type, truststore.Password))
-	if err := os.WriteFile(path, content, 0o644); err != nil {
-		return "", fmt.Errorf("write Maven settings %s: %w", path, err)
-	}
-	return path, nil
-}

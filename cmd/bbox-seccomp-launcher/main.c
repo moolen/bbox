@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/audit.h>
+#include <linux/close_range.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <stddef.h>
@@ -21,6 +22,11 @@ extern char **environ;
 #define LAUNCHER_SOCK_FD_ENV "BBOX_SECCOMP_NOTIFY_SOCK_FD"
 #define PAYLOAD_SECCOMP_BPF_FLAG "--payload-seccomp-bpf"
 #define X32_SYSCALL_BIT 0x40000000U
+#define MIN_MANAGED_CHILD_FD 128U
+
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
 
 #if defined(__x86_64__)
 #define AUDIT_ARCH_NATIVE AUDIT_ARCH_X86_64
@@ -28,7 +34,9 @@ static const uint32_t managed_syscalls[] = {
     __NR_socket,
     __NR_connect,
     __NR_getpeername,
+    __NR_read,
     __NR_sendto,
+    __NR_write,
     __NR_recvfrom,
     __NR_sendmsg,
     __NR_recvmsg,
@@ -51,7 +59,9 @@ static const uint32_t managed_syscalls[] = {
     __NR_socket,
     __NR_connect,
     __NR_getpeername,
+    __NR_read,
     __NR_sendto,
+    __NR_write,
     __NR_recvfrom,
     __NR_sendmsg,
     __NR_recvmsg,
@@ -229,8 +239,18 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getpeername, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_read, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, MIN_MANAGED_CHILD_FD, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendto, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_write, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, MIN_MANAGED_CHILD_FD, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvfrom, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendmsg, 0, 4),
@@ -276,8 +296,18 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_getpeername, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_read, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, MIN_MANAGED_CHILD_FD, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendto, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_write, 0, 4),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, MIN_MANAGED_CHILD_FD, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_recvfrom, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendmsg, 0, 4),
@@ -317,9 +347,9 @@ static int install_notify_filter(int allowed_sendmsg_fd) {
     long listener_fd;
 
 #if defined(__x86_64__)
-    filter[18].k = (uint32_t)allowed_sendmsg_fd;
+    filter[28].k = (uint32_t)allowed_sendmsg_fd;
 #else
-    filter[14].k = (uint32_t)allowed_sendmsg_fd;
+    filter[26].k = (uint32_t)allowed_sendmsg_fd;
 #endif
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
@@ -447,6 +477,11 @@ int main(int argc, char *argv[]) {
 
     if (send_launcher_status(sock_fd, 1, notify_fd, NULL) != 0) {
         fprintf(stderr, "send launcher status: %s\n", strerror(errno));
+        free(envp);
+        return 1;
+    }
+    if (syscall(SYS_close_range, (unsigned int)notify_fd, (unsigned int)notify_fd, CLOSE_RANGE_CLOEXEC) != 0) {
+        fprintf(stderr, "mark seccomp notify fd cloexec: %s\n", strerror(errno));
         free(envp);
         return 1;
     }

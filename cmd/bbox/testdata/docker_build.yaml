@@ -1,0 +1,8 @@
+docker_build:
+  enabled: true
+  buildkitd_path: ./bin/buildkitd
+  buildctl_path: ./bin/buildctl
+  runc_path: /usr/bin/runc
+  podman_path: /usr/bin/podman
+  newuidmap_path: /usr/bin/newuidmap
+  newgidmap_path: /usr/bin/newgidmap

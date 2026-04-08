@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultMaxRequestBodyBytes  = 1 << 20
-	defaultMaxResponseBodyBytes = 4 << 20
+	defaultMaxResponseBodyBytes = 0
 )
 
 type defaultJSONAccessLogger struct {

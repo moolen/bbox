@@ -530,6 +530,367 @@ func TestProcessNotificationBypassesUnsupportedSocketFamily(t *testing.T) {
 	}
 }
 
+func TestServeNotificationsRetriesInterruptedReceive(t *testing.T) {
+	origReceive := notifReceive
+	origRespond := notifRespond
+	origPoll := notifPoll
+	t.Cleanup(func() {
+		notifReceive = origReceive
+		notifRespond = origRespond
+		notifPoll = origPoll
+	})
+
+	var receiveCalls int
+	notifReceive = func(fd seccomp.ScmpFd) (*seccomp.ScmpNotifReq, error) {
+		receiveCalls++
+		switch receiveCalls {
+		case 1:
+			return nil, unix.EINTR
+		case 2:
+			return &seccomp.ScmpNotifReq{
+				ID: 1,
+				Data: seccomp.ScmpNotifData{
+					Syscall: unix.SYS_CLOSE,
+					Args:    []uint64{0},
+				},
+			}, nil
+		default:
+			return nil, unix.EBADF
+		}
+	}
+
+	responded := make(chan *seccomp.ScmpNotifResp, 1)
+	notifRespond = func(fd seccomp.ScmpFd, resp *seccomp.ScmpNotifResp) error {
+		responded <- resp
+		return nil
+	}
+	notifPoll = func(fds []unix.PollFd, timeout int) (int, error) {
+		return 1, nil
+	}
+
+	s, err := NewSupervisor(RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	s.notifyFD = minManagedHelperFD
+	s.notifyReceiveFD = minManagedHelperFD
+
+	done := make(chan struct{})
+	go func() {
+		s.serveNotifications(0)
+		close(done)
+	}()
+
+	select {
+	case resp := <-responded:
+		if resp == nil {
+			t.Fatal("NotifRespond received nil response")
+		}
+		if resp.Flags != seccomp.NotifRespFlagContinue || resp.Error != 0 {
+			t.Fatalf("NotifRespond response = %#v, want kernel continue", resp)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("serveNotifications did not continue after EINTR")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("serveNotifications did not stop after EBADF")
+	}
+	if receiveCalls < 2 {
+		t.Fatalf("NotifReceive calls = %d, want at least 2", receiveCalls)
+	}
+}
+
+func TestServeNotificationsRetriesReceiveENOENT(t *testing.T) {
+	origReceive := notifReceive
+	origRespond := notifRespond
+	origPoll := notifPoll
+	t.Cleanup(func() {
+		notifReceive = origReceive
+		notifRespond = origRespond
+		notifPoll = origPoll
+	})
+
+	var receiveCalls int
+	notifReceive = func(fd seccomp.ScmpFd) (*seccomp.ScmpNotifReq, error) {
+		receiveCalls++
+		switch receiveCalls {
+		case 1:
+			return nil, unix.ENOENT
+		case 2:
+			return &seccomp.ScmpNotifReq{
+				ID: 1,
+				Data: seccomp.ScmpNotifData{
+					Syscall: unix.SYS_CLOSE,
+					Args:    []uint64{0},
+				},
+			}, nil
+		default:
+			return nil, unix.EBADF
+		}
+	}
+
+	responded := make(chan *seccomp.ScmpNotifResp, 1)
+	notifRespond = func(fd seccomp.ScmpFd, resp *seccomp.ScmpNotifResp) error {
+		responded <- resp
+		return nil
+	}
+	notifPoll = func(fds []unix.PollFd, timeout int) (int, error) {
+		return 1, nil
+	}
+
+	s, err := NewSupervisor(RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	s.notifyFD = minManagedHelperFD
+	s.notifyReceiveFD = minManagedHelperFD
+
+	done := make(chan struct{})
+	go func() {
+		s.serveNotifications(0)
+		close(done)
+	}()
+
+	select {
+	case resp := <-responded:
+		if resp == nil {
+			t.Fatal("NotifRespond received nil response")
+		}
+		if resp.Flags != seccomp.NotifRespFlagContinue || resp.Error != 0 {
+			t.Fatalf("NotifRespond response = %#v, want kernel continue", resp)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("serveNotifications did not continue after ENOENT")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("serveNotifications did not stop after EBADF")
+	}
+	if receiveCalls < 2 {
+		t.Fatalf("NotifReceive calls = %d, want at least 2", receiveCalls)
+	}
+}
+
+func TestServeNotificationsRetriesReceiveECANCELED(t *testing.T) {
+	origReceive := notifReceive
+	origRespond := notifRespond
+	origPoll := notifPoll
+	t.Cleanup(func() {
+		notifReceive = origReceive
+		notifRespond = origRespond
+		notifPoll = origPoll
+	})
+
+	var receiveCalls int
+	notifReceive = func(fd seccomp.ScmpFd) (*seccomp.ScmpNotifReq, error) {
+		receiveCalls++
+		switch receiveCalls {
+		case 1:
+			return nil, unix.ECANCELED
+		case 2:
+			return &seccomp.ScmpNotifReq{
+				ID: 1,
+				Data: seccomp.ScmpNotifData{
+					Syscall: unix.SYS_CLOSE,
+					Args:    []uint64{0},
+				},
+			}, nil
+		default:
+			return nil, unix.EBADF
+		}
+	}
+
+	responded := make(chan *seccomp.ScmpNotifResp, 1)
+	notifRespond = func(fd seccomp.ScmpFd, resp *seccomp.ScmpNotifResp) error {
+		responded <- resp
+		return nil
+	}
+	notifPoll = func(fds []unix.PollFd, timeout int) (int, error) {
+		return 1, nil
+	}
+
+	s, err := NewSupervisor(RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	s.notifyFD = minManagedHelperFD
+	s.notifyReceiveFD = minManagedHelperFD
+
+	done := make(chan struct{})
+	go func() {
+		s.serveNotifications(0)
+		close(done)
+	}()
+
+	select {
+	case resp := <-responded:
+		if resp == nil {
+			t.Fatal("NotifRespond received nil response")
+		}
+		if resp.Flags != seccomp.NotifRespFlagContinue || resp.Error != 0 {
+			t.Fatalf("NotifRespond response = %#v, want kernel continue", resp)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("serveNotifications did not continue after ECANCELED")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("serveNotifications did not stop after EBADF")
+	}
+	if receiveCalls < 2 {
+		t.Fatalf("NotifReceive calls = %d, want at least 2", receiveCalls)
+	}
+}
+
+func TestEnqueueNotificationTurnPreservesReceiveOrderPerPID(t *testing.T) {
+	s, err := NewSupervisor(RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+
+	const (
+		pid = 321
+		fd  = 128
+	)
+	s.Registry().InsertForPID(pid, SocketState{ChildFD: fd, Kind: KindUDP})
+
+	firstReq := &seccomp.ScmpNotifReq{
+		ID: 1,
+		Data: seccomp.ScmpNotifData{
+			Syscall: unix.SYS_CONNECT,
+			Args:    []uint64{uint64(fd)},
+		},
+	}
+	secondReq := &seccomp.ScmpNotifReq{
+		ID: 2,
+		Data: seccomp.ScmpNotifData{
+			Syscall: unix.SYS_WRITE,
+			Args:    []uint64{uint64(fd)},
+		},
+	}
+
+	waitFirst, doneFirst := s.enqueueNotificationTurn(pid, firstReq)
+	if waitFirst != nil {
+		t.Fatal("first notification unexpectedly blocked")
+	}
+	waitSecond, doneSecond := s.enqueueNotificationTurn(pid, secondReq)
+	if waitSecond == nil {
+		t.Fatal("second notification did not wait for prior same-fd notification")
+	}
+
+	select {
+	case <-waitSecond:
+		t.Fatal("second notification became ready before the first completed")
+	default:
+	}
+
+	doneFirst()
+	select {
+	case <-waitSecond:
+	case <-time.After(1 * time.Second):
+		t.Fatal("second notification did not become ready after the first completed")
+	}
+
+	doneSecond()
+	if _, ok := s.notifyQueueTails[fdRegistryKey{pid: pid, fd: -1}]; ok {
+		t.Fatal("notification queue tail was not cleaned up")
+	}
+}
+
+func TestEnqueueNotificationTurnSerializesSamePIDAcrossDifferentFDs(t *testing.T) {
+	s, err := NewSupervisor(RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+
+	const pid = 654
+	s.Registry().InsertForPID(pid, SocketState{ChildFD: 128, Kind: KindUDP})
+	s.Registry().InsertForPID(pid, SocketState{ChildFD: 129, Kind: KindUDP})
+
+	firstReq := &seccomp.ScmpNotifReq{
+		ID: 1,
+		Data: seccomp.ScmpNotifData{
+			Syscall: unix.SYS_WRITE,
+			Args:    []uint64{128},
+		},
+	}
+	secondReq := &seccomp.ScmpNotifReq{
+		ID: 2,
+		Data: seccomp.ScmpNotifData{
+			Syscall: unix.SYS_WRITE,
+			Args:    []uint64{129},
+		},
+	}
+
+	waitFirst, doneFirst := s.enqueueNotificationTurn(pid, firstReq)
+	if waitFirst != nil {
+		t.Fatal("first notification unexpectedly blocked")
+	}
+	waitSecond, doneSecond := s.enqueueNotificationTurn(pid, secondReq)
+	if waitSecond == nil {
+		t.Fatal("same pid notification should wait even when using a different fd")
+	}
+
+	select {
+	case <-waitSecond:
+		t.Fatal("second notification became ready before the first completed")
+	default:
+	}
+
+	doneFirst()
+	select {
+	case <-waitSecond:
+	case <-time.After(1 * time.Second):
+		t.Fatal("second notification did not become ready after the first completed")
+	}
+
+	doneSecond()
+}
+
+func TestEnqueueNotificationTurnAllowsIndependentPIDs(t *testing.T) {
+	s, err := NewSupervisor(RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+
+	s.Registry().InsertForPID(111, SocketState{ChildFD: 128, Kind: KindUDP})
+	s.Registry().InsertForPID(222, SocketState{ChildFD: 128, Kind: KindUDP})
+
+	firstReq := &seccomp.ScmpNotifReq{
+		ID: 1,
+		Data: seccomp.ScmpNotifData{
+			Syscall: unix.SYS_WRITE,
+			Args:    []uint64{128},
+		},
+	}
+	secondReq := &seccomp.ScmpNotifReq{
+		ID: 2,
+		Data: seccomp.ScmpNotifData{
+			Syscall: unix.SYS_WRITE,
+			Args:    []uint64{128},
+		},
+	}
+
+	waitFirst, doneFirst := s.enqueueNotificationTurn(111, firstReq)
+	if waitFirst != nil {
+		t.Fatal("first notification unexpectedly blocked")
+	}
+	waitSecond, doneSecond := s.enqueueNotificationTurn(222, secondReq)
+	if waitSecond != nil {
+		t.Fatal("different pid notification should not wait")
+	}
+
+	doneSecond()
+	doneFirst()
+}
+
 func TestSupervisorDupCopiesManagedFDState(t *testing.T) {
 	if optionalDup2Syscall < 0 {
 		t.Skip("dup2 syscall is not available on this architecture")

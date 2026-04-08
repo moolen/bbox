@@ -152,8 +152,12 @@ Current scope and trade-offs:
 
 - supported today: `docker build`
 - supported flags: `-f`, `-t`, `--build-arg`, `--target`
-- network mode: proxy mode only
-- proxy handling: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase variants are forwarded into the build as build args
+- verified network modes:
+  - `traffic_mode: proxy` for proxy-aware Dockerfile `RUN` steps
+  - `traffic_mode: transparent` for broader compatibility, including clients that ignore proxy env
+- proxy handling: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase variants are forwarded into the builder runtime and into the build as build args when present
+- fail-closed behavior: in `traffic_mode: proxy`, clients that bypass proxy env and open direct sockets do not get transparent fallback; the build step fails
+- TLS trust handling: bbox rewrites Dockerfiles on the fly for `RUN` stages so common Linux and Node/npm trust paths point at the sandbox MITM CA without editing the upstream Dockerfile
 - output: OCI archive written to `.bbox-docker-build.oci.tar` in the sandbox working directory
 
 Required host prerequisites:
@@ -167,9 +171,29 @@ Required host prerequisites:
 - `newgidmap`
 - subordinate ID mappings for the current user in `/etc/subuid` and `/etc/subgid`
 
-Current limitation: this path relies on proxy-aware build steps. `bbox` remains the network policy engine, but the in-sandbox builder currently runs in proxy mode rather than transparent mode. Workloads that ignore proxy environment variables are not yet supported by this builder path under strict policy.
+The integration suite now uses a synthetic multi-stage Dockerfile matrix as the default verification path. It exercises `curl`, `wget`, `npm`, `pip`, `go mod download`, and cross-stage artifact copies in both proxy and transparent modes, plus a negative proxy-mode case that proves non-proxy-aware direct sockets fail closed. The test suite fails hard when the Linux/rootless builder prerequisites above are missing.
 
-The integration suite now includes a live default-path verification that clones `github.com/moolen/spectre` and builds its provided `Dockerfile` inside `bbox` using the `builder` target. The test fails hard when the Linux/rootless builder prerequisites above are missing.
+### Spectre Example
+
+`bbox.example.yaml` is a spectre-oriented example for a real upstream build. It defaults to `traffic_mode: transparent` because that is the safest choice when you do not control every networked `RUN` step in the upstream Dockerfile.
+
+Run it like this:
+
+1. Clone `github.com/moolen/spectre`.
+2. Copy `bbox.example.yaml` from this repo into the spectre checkout as `bbox.yaml`.
+3. From the spectre checkout, run:
+
+```bash
+bbox -- docker build .
+```
+
+The build runs through the staged rootless BuildKit toolchain inside `bbox`, and the OCI archive is written to `.bbox-docker-build.oci.tar` in the spectre checkout.
+
+If the required builder tools are not on `PATH`, set `docker_build.buildkitd_path`, `docker_build.buildctl_path`, `docker_build.runc_path`, `docker_build.podman_path`, `docker_build.newuidmap_path`, and `docker_build.newgidmap_path` in `bbox.yaml`.
+
+The example uses `traffic_mode: transparent`, which means the rootless BuildKit worker stays inside the sandbox netns and all DNS, HTTP, and HTTPS egress is enforced by bbox policy even for non-proxy-aware clients. For Spectre specifically, the allowlist needs Docker Hub, Alpine package mirrors, npm registry, `github.com`, and `release-assets.githubusercontent.com` for the `protoc-gen-grpc-web` post-install download.
+
+If you know every networked Dockerfile step is proxy-aware, you can switch the example to `traffic_mode: proxy`. In that mode, bbox forwards proxy env into BuildKit and common proxy-aware tools work, but direct-socket clients fail closed by design.
 
 Merge precedence is:
 1. CLI defaults

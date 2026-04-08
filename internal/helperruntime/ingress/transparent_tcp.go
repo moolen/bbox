@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -26,14 +27,52 @@ func ServeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, conne
 
 	switch detectTransparentTCPProtocol(reader) {
 	case transparentTCPProtocolTLS:
+		if !authorizeTransparentTCPConn(conn, rt, connectHost, connectPort, 443) {
+			return
+		}
 		_ = conn.SetDeadline(time.Time{})
 		ServeTransparentHTTPSConn(wrappedConn, rt, connectHost, connectPort)
 	case transparentTCPProtocolHTTP:
+		if !authorizeTransparentTCPConn(conn, rt, connectHost, connectPort, 80) {
+			return
+		}
 		_ = conn.SetDeadline(time.Time{})
 		serveTransparentHTTPConn(wrappedConn, rt, connectHost, connectPort)
 	default:
 		closeWithRST(conn)
 	}
+}
+
+func authorizeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, connectPort int, defaultPort int) bool {
+	connectHost = strings.TrimSpace(connectHost)
+	if connectHost == "" {
+		return true
+	}
+	if connectPort <= 0 {
+		connectPort = defaultPort
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), connectHandshakeTimeout)
+	defer cancel()
+
+	response, err := rt.AuthorizeTransparentConnect(ctx, connectHost, connectPort)
+	if err != nil {
+		closeWithRST(conn)
+		return false
+	}
+	if response == nil {
+		closeWithRST(conn)
+		return false
+	}
+	statusCode := response.StatusCode
+	if statusCode == 0 {
+		statusCode = http.StatusBadGateway
+	}
+	if response.Error != "" || statusCode < 200 || statusCode >= 300 {
+		closeWithRST(conn)
+		return false
+	}
+	return true
 }
 
 type transparentTCPProtocol string

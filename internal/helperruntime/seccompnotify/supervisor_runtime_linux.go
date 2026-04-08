@@ -33,7 +33,11 @@ var (
 	launcherBootstrapFactory = func() (string, []string, error) {
 		return sandboxBBoxPath, []string{"internal-launcher"}, nil
 	}
-	notificationTraceHook func(*seccomp.ScmpNotifReq)
+	notificationTraceHook       func(*seccomp.ScmpNotifReq)
+	notificationResultTraceHook func(*seccomp.ScmpNotifReq, *seccomp.ScmpNotifResp, error)
+	notifReceive                = seccomp.NotifReceive
+	notifRespond                = seccomp.NotifRespond
+	notifPoll                   = unix.Poll
 )
 
 func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
@@ -141,6 +145,7 @@ func (s *Supervisor) Prepare(_ context.Context, cmd *exec.Cmd) error {
 
 	s.notifySock = parent
 	s.notifyChild = child
+	s.notifyReceiveFD = -1
 	s.notifyFD = -1
 	s.launcherClose = closeTarget
 	return nil
@@ -165,14 +170,26 @@ func (s *Supervisor) Start(ctx context.Context, pid int) error {
 		s.launcherClose = nil
 	}
 
-	notifyFD, err := receiveLauncherNotifyFD(ctx, int(s.notifySock.Fd()))
+	controlFD, err := receiveLauncherNotifyFD(ctx, int(s.notifySock.Fd()))
 	if err != nil {
-		s.launcherError = err
+		s.setLauncherError(err)
 		return err
 	}
-	s.notifyFD = notifyFD
+	receiveFD, err := unix.Dup(controlFD)
+	if err != nil {
+		_ = unix.Close(controlFD)
+		s.setLauncherError(err)
+		return err
+	}
+	s.notifyFD = controlFD
+	s.notifyReceiveFD = receiveFD
+	s.closing.Store(false)
 
-	go s.serveNotifications(pid)
+	s.notifyServeWG.Add(1)
+	go func() {
+		defer s.notifyServeWG.Done()
+		s.serveNotifications(pid)
+	}()
 	return nil
 }
 
@@ -190,9 +207,17 @@ func (s *Supervisor) Close() error {
 		err = errors.Join(err, s.notifySock.Close())
 		s.notifySock = nil
 	}
+	s.closing.Store(true)
+	s.notifyServeWG.Wait()
+	if s.notifyReceiveFD >= minManagedHelperFD {
+		err = errors.Join(err, unix.Close(s.notifyReceiveFD))
+		s.notifyReceiveFD = -1
+	}
 	if s.notifyFD >= minManagedHelperFD {
+		s.notifyFDIOMu.Lock()
 		err = errors.Join(err, unix.Close(s.notifyFD))
 		s.notifyFD = -1
+		s.notifyFDIOMu.Unlock()
 	}
 	if s.launcherClose != nil {
 		err = errors.Join(err, s.launcherClose())
@@ -292,27 +317,121 @@ func recvLauncherNotifyFD(sockFD int) (int, error) {
 }
 
 func (s *Supervisor) serveNotifications(pid int) {
-	if s == nil || s.notifyFD < minManagedHelperFD {
+	if s == nil || s.notifyReceiveFD < minManagedHelperFD {
 		return
 	}
 
-	notifyFD := seccomp.ScmpFd(s.notifyFD)
+	notifyFD := seccomp.ScmpFd(s.notifyReceiveFD)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	pollFDs := []unix.PollFd{{
+		Fd:     int32(s.notifyReceiveFD),
+		Events: unix.POLLIN,
+	}}
+
 	for {
-		req, err := seccomp.NotifReceive(notifyFD)
-		if err != nil {
-			if errors.Is(err, unix.EBADF) || errors.Is(err, unix.EINTR) {
-				return
-			}
-			s.launcherError = err
+		if s.closing.Load() {
 			return
 		}
 
-		resp := s.processNotification(pid, req)
-		if err := seccomp.NotifRespond(notifyFD, resp); err != nil && !errors.Is(err, unix.ENOENT) {
-			s.launcherError = err
+		n, pollErr := notifPoll(pollFDs, 100)
+		if pollErr == unix.EINTR {
+			continue
+		}
+		if pollErr != nil {
+			if s.closing.Load() {
+				return
+			}
+			s.setLauncherError(fmt.Errorf("poll: %w", pollErr))
 			return
 		}
+		if n == 0 {
+			continue
+		}
+
+		req, err := notifReceive(notifyFD)
+		if err != nil {
+			if errors.Is(err, unix.EINTR) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ECANCELED) {
+				continue
+			}
+			if errors.Is(err, unix.EBADF) {
+				return
+			}
+			s.setLauncherError(fmt.Errorf("receive: %w", err))
+			return
+		}
+
+		waitForTurn, releaseTurn := s.enqueueNotificationTurn(pid, req)
+		wg.Add(1)
+		go func(req *seccomp.ScmpNotifReq, waitForTurn <-chan struct{}, releaseTurn func()) {
+			defer wg.Done()
+			defer releaseTurn()
+			if waitForTurn != nil {
+				<-waitForTurn
+			}
+			s.respondNotification(notifyFD, pid, req)
+		}(req, waitForTurn, releaseTurn)
 	}
+}
+
+func (s *Supervisor) respondNotification(_ seccomp.ScmpFd, pid int, req *seccomp.ScmpNotifReq) {
+	resp := s.processNotification(pid, req)
+	s.notifyFDIOMu.Lock()
+	err := notifRespond(seccomp.ScmpFd(s.notifyFD), resp)
+	s.notifyFDIOMu.Unlock()
+	if notificationResultTraceHook != nil {
+		notificationResultTraceHook(req, resp, err)
+	}
+	if err != nil && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EBADF) && !errors.Is(err, unix.EINTR) {
+		s.setLauncherError(fmt.Errorf("respond: %w", err))
+	}
+}
+
+func (s *Supervisor) setLauncherError(err error) {
+	if s == nil || err == nil {
+		return
+	}
+	s.launcherErrorMu.Lock()
+	if s.launcherError == nil {
+		s.launcherError = err
+	}
+	s.launcherErrorMu.Unlock()
+}
+
+func (s *Supervisor) enqueueNotificationTurn(pid int, req *seccomp.ScmpNotifReq) (<-chan struct{}, func()) {
+	if s == nil || req == nil {
+		return nil, func() {}
+	}
+
+	key, ok := s.notificationOpKey(pid, req)
+	if !ok {
+		return nil, func() {}
+	}
+
+	s.notifyQueueMu.Lock()
+	waitForTurn := s.notifyQueueTails[key]
+	doneCh := make(chan struct{})
+	s.notifyQueueTails[key] = doneCh
+	s.notifyQueueRefs[key]++
+	s.notifyQueueMu.Unlock()
+
+	return waitForTurn, func() {
+		close(doneCh)
+
+		s.notifyQueueMu.Lock()
+		s.notifyQueueRefs[key]--
+		if s.notifyQueueRefs[key] == 0 {
+			delete(s.notifyQueueRefs, key)
+			if tail, ok := s.notifyQueueTails[key]; ok && tail == doneCh {
+				delete(s.notifyQueueTails, key)
+			}
+		}
+		s.notifyQueueMu.Unlock()
+	}
+}
+
+func (s *Supervisor) notificationOpKey(pid int, req *seccomp.ScmpNotifReq) (fdRegistryKey, bool) {
+	return fdRegistryKey{pid: normalizeRegistryPID(notificationPID(pid, req)), fd: -1}, true
 }
 
 func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *seccomp.ScmpNotifResp {
@@ -322,6 +441,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 	if notificationTraceHook != nil {
 		notificationTraceHook(req)
 	}
+	targetPID := notificationPID(pid, req)
 
 	switch int(req.Data.Syscall) {
 	case unix.SYS_SOCKET:
@@ -334,7 +454,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(fd))
 	case unix.SYS_CONNECT:
-		handled, err := s.redirectConnect(pid, req)
+		handled, err := s.redirectConnect(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -343,7 +463,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, 0)
 	case unix.SYS_GETPEERNAME:
-		handled, err := s.emulateGetpeername(pid, req)
+		handled, err := s.emulateGetpeername(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -351,8 +471,26 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 			return continueResp(req.ID)
 		}
 		return successResp(req.ID, 0)
+	case unix.SYS_READ:
+		n, handled, err := s.emulateDNSRead(targetPID, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
 	case unix.SYS_SENDTO:
-		n, handled, err := s.emulateDNSSendTo(pid, req)
+		n, handled, err := s.emulateDNSSendTo(targetPID, req)
+		if err != nil {
+			return errorResp(req.ID, errnoFromError(err))
+		}
+		if !handled {
+			return continueResp(req.ID)
+		}
+		return successResp(req.ID, uint64(n))
+	case unix.SYS_WRITE:
+		n, handled, err := s.emulateDNSWrite(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -361,7 +499,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(n))
 	case unix.SYS_RECVFROM:
-		n, handled, err := s.emulateDNSRecvFrom(pid, req)
+		n, handled, err := s.emulateDNSRecvFrom(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -370,7 +508,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(n))
 	case unix.SYS_SENDMSG:
-		n, handled, err := s.emulateDNSSendMsg(pid, req)
+		n, handled, err := s.emulateDNSSendMsg(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -379,7 +517,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(n))
 	case unix.SYS_RECVMSG:
-		n, handled, err := s.emulateDNSRecvMsg(pid, req)
+		n, handled, err := s.emulateDNSRecvMsg(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -388,7 +526,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(n))
 	case unix.SYS_SENDMMSG:
-		n, handled, err := s.emulateDNSSendMMsg(pid, req)
+		n, handled, err := s.emulateDNSSendMMsg(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -397,7 +535,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(n))
 	case unix.SYS_RECVMMSG:
-		n, handled, err := s.emulateDNSRecvMMsg(pid, req)
+		n, handled, err := s.emulateDNSRecvMMsg(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -406,7 +544,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(n))
 	case unix.SYS_PPOLL:
-		n, handled, err := s.emulateDNSPPoll(pid, req)
+		n, handled, err := s.emulateDNSPPoll(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -415,7 +553,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return successResp(req.ID, uint64(n))
 	case unix.SYS_IOCTL:
-		handled, err := s.emulateDNSIoctl(pid, req)
+		handled, err := s.emulateDNSIoctl(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -426,11 +564,12 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 	case unix.SYS_CLOSE:
 		fd := int(req.Data.Args[0])
 		if fd >= 0 {
-			s.registry.Close(fd)
+			s.registry.CloseForPID(targetPID, fd)
+			s.releaseChildFD(fd)
 		}
 		return continueResp(req.ID)
 	case unix.SYS_DUP, unix.SYS_DUP3, unix.SYS_FCNTL:
-		fd, handled, err := s.duplicateSocket(req)
+		fd, handled, err := s.duplicateSocket(targetPID, req)
 		if err != nil {
 			return errorResp(req.ID, errnoFromError(err))
 		}
@@ -440,7 +579,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		return successResp(req.ID, uint64(fd))
 	default:
 		if isPollSyscall(int(req.Data.Syscall)) {
-			n, handled, err := s.emulateDNSPoll(pid, req)
+			n, handled, err := s.emulateDNSPoll(targetPID, req)
 			if err != nil {
 				return errorResp(req.ID, errnoFromError(err))
 			}
@@ -450,7 +589,7 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 			return successResp(req.ID, uint64(n))
 		}
 		if isDupLikeSyscall(int(req.Data.Syscall)) {
-			fd, handled, err := s.duplicateSocket(req)
+			fd, handled, err := s.duplicateSocket(targetPID, req)
 			if err != nil {
 				return errorResp(req.ID, errnoFromError(err))
 			}
@@ -461,6 +600,72 @@ func (s *Supervisor) processNotification(pid int, req *seccomp.ScmpNotifReq) *se
 		}
 		return continueResp(req.ID)
 	}
+}
+
+func notificationPID(fallback int, req *seccomp.ScmpNotifReq) int {
+	if req != nil && req.Pid > 0 {
+		return int(req.Pid)
+	}
+	return fallback
+}
+
+func minChildFDForSocketKind(kind SocketKind) int {
+	if kind == KindUDP {
+		return minManagedUDPChildFD
+	}
+	return minManagedTCPChildFD
+}
+
+func minDupFDForState(state SocketState, requestedMin int) int {
+	if state.Kind == KindUDP && requestedMin < minManagedUDPChildFD {
+		return minManagedUDPChildFD
+	}
+	return requestedMin
+}
+
+func (s *Supervisor) reserveChildFD(kind SocketKind, requestedMin int) int {
+	if s == nil {
+		return -1
+	}
+
+	s.childFDMu.Lock()
+	defer s.childFDMu.Unlock()
+
+	minFD := minChildFDForSocketKind(kind)
+	if requestedMin > minFD {
+		minFD = requestedMin
+	}
+
+	next := s.nextTCPChildFD
+	if kind == KindUDP {
+		next = s.nextUDPChildFD
+	}
+	if next < minFD {
+		next = minFD
+	}
+
+	for fd := next; fd < next+4096; fd++ {
+		if _, ok := s.reservedChildFDs[fd]; ok {
+			continue
+		}
+		s.reservedChildFDs[fd] = struct{}{}
+		if kind == KindUDP {
+			s.nextUDPChildFD = fd + 1
+		} else {
+			s.nextTCPChildFD = fd + 1
+		}
+		return fd
+	}
+	return -1
+}
+
+func (s *Supervisor) releaseChildFD(fd int) {
+	if s == nil || fd < 0 {
+		return
+	}
+	s.childFDMu.Lock()
+	delete(s.reservedChildFDs, fd)
+	s.childFDMu.Unlock()
 }
 
 func (s *Supervisor) injectSocket(req *seccomp.ScmpNotifReq) (int, bool, error) {
@@ -485,14 +690,34 @@ func (s *Supervisor) injectSocket(req *seccomp.ScmpNotifReq) (int, bool, error) 
 		return -1, false, err
 	}
 
-	childFD, err := addFDWithResult(s.notifyFD, req.ID, helperFD, 0, 0, 0)
-	if err != nil {
-		_ = unix.Close(helperFD)
-		return -1, false, err
+	childFD := -1
+	for {
+		childFD = s.reserveChildFD(kind, minChildFDForSocketKind(kind))
+		if childFD < 0 {
+			_ = unix.Close(helperFD)
+			return -1, false, unix.EMFILE
+		}
+		_, err = s.addFDWithResult(
+			req.ID,
+			helperFD,
+			uint32(childFD),
+			unix.SECCOMP_ADDFD_FLAG_SETFD,
+			0,
+		)
+		if err == nil {
+			break
+		}
+		s.releaseChildFD(childFD)
+		if !errors.Is(err, unix.EBUSY) && !errors.Is(err, unix.EEXIST) {
+			_ = unix.Close(helperFD)
+			return -1, false, err
+		}
 	}
 
-	s.registry.Close(childFD)
-	s.registry.Insert(SocketState{
+	pid := notificationPID(0, req)
+	s.registry.CloseForPID(pid, childFD)
+	s.registry.InsertForPID(pid, SocketState{
+		ChildPID:   pid,
 		Kind:       kind,
 		ChildFD:    childFD,
 		HelperFD:   helperFD,
@@ -510,7 +735,7 @@ func (s *Supervisor) redirectConnect(pid int, req *seccomp.ScmpNotifReq) (bool, 
 	}
 
 	childFD := int(req.Data.Args[0])
-	state, ok := s.registry.Lookup(childFD)
+	state, ok := s.registry.LookupForPID(pid, childFD)
 	if !ok {
 		return false, nil
 	}
@@ -538,19 +763,52 @@ func (s *Supervisor) redirectConnect(pid int, req *seccomp.ScmpNotifReq) (bool, 
 
 	switch state.Kind {
 	case KindTCP:
-		return true, s.handleConnect(connectRequest{
+		if err := s.handleConnect(connectRequest{
 			ChildFD:     childFD,
 			Destination: decoded,
-		})
+		}); err != nil {
+			return true, err
+		}
+		updated, ok := s.registry.LookupForPID(pid, childFD)
+		if !ok {
+			return true, unix.EBADF
+		}
+		if err := s.reinstallConnectedSocket(req.ID, updated); err != nil {
+			return true, err
+		}
+		return true, nil
 	case KindUDP:
 		if decoded.Port != 53 {
-			s.registry.Close(childFD)
+			s.registry.CloseForPID(pid, childFD)
+			s.releaseChildFD(childFD)
 			return false, nil
 		}
 		return true, s.handleDNSConnect(childFD, state, decoded)
 	default:
 		return false, nil
 	}
+}
+
+func (s *Supervisor) reinstallConnectedSocket(notifID uint64, state SocketState) error {
+	if s == nil {
+		return unix.EINVAL
+	}
+	if state.ChildFD < 0 || state.HelperFD < 0 {
+		return unix.EBADF
+	}
+
+	newFDFlags := uint32(0)
+	if state.SocketType&unix.SOCK_CLOEXEC != 0 {
+		newFDFlags = unix.O_CLOEXEC
+	}
+	_, err := s.addFDWithResult(
+		notifID,
+		state.HelperFD,
+		uint32(state.ChildFD),
+		unix.SECCOMP_ADDFD_FLAG_SETFD,
+		newFDFlags,
+	)
+	return err
 }
 
 func (s *Supervisor) emulateGetpeername(pid int, req *seccomp.ScmpNotifReq) (bool, error) {
@@ -562,7 +820,7 @@ func (s *Supervisor) emulateGetpeername(pid int, req *seccomp.ScmpNotifReq) (boo
 	if childFD < 0 {
 		return true, unix.EBADF
 	}
-	state, ok := s.registry.Lookup(childFD)
+	state, ok := s.registry.LookupForPID(pid, childFD)
 	if !ok {
 		return false, nil
 	}
@@ -578,7 +836,7 @@ func (s *Supervisor) emulateGetpeername(pid int, req *seccomp.ScmpNotifReq) (boo
 }
 
 func (s *Supervisor) emulateDNSIoctl(pid int, req *seccomp.ScmpNotifReq) (bool, error) {
-	state, ok := s.lookupManagedUDPSocket(req)
+	state, ok := s.lookupManagedUDPSocket(pid, req)
 	if !ok {
 		return false, nil
 	}
@@ -658,7 +916,7 @@ func classifyManagedSocket(targets RuntimeTargets, family, socketType, protocol 
 	}
 }
 
-func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, error) {
+func (s *Supervisor) duplicateSocket(pid int, req *seccomp.ScmpNotifReq) (int, bool, error) {
 	if s == nil || req == nil {
 		return -1, false, unix.EINVAL
 	}
@@ -667,18 +925,18 @@ func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, erro
 	if oldFD < 0 {
 		return -1, false, unix.EBADF
 	}
-	state, ok := s.registry.Lookup(oldFD)
+	state, ok := s.registry.LookupForPID(pid, oldFD)
 	if !ok {
 		return -1, false, nil
 	}
 
 	switch int(req.Data.Syscall) {
 	case unix.SYS_DUP:
-		childFD, err := addFDWithResult(s.notifyFD, req.ID, state.HelperFD, 0, 0, 0)
+		childFD, err := s.addFDAtOrAbove(req.ID, state.HelperFD, minDupFDForState(state, 0), 0)
 		if err != nil {
 			return -1, false, err
 		}
-		if err := s.registry.Dup(oldFD, childFD); err != nil {
+		if err := s.registry.DupForPID(pid, oldFD, childFD); err != nil {
 			return -1, false, err
 		}
 		return childFD, true, nil
@@ -694,8 +952,7 @@ func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, erro
 		if int(req.Data.Syscall) == unix.SYS_DUP3 && int(req.Data.Args[2])&unix.O_CLOEXEC != 0 {
 			newFDFlags = unix.O_CLOEXEC
 		}
-		childFD, err := addFDWithResult(
-			s.notifyFD,
+		childFD, err := s.addFDWithResult(
 			req.ID,
 			state.HelperFD,
 			uint32(newFD),
@@ -705,7 +962,7 @@ func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, erro
 		if err != nil {
 			return -1, false, err
 		}
-		if err := s.registry.Dup(oldFD, childFD); err != nil {
+		if err := s.registry.DupForPID(pid, oldFD, childFD); err != nil {
 			return -1, false, err
 		}
 		return childFD, true, nil
@@ -714,20 +971,22 @@ func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, erro
 		minFD := int(req.Data.Args[2])
 		switch cmd {
 		case unix.F_DUPFD:
-			childFD, err := addFDWithResult(s.notifyFD, req.ID, state.HelperFD, uint32(minFD), 0, 0)
+			minFD = minDupFDForState(state, minFD)
+			childFD, err := s.addFDAtOrAbove(req.ID, state.HelperFD, minFD, 0)
 			if err != nil {
 				return -1, false, err
 			}
-			if err := s.registry.Dup(oldFD, childFD); err != nil {
+			if err := s.registry.DupForPID(pid, oldFD, childFD); err != nil {
 				return -1, false, err
 			}
 			return childFD, true, nil
 		case unix.F_DUPFD_CLOEXEC:
-			childFD, err := addFDWithResult(s.notifyFD, req.ID, state.HelperFD, uint32(minFD), 0, unix.O_CLOEXEC)
+			minFD = minDupFDForState(state, minFD)
+			childFD, err := s.addFDAtOrAbove(req.ID, state.HelperFD, minFD, unix.O_CLOEXEC)
 			if err != nil {
 				return -1, false, err
 			}
-			if err := s.registry.Dup(oldFD, childFD); err != nil {
+			if err := s.registry.DupForPID(pid, oldFD, childFD); err != nil {
 				return -1, false, err
 			}
 			return childFD, true, nil
@@ -743,8 +1002,7 @@ func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, erro
 			if oldFD == newFD {
 				return oldFD, true, nil
 			}
-			childFD, err := addFDWithResult(
-				s.notifyFD,
+			childFD, err := s.addFDWithResult(
 				req.ID,
 				state.HelperFD,
 				uint32(newFD),
@@ -754,13 +1012,45 @@ func (s *Supervisor) duplicateSocket(req *seccomp.ScmpNotifReq) (int, bool, erro
 			if err != nil {
 				return -1, false, err
 			}
-			if err := s.registry.Dup(oldFD, childFD); err != nil {
+			if err := s.registry.DupForPID(pid, oldFD, childFD); err != nil {
 				return -1, false, err
 			}
 			return childFD, true, nil
 		}
 		return -1, false, nil
 	}
+}
+
+func (s *Supervisor) addFDAtOrAbove(reqID uint64, srcFD int, minFD int, newFDFlags uint32) (int, error) {
+	if minFD < 0 {
+		minFD = 0
+	}
+	for fd := minFD; fd < minFD+4096; fd++ {
+		childFD, err := s.addFDWithResult(
+			reqID,
+			srcFD,
+			uint32(fd),
+			unix.SECCOMP_ADDFD_FLAG_SETFD,
+			newFDFlags,
+		)
+		if err == nil {
+			return childFD, nil
+		}
+		if errors.Is(err, unix.EBUSY) || errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		return -1, err
+	}
+	return -1, unix.EMFILE
+}
+
+func (s *Supervisor) addFDWithResult(reqID uint64, srcFD int, newFD uint32, flags uint32, newFDFlags uint32) (int, error) {
+	if s == nil {
+		return -1, unix.EINVAL
+	}
+	s.notifyFDIOMu.Lock()
+	defer s.notifyFDIOMu.Unlock()
+	return addFDWithResult(s.notifyFD, reqID, srcFD, newFD, flags, newFDFlags)
 }
 
 func readProcessMemory(pid int, addr uintptr, size int) ([]byte, error) {

@@ -115,6 +115,11 @@ func (s *Supervisor) handleConnect(req connectRequest) error {
 	if connectErr != nil && connectErr != unix.EINPROGRESS && connectErr != unix.EALREADY {
 		return connectErr
 	}
+	if connectErr == unix.EINPROGRESS || connectErr == unix.EALREADY {
+		if err := waitForConnectComplete(state.HelperFD, 2*time.Second); err != nil {
+			return err
+		}
+	}
 	s.registry.Insert(state)
 
 	if route.Kind == routeRawTCPIngress && s.targets.RecordRawTCPOrigin != nil {
@@ -123,7 +128,57 @@ func (s *Supervisor) handleConnect(req connectRequest) error {
 			s.targets.RecordRawTCPOrigin(localAddr, req.Destination.Host, req.Destination.Port)
 		}
 	}
-	return connectErr
+	return nil
+}
+
+func waitForConnectComplete(fd int, timeout time.Duration) error {
+	if fd < 0 {
+		return unix.EBADF
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+
+	deadline := time.Now().Add(timeout)
+	pollFDs := []unix.PollFd{{
+		Fd:     int32(fd),
+		Events: unix.POLLOUT | unix.POLLERR | unix.POLLHUP,
+	}}
+
+	for {
+		socketErr, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)
+		if err == nil {
+			switch errno := unix.Errno(socketErr); errno {
+			case 0:
+				return nil
+			case unix.EINPROGRESS, unix.EALREADY, unix.EWOULDBLOCK:
+			default:
+				return errno
+			}
+		} else if err != unix.EINTR {
+			return err
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return unix.ETIMEDOUT
+		}
+		timeoutMs := int(remaining / time.Millisecond)
+		if timeoutMs < 1 {
+			timeoutMs = 1
+		}
+
+		n, pollErr := unix.Poll(pollFDs, timeoutMs)
+		if pollErr == unix.EINTR {
+			continue
+		}
+		if pollErr != nil {
+			return pollErr
+		}
+		if n == 0 {
+			return unix.ETIMEDOUT
+		}
+	}
 }
 
 func (s *Supervisor) handleClose(req syscallRequest) error {

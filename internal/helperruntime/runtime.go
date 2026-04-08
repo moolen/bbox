@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 	hrexec "github.com/moolen/bbox/internal/helperruntime/exec"
 	"github.com/moolen/bbox/internal/helperruntime/ingress"
 	"github.com/moolen/bbox/internal/helperruntime/seccompnotify"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 var (
@@ -86,6 +88,8 @@ type bridge struct {
 	currentExec           *execState
 	rawTCPMu              sync.Mutex
 	rawTCPOrigins         map[string]rawTCPDestination
+	dnsResolutionMu       sync.Mutex
+	dnsHostByIP           map[string]dnsResolutionEntry
 }
 
 func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *bridge {
@@ -93,6 +97,7 @@ func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *b
 		runtimeBridge: bridgepkg.New(conn, logger, proxyAddr),
 		logger:        logger,
 		rawTCPOrigins: make(map[string]rawTCPDestination),
+		dnsHostByIP:   make(map[string]dnsResolutionEntry),
 	}
 }
 
@@ -105,6 +110,11 @@ type execState struct {
 type rawTCPDestination struct {
 	host string
 	port int
+}
+
+type dnsResolutionEntry struct {
+	host    string
+	expires time.Time
 }
 
 const rawTCPOriginLookupTimeout = 1 * time.Second
@@ -254,22 +264,124 @@ func (b *bridge) dnsRoundTrip(ctx context.Context, network, host string, port in
 	if b == nil || b.runtimeBridge == nil {
 		return nil, fmt.Errorf("runtime bridge is required")
 	}
-	return b.runtimeBridge.DNSRoundTrip(ctx, helperproto.DNSRequest{
+	reply, err := b.runtimeBridge.DNSRoundTrip(ctx, helperproto.DNSRequest{
 		Network: network,
 		Host:    host,
 		Port:    port,
 		Payload: append([]byte(nil), payload...),
 	})
+	if err != nil {
+		return nil, err
+	}
+	b.rememberDNSResolution(payload, reply)
+	return reply, nil
 }
 
 func (b *bridge) recordRawTCPOrigin(localAddr, host string, port int) {
 	if b == nil || localAddr == "" || host == "" || port < 1 || port > 65535 {
 		return
 	}
+	if ip := net.ParseIP(host); ip != nil {
+		if resolvedHost, ok := b.lookupResolvedHost(ip.String(), time.Now()); ok {
+			host = resolvedHost
+		}
+	}
 	localAddr = canonicalTCPOriginKey(localAddr)
 	b.rawTCPMu.Lock()
 	b.rawTCPOrigins[localAddr] = rawTCPDestination{host: host, port: port}
 	b.rawTCPMu.Unlock()
+}
+
+func (b *bridge) rememberDNSResolution(query []byte, response []byte) {
+	host, ips, ttl, ok := parseDNSResolution(query, response)
+	if !ok || len(ips) == 0 {
+		return
+	}
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	expires := time.Now().Add(ttl)
+
+	b.dnsResolutionMu.Lock()
+	for _, ip := range ips {
+		if ip == "" {
+			continue
+		}
+		b.dnsHostByIP[ip] = dnsResolutionEntry{
+			host:    host,
+			expires: expires,
+		}
+	}
+	b.dnsResolutionMu.Unlock()
+}
+
+func (b *bridge) lookupResolvedHost(ip string, now time.Time) (string, bool) {
+	if b == nil || ip == "" {
+		return "", false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	b.dnsResolutionMu.Lock()
+	defer b.dnsResolutionMu.Unlock()
+
+	entry, ok := b.dnsHostByIP[ip]
+	if !ok {
+		return "", false
+	}
+	if !entry.expires.IsZero() && now.After(entry.expires) {
+		delete(b.dnsHostByIP, ip)
+		return "", false
+	}
+	if strings.TrimSpace(entry.host) == "" {
+		return "", false
+	}
+	return entry.host, true
+}
+
+func parseDNSResolution(query []byte, response []byte) (string, []string, time.Duration, bool) {
+	var queryMessage dnsmessage.Message
+	if err := queryMessage.Unpack(query); err != nil {
+		return "", nil, 0, false
+	}
+	if len(queryMessage.Questions) == 0 {
+		return "", nil, 0, false
+	}
+	host := normalizeDNSName(queryMessage.Questions[0].Name.String())
+	if host == "" {
+		return "", nil, 0, false
+	}
+
+	var responseMessage dnsmessage.Message
+	if err := responseMessage.Unpack(response); err != nil {
+		return "", nil, 0, false
+	}
+
+	ips := make([]string, 0, len(responseMessage.Answers))
+	var ttlSeconds uint32
+	for _, answer := range responseMessage.Answers {
+		switch body := answer.Body.(type) {
+		case *dnsmessage.AResource:
+			ips = append(ips, net.IP(body.A[:]).String())
+		case *dnsmessage.AAAAResource:
+			ips = append(ips, net.IP(body.AAAA[:]).String())
+		default:
+			continue
+		}
+		if answer.Header.TTL > 0 && (ttlSeconds == 0 || answer.Header.TTL < ttlSeconds) {
+			ttlSeconds = answer.Header.TTL
+		}
+	}
+	if len(ips) == 0 {
+		return "", nil, 0, false
+	}
+	return host, ips, time.Duration(ttlSeconds) * time.Second, true
+}
+
+func normalizeDNSName(name string) string {
+	name = strings.TrimSpace(strings.TrimSuffix(name, "."))
+	return strings.ToLower(name)
 }
 
 func (b *bridge) takeRawTCPOrigin(localAddr string) (string, int, bool) {

@@ -51,3 +51,25 @@ func TestRegistryDupReplacesTargetFDState(t *testing.T) {
 		t.Fatalf("got %#v", got)
 	}
 }
+
+func TestRegistryScopesFDsByPID(t *testing.T) {
+	reg := NewFDRegistry()
+	reg.InsertForPID(101, SocketState{ChildFD: 8, Kind: KindTCP, OriginalHost: "child.example", OriginalPort: 443})
+	reg.InsertForPID(202, SocketState{ChildFD: 8, Kind: KindUDP, OriginalHost: "parent.example", OriginalPort: 53})
+
+	child, ok := reg.LookupForPID(101, 8)
+	if !ok {
+		t.Fatal("expected child pid fd state")
+	}
+	if child.OriginalHost != "child.example" || child.Kind != KindTCP {
+		t.Fatalf("unexpected child state: %#v", child)
+	}
+
+	parent, ok := reg.LookupForPID(202, 8)
+	if !ok {
+		t.Fatal("expected parent pid fd state")
+	}
+	if parent.OriginalHost != "parent.example" || parent.Kind != KindUDP {
+		t.Fatalf("unexpected parent state: %#v", parent)
+	}
+}

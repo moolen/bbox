@@ -151,6 +151,37 @@ func TestLoadCLIFileConfigDecodesDockerSocketPolicy(t *testing.T) {
 	}
 }
 
+func TestLoadCLIFileConfigDecodesDockerBuild(t *testing.T) {
+	path := fixturePath(t, "docker_build.yaml")
+	configDir := filepath.Dir(path)
+	got, err := loadCLIFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !got.DockerBuild.Enabled {
+		t.Fatal("expected docker_build.enabled=true")
+	}
+	if got.DockerBuild.BuildkitdPath != filepath.Join(configDir, "bin/buildkitd") {
+		t.Fatalf("got docker_build.buildkitd_path %q", got.DockerBuild.BuildkitdPath)
+	}
+	if got.DockerBuild.BuildctlPath != filepath.Join(configDir, "bin/buildctl") {
+		t.Fatalf("got docker_build.buildctl_path %q", got.DockerBuild.BuildctlPath)
+	}
+	if got.DockerBuild.RuncPath != "/usr/bin/runc" {
+		t.Fatalf("got docker_build.runc_path %q", got.DockerBuild.RuncPath)
+	}
+	if got.DockerBuild.PodmanPath != "/usr/bin/podman" {
+		t.Fatalf("got docker_build.podman_path %q", got.DockerBuild.PodmanPath)
+	}
+	if got.DockerBuild.NewuidmapPath != "/usr/bin/newuidmap" {
+		t.Fatalf("got docker_build.newuidmap_path %q", got.DockerBuild.NewuidmapPath)
+	}
+	if got.DockerBuild.NewgidmapPath != "/usr/bin/newgidmap" {
+		t.Fatalf("got docker_build.newgidmap_path %q", got.DockerBuild.NewgidmapPath)
+	}
+}
+
 func TestLoadCLIFileConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) {
 	path := fixturePath(t, "relative_paths.yaml")
 	configDir := filepath.Dir(path)
@@ -344,6 +375,40 @@ func TestMergeCLIConfigPreservesDockerSocketPolicy(t *testing.T) {
 		{Action: "deny", Operations: []string{"image_push"}},
 	}) {
 		t.Fatalf("got docker socket rules %#v", got.DockerSocket.Rules)
+	}
+}
+
+func TestMergeCLIConfigPreservesDockerBuildConfig(t *testing.T) {
+	base := cliFileConfig{
+		DockerBuild: cliDockerBuildConfig{
+			Enabled:       true,
+			BuildkitdPath: "/base/buildkitd",
+			NewuidmapPath: "/base/newuidmap",
+			hasEnabled:    true,
+			hasBuildkitd:  true,
+			hasNewuidmap:  true,
+		},
+	}
+
+	overlay := cliFileConfig{
+		DockerBuild: cliDockerBuildConfig{
+			BuildctlPath: "/overlay/buildctl",
+			hasBuildctl:  true,
+		},
+	}
+
+	got := mergeCLIConfigLayer(base, overlay)
+	if !got.DockerBuild.Enabled {
+		t.Fatal("expected docker_build.enabled to be preserved")
+	}
+	if got.DockerBuild.BuildkitdPath != "/base/buildkitd" {
+		t.Fatalf("got docker_build.buildkitd_path %q", got.DockerBuild.BuildkitdPath)
+	}
+	if got.DockerBuild.BuildctlPath != "/overlay/buildctl" {
+		t.Fatalf("got docker_build.buildctl_path %q", got.DockerBuild.BuildctlPath)
+	}
+	if got.DockerBuild.NewuidmapPath != "/base/newuidmap" {
+		t.Fatalf("got docker_build.newuidmap_path %q", got.DockerBuild.NewuidmapPath)
 	}
 }
 

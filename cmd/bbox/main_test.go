@@ -507,6 +507,48 @@ func TestBuildConfigTrafficModesDoNotRequireMITMFlag(t *testing.T) {
 	}
 }
 
+func TestBuildConfigDockerBuildFromBBoxYAMLDoesNotRequireHostDockerBinary(t *testing.T) {
+	root := t.TempDir()
+	toolDir := filepath.Join(root, "tools")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"buildkitd", "buildctl", "runc", "podman", "newuidmap", "newgidmap"} {
+		writeExecutableFixture(t, toolDir, name)
+	}
+
+	writeBBoxYAML(t, root, `
+docker_build:
+  enabled: true
+  buildkitd_path: ./tools/buildkitd
+  buildctl_path: ./tools/buildctl
+  runc_path: ./tools/runc
+  podman_path: ./tools/podman
+  newuidmap_path: ./tools/newuidmap
+  newgidmap_path: ./tools/newgidmap
+env:
+  - PATH=`+toolDir+`
+clear_env: true
+`)
+
+	cfg, err := buildConfig(cliOptions{}, []string{"docker", "build", "--target", "builder", "."}, root, []string{"PATH=/does/not/exist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.sandbox.DockerBuild.Enabled {
+		t.Fatal("expected docker build to be enabled")
+	}
+	if cfg.sandbox.DockerBuild.BuildkitdPath != filepath.Join(root, "tools/buildkitd") {
+		t.Fatalf("unexpected buildkitd path: %q", cfg.sandbox.DockerBuild.BuildkitdPath)
+	}
+	if len(cfg.sandbox.Binaries) != 0 {
+		t.Fatalf("expected host docker binary to be skipped, got %v", cfg.sandbox.Binaries)
+	}
+	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Source: "/usr", Target: "/usr", ReadOnly: true}) {
+		t.Fatalf("did not expect /usr PATH mount to hide staged docker shim, got %v", cfg.sandbox.Mounts)
+	}
+}
+
 func TestRootCommandPrintPolicyShowsMergedConfigAndFlagState(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested")

@@ -177,15 +177,16 @@ type buildInputs struct {
 	ExtraLocals    []string
 	FrontendOpts   []string
 	CleanupPaths   []string
+	TrustBundle    string
 	Truststore     generatedTruststore
+	JavaToolOpts   []string
 	MavenSettings  string
 }
 
 type trustInjectionOptions struct {
 	pemPath            string
 	javaTruststorePath string
-	javaTruststoreType string
-	javaTruststorePass string
+	javaToolOptions    []string
 	mavenSettingsPath  string
 }
 
@@ -196,10 +197,6 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 		DockerfileName: filepath.Base(dockerfileAbs),
 	}
 
-	trustBundlePath, ok := resolveTrustBundlePath(env)
-	if !ok {
-		return inputs, nil
-	}
 	if _, err := os.Stat(dockerfileAbs); err != nil {
 		if os.IsNotExist(err) {
 			return inputs, nil
@@ -211,19 +208,28 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 	if err != nil {
 		return buildInputs{}, fmt.Errorf("read dockerfile %s: %w", dockerfileAbs, err)
 	}
-	rewrittenWithPEMOnly, err := rewriteDockerfileWithTrustBundle(original, trustInjectionOptions{
-		pemPath: injectedTrustBundlePrimaryPath,
-	})
+	proxyCfg, err := proxyConfigFromEnv(env)
+	if err != nil {
+		return buildInputs{}, fmt.Errorf("parse proxy config from env: %w", err)
+	}
+	trustBundlePath, hasTrustBundle := resolveTrustBundlePath(env)
+
+	previewInjection := trustInjectionOptions{}
+	if hasTrustBundle {
+		previewInjection.pemPath = injectedTrustBundlePrimaryPath
+	}
+	if proxyOpts := javaProxyOptions(proxyCfg); len(proxyOpts) > 0 {
+		previewInjection.javaToolOptions = append(previewInjection.javaToolOptions, proxyOpts...)
+	}
+	if proxyCfg.Enabled() {
+		previewInjection.mavenSettingsPath = injectedMavenSettingsPath
+	}
+	previewRewritten, err := rewriteDockerfileWithTrustBundle(original, previewInjection)
 	if err != nil {
 		return buildInputs{}, fmt.Errorf("rewrite dockerfile %s for trust injection: %w", dockerfileAbs, err)
 	}
-	if bytes.Equal(rewrittenWithPEMOnly, original) {
+	if bytes.Equal(previewRewritten, original) {
 		return inputs, nil
-	}
-
-	trustBundle, err := os.ReadFile(trustBundlePath)
-	if err != nil {
-		return buildInputs{}, fmt.Errorf("read trust bundle %s: %w", trustBundlePath, err)
 	}
 
 	stageDir, err := os.MkdirTemp("", "bbox-build-inputs-")
@@ -232,22 +238,25 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 	}
 
 	rewrittenPath := filepath.Join(stageDir, filepath.Base(dockerfileAbs))
-	if err := os.WriteFile(filepath.Join(stageDir, bboxTrustBundleFileName), trustBundle, 0o644); err != nil {
-		_ = os.RemoveAll(stageDir)
-		return buildInputs{}, fmt.Errorf("write staged trust bundle: %w", err)
-	}
-	proxyCfg, err := proxyConfigFromEnv(env)
-	if err != nil {
-		_ = os.RemoveAll(stageDir)
-		return buildInputs{}, fmt.Errorf("parse proxy config from env: %w", err)
-	}
-	if len(trustBundle) > 0 {
-		truststore, err := writePKCS12Truststore(stageDir, trustBundle)
+	if hasTrustBundle {
+		trustBundle, err := os.ReadFile(trustBundlePath)
 		if err != nil {
 			_ = os.RemoveAll(stageDir)
-			return buildInputs{}, fmt.Errorf("write staged JVM truststore: %w", err)
+			return buildInputs{}, fmt.Errorf("read trust bundle %s: %w", trustBundlePath, err)
 		}
-		inputs.Truststore = truststore
+		if err := os.WriteFile(filepath.Join(stageDir, bboxTrustBundleFileName), trustBundle, 0o644); err != nil {
+			_ = os.RemoveAll(stageDir)
+			return buildInputs{}, fmt.Errorf("write staged trust bundle: %w", err)
+		}
+		inputs.TrustBundle = filepath.Join(stageDir, bboxTrustBundleFileName)
+		if len(trustBundle) > 0 {
+			truststore, err := writePKCS12Truststore(stageDir, trustBundle)
+			if err != nil {
+				_ = os.RemoveAll(stageDir)
+				return buildInputs{}, fmt.Errorf("write staged JVM truststore: %w", err)
+			}
+			inputs.Truststore = truststore
+		}
 	}
 	if proxyCfg.Enabled() {
 		settingsXML, err := renderMavenSettings(proxyCfg)
@@ -261,6 +270,10 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 			return buildInputs{}, fmt.Errorf("write staged Maven settings: %w", err)
 		}
 		inputs.MavenSettings = settingsPath
+	}
+	inputs.JavaToolOpts = append(inputs.JavaToolOpts, javaProxyOptions(proxyCfg)...)
+	if truststoreOpts := javaTruststoreOptions(inputs.Truststore); len(truststoreOpts) > 0 {
+		inputs.JavaToolOpts = append(truststoreOpts, inputs.JavaToolOpts...)
 	}
 
 	trustInjection := trustInjectionOptionsFromStagedAssets(inputs)
@@ -283,17 +296,21 @@ func prepareBuildInputs(contextAbs string, dockerfileAbs string, env []string) (
 }
 
 func trustInjectionOptionsFromStagedAssets(inputs buildInputs) trustInjectionOptions {
-	opts := trustInjectionOptions{
-		pemPath: injectedTrustBundlePrimaryPath,
+	opts := trustInjectionOptions{}
+	if strings.TrimSpace(inputs.TrustBundle) != "" {
+		if _, err := os.Stat(inputs.TrustBundle); err == nil {
+			opts.pemPath = injectedTrustBundlePrimaryPath
+		}
 	}
 	if strings.TrimSpace(inputs.Truststore.Path) != "" &&
 		strings.TrimSpace(inputs.Truststore.Type) != "" &&
 		strings.TrimSpace(inputs.Truststore.Password) != "" {
 		if _, err := os.Stat(inputs.Truststore.Path); err == nil {
 			opts.javaTruststorePath = injectedJavaTruststorePath
-			opts.javaTruststoreType = inputs.Truststore.Type
-			opts.javaTruststorePass = inputs.Truststore.Password
 		}
+	}
+	if len(inputs.JavaToolOpts) > 0 {
+		opts.javaToolOptions = append(opts.javaToolOptions, inputs.JavaToolOpts...)
 	}
 	if strings.TrimSpace(inputs.MavenSettings) != "" {
 		if _, err := os.Stat(inputs.MavenSettings); err == nil {
@@ -331,6 +348,12 @@ func rewriteDockerfileWithTrustBundle(content []byte, opts trustInjectionOptions
 		return append([]byte(nil), content...), nil
 	}
 
+	perRunSnippet := trustBundlePerRunInjectionSnippet(opts)
+	stageBootstrapSnippet := trustStageBootstrapSnippet(opts)
+	if perRunSnippet == "" && stageBootstrapSnippet == "" {
+		return append([]byte(nil), content...), nil
+	}
+
 	injectBeforeLine := make(map[int]struct{})
 	injectStageBootstrapBeforeLine := make(map[int]struct{})
 	currentStageSawRun := false
@@ -340,14 +363,16 @@ func rewriteDockerfileWithTrustBundle(content []byte, opts trustInjectionOptions
 			currentStageSawRun = false
 		}
 		if instruction == "run" && child.StartLine > 0 {
-			injectBeforeLine[child.StartLine] = struct{}{}
-			if !currentStageSawRun {
-				injectStageBootstrapBeforeLine[child.StartLine] = struct{}{}
-				currentStageSawRun = true
+			if perRunSnippet != "" {
+				injectBeforeLine[child.StartLine] = struct{}{}
 			}
+			if stageBootstrapSnippet != "" && !currentStageSawRun {
+				injectStageBootstrapBeforeLine[child.StartLine] = struct{}{}
+			}
+			currentStageSawRun = true
 		}
 	}
-	if len(injectBeforeLine) == 0 {
+	if len(injectBeforeLine) == 0 && len(injectStageBootstrapBeforeLine) == 0 {
 		return append([]byte(nil), content...), nil
 	}
 
@@ -360,10 +385,10 @@ func rewriteDockerfileWithTrustBundle(content []byte, opts trustInjectionOptions
 	for i, line := range lines {
 		lineNo := i + 1
 		if _, ok := injectStageBootstrapBeforeLine[lineNo]; ok {
-			out.WriteString(trustStageBootstrapSnippet(opts))
+			out.WriteString(stageBootstrapSnippet)
 		}
 		if _, ok := injectBeforeLine[lineNo]; ok {
-			out.WriteString(trustBundlePerRunInjectionSnippet(opts))
+			out.WriteString(perRunSnippet)
 		}
 		out.WriteString(line)
 	}
@@ -375,15 +400,28 @@ func trustBundleInjectionSnippet(opts ...trustInjectionOptions) string {
 	return trustStageBootstrapSnippet(opts...) + trustBundlePerRunInjectionSnippet(opts...)
 }
 
-func trustBundlePerRunInjectionSnippet(opts ...trustInjectionOptions) string {
-	injection := trustInjectionOptions{
-		pemPath: injectedTrustBundlePrimaryPath,
+func javaTruststoreOptions(truststore generatedTruststore) []string {
+	if strings.TrimSpace(truststore.Path) == "" ||
+		strings.TrimSpace(truststore.Type) == "" ||
+		strings.TrimSpace(truststore.Password) == "" {
+		return nil
 	}
-	if len(opts) > 0 {
+	return []string{
+		"-Djavax.net.ssl.trustStore=" + injectedJavaTruststorePath,
+		"-Djavax.net.ssl.trustStoreType=" + truststore.Type,
+		"-Djavax.net.ssl.trustStorePassword=" + truststore.Password,
+	}
+}
+
+func trustBundlePerRunInjectionSnippet(opts ...trustInjectionOptions) string {
+	injection := trustInjectionOptions{}
+	if len(opts) == 0 {
+		injection.pemPath = injectedTrustBundlePrimaryPath
+	} else {
 		injection = opts[0]
-		if strings.TrimSpace(injection.pemPath) == "" {
-			injection.pemPath = injectedTrustBundlePrimaryPath
-		}
+	}
+	if strings.TrimSpace(injection.pemPath) == "" {
+		return ""
 	}
 
 	var b strings.Builder
@@ -410,20 +448,16 @@ func trustStageBootstrapSnippet(opts ...trustInjectionOptions) string {
 	if strings.TrimSpace(injection.javaTruststorePath) != "" {
 		fmt.Fprintf(&b, "COPY --from=%s /%s %s\n", bboxTrustContextName, bboxJavaTruststoreFileName, injection.javaTruststorePath)
 	}
-	if strings.TrimSpace(injection.javaTruststorePath) != "" &&
-		strings.TrimSpace(injection.javaTruststoreType) != "" &&
-		strings.TrimSpace(injection.javaTruststorePass) != "" {
+	if len(injection.javaToolOptions) > 0 {
 		fmt.Fprintf(
 			&b,
-			"ENV JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStoreType=%s -Djavax.net.ssl.trustStorePassword=%s ${JAVA_TOOL_OPTIONS}\n",
-			injection.javaTruststorePath,
-			injection.javaTruststoreType,
-			injection.javaTruststorePass,
+			"ENV JAVA_TOOL_OPTIONS %s ${JAVA_TOOL_OPTIONS}\n",
+			strings.Join(injection.javaToolOptions, " "),
 		)
 	}
 	if strings.TrimSpace(injection.mavenSettingsPath) != "" {
 		fmt.Fprintf(&b, "COPY --from=%s /%s %s\n", bboxTrustContextName, bboxMavenSettingsFileName, injection.mavenSettingsPath)
-		fmt.Fprintf(&b, "ENV MAVEN_ARGS=--settings %s ${MAVEN_ARGS}\n", injection.mavenSettingsPath)
+		fmt.Fprintf(&b, "ENV MAVEN_ARGS --settings %s ${MAVEN_ARGS}\n", injection.mavenSettingsPath)
 	}
 	return b.String()
 }

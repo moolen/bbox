@@ -3,6 +3,8 @@ package seccompnotify
 import (
 	"context"
 	"os"
+	"sync"
+	"sync/atomic"
 )
 
 type SocketKind string
@@ -16,6 +18,7 @@ const (
 type SocketState struct {
 	// Kind selects the syscall emulation path for this child FD.
 	Kind       SocketKind
+	ChildPID   int
 	ChildFD    int
 	HelperFD   int
 	Family     int
@@ -111,16 +114,33 @@ type Supervisor struct {
 	registry              *FDRegistry
 	notifySock            *os.File
 	notifyChild           *os.File
+	notifyReceiveFD       int
 	notifyFD              int
+	notifyServeWG         sync.WaitGroup
+	notifyFDIOMu          sync.Mutex
+	childFDMu             sync.Mutex
+	reservedChildFDs      map[int]struct{}
+	nextTCPChildFD        int
+	nextUDPChildFD        int
+	notifyQueueMu         sync.Mutex
+	notifyQueueTails      map[fdRegistryKey]chan struct{}
+	notifyQueueRefs       map[fdRegistryKey]int
+	launcherErrorMu       sync.Mutex
 	launcherError         error
 	launcherClose         func() error
 	payloadSeccompBPFPath string
+	closing               atomic.Bool
 }
 
 func NewSupervisor(targets RuntimeTargets) (*Supervisor, error) {
 	return &Supervisor{
-		targets:  targets,
-		registry: NewFDRegistry(),
+		targets:          targets,
+		registry:         NewFDRegistry(),
+		reservedChildFDs: make(map[int]struct{}),
+		nextTCPChildFD:   minManagedTCPChildFD,
+		nextUDPChildFD:   minManagedUDPChildFD,
+		notifyQueueTails: make(map[fdRegistryKey]chan struct{}),
+		notifyQueueRefs:  make(map[fdRegistryKey]int),
 	}, nil
 }
 

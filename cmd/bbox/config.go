@@ -56,35 +56,53 @@ type cliDockerSocketConfig struct {
 	hasRules         bool                        `yaml:"-"`
 }
 
+type cliDockerBuildConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	BuildkitdPath string `yaml:"buildkitd_path"`
+	BuildctlPath  string `yaml:"buildctl_path"`
+	RuncPath      string `yaml:"runc_path"`
+	PodmanPath    string `yaml:"podman_path"`
+	NewuidmapPath string `yaml:"newuidmap_path"`
+	NewgidmapPath string `yaml:"newgidmap_path"`
+	hasEnabled    bool   `yaml:"-"`
+	hasBuildkitd  bool   `yaml:"-"`
+	hasBuildctl   bool   `yaml:"-"`
+	hasRunc       bool   `yaml:"-"`
+	hasPodman     bool   `yaml:"-"`
+	hasNewuidmap  bool   `yaml:"-"`
+	hasNewgidmap  bool   `yaml:"-"`
+}
+
 type cliFileConfig struct {
-	Name                      string          `yaml:"name"`
-	WorkDir                   string          `yaml:"workdir"`
-	Bin                       []string        `yaml:"bin"`
-	MountRO                   []string        `yaml:"mount_ro"`
-	MountRW                   []string        `yaml:"mount_rw"`
-	Env                       []string        `yaml:"env"`
-	ClearEnv                  bool            `yaml:"clear_env"`
-	TrafficMode               string          `yaml:"traffic_mode"`
-	MaxRequestBodyBytes       int64           `yaml:"max_request_body_bytes"`
-	AccessLog                 string          `yaml:"access_log"`
-	ReportPolicyViolations    bool            `yaml:"report_policy_violations"`
-	ReportAccessSummary       bool            `yaml:"report_access_summary"`
-	ReportRequestSummary      bool            `yaml:"report_request_summary"`
-	Policy                    cliPolicyConfig `yaml:"policy"`
-	DockerSocket              cliDockerSocketConfig
-	hasName                   bool `yaml:"-"`
-	hasWorkDir                bool `yaml:"-"`
-	hasBin                    bool `yaml:"-"`
-	hasMountRO                bool `yaml:"-"`
-	hasMountRW                bool `yaml:"-"`
-	hasEnv                    bool `yaml:"-"`
-	hasClearEnv               bool `yaml:"-"`
-	hasTrafficMode            bool `yaml:"-"`
-	hasMaxRequestBodyBytes    bool `yaml:"-"`
-	hasAccessLog              bool `yaml:"-"`
-	hasReportPolicyViolations bool `yaml:"-"`
-	hasReportAccessSummary    bool `yaml:"-"`
-	hasReportRequestSummary   bool `yaml:"-"`
+	Name                      string                `yaml:"name"`
+	WorkDir                   string                `yaml:"workdir"`
+	Bin                       []string              `yaml:"bin"`
+	MountRO                   []string              `yaml:"mount_ro"`
+	MountRW                   []string              `yaml:"mount_rw"`
+	Env                       []string              `yaml:"env"`
+	ClearEnv                  bool                  `yaml:"clear_env"`
+	TrafficMode               string                `yaml:"traffic_mode"`
+	MaxRequestBodyBytes       int64                 `yaml:"max_request_body_bytes"`
+	AccessLog                 string                `yaml:"access_log"`
+	ReportPolicyViolations    bool                  `yaml:"report_policy_violations"`
+	ReportAccessSummary       bool                  `yaml:"report_access_summary"`
+	ReportRequestSummary      bool                  `yaml:"report_request_summary"`
+	Policy                    cliPolicyConfig       `yaml:"policy"`
+	DockerSocket              cliDockerSocketConfig `yaml:"docker_socket"`
+	DockerBuild               cliDockerBuildConfig  `yaml:"docker_build"`
+	hasName                   bool                  `yaml:"-"`
+	hasWorkDir                bool                  `yaml:"-"`
+	hasBin                    bool                  `yaml:"-"`
+	hasMountRO                bool                  `yaml:"-"`
+	hasMountRW                bool                  `yaml:"-"`
+	hasEnv                    bool                  `yaml:"-"`
+	hasClearEnv               bool                  `yaml:"-"`
+	hasTrafficMode            bool                  `yaml:"-"`
+	hasMaxRequestBodyBytes    bool                  `yaml:"-"`
+	hasAccessLog              bool                  `yaml:"-"`
+	hasReportPolicyViolations bool                  `yaml:"-"`
+	hasReportAccessSummary    bool                  `yaml:"-"`
+	hasReportRequestSummary   bool                  `yaml:"-"`
 }
 
 type rawCLIPolicyConfig struct {
@@ -116,6 +134,16 @@ type rawCLIDockerSocketConfig struct {
 	Rules            *[]rawCLIDockerSocketRuleConfig `yaml:"rules"`
 }
 
+type rawCLIDockerBuildConfig struct {
+	Enabled       *bool   `yaml:"enabled"`
+	BuildkitdPath *string `yaml:"buildkitd_path"`
+	BuildctlPath  *string `yaml:"buildctl_path"`
+	RuncPath      *string `yaml:"runc_path"`
+	PodmanPath    *string `yaml:"podman_path"`
+	NewuidmapPath *string `yaml:"newuidmap_path"`
+	NewgidmapPath *string `yaml:"newgidmap_path"`
+}
+
 type rawCLIFileConfig struct {
 	Name                   *string                   `yaml:"name"`
 	WorkDir                *string                   `yaml:"workdir"`
@@ -132,6 +160,7 @@ type rawCLIFileConfig struct {
 	ReportRequestSummary   *bool                     `yaml:"report_request_summary"`
 	Policy                 *rawCLIPolicyConfig       `yaml:"policy"`
 	DockerSocket           *rawCLIDockerSocketConfig `yaml:"docker_socket"`
+	DockerBuild            *rawCLIDockerBuildConfig  `yaml:"docker_build"`
 }
 
 type cliFlagOverrides struct {
@@ -270,6 +299,36 @@ func toCLIFileConfig(raw rawCLIFileConfig) cliFileConfig {
 			cfg.DockerSocket.hasRules = true
 		}
 	}
+	if raw.DockerBuild != nil {
+		if raw.DockerBuild.Enabled != nil {
+			cfg.DockerBuild.Enabled = *raw.DockerBuild.Enabled
+			cfg.DockerBuild.hasEnabled = true
+		}
+		if raw.DockerBuild.BuildkitdPath != nil {
+			cfg.DockerBuild.BuildkitdPath = *raw.DockerBuild.BuildkitdPath
+			cfg.DockerBuild.hasBuildkitd = true
+		}
+		if raw.DockerBuild.BuildctlPath != nil {
+			cfg.DockerBuild.BuildctlPath = *raw.DockerBuild.BuildctlPath
+			cfg.DockerBuild.hasBuildctl = true
+		}
+		if raw.DockerBuild.RuncPath != nil {
+			cfg.DockerBuild.RuncPath = *raw.DockerBuild.RuncPath
+			cfg.DockerBuild.hasRunc = true
+		}
+		if raw.DockerBuild.PodmanPath != nil {
+			cfg.DockerBuild.PodmanPath = *raw.DockerBuild.PodmanPath
+			cfg.DockerBuild.hasPodman = true
+		}
+		if raw.DockerBuild.NewuidmapPath != nil {
+			cfg.DockerBuild.NewuidmapPath = *raw.DockerBuild.NewuidmapPath
+			cfg.DockerBuild.hasNewuidmap = true
+		}
+		if raw.DockerBuild.NewgidmapPath != nil {
+			cfg.DockerBuild.NewgidmapPath = *raw.DockerBuild.NewgidmapPath
+			cfg.DockerBuild.hasNewgidmap = true
+		}
+	}
 	return cfg
 }
 
@@ -282,6 +341,24 @@ func resolveCLIFileConfigPaths(cfg *cliFileConfig, configDir string) {
 	}
 	if cfg.hasMountRW {
 		cfg.MountRW = resolveConfigMountSpecs(cfg.MountRW, configDir)
+	}
+	if cfg.DockerBuild.hasBuildkitd {
+		cfg.DockerBuild.BuildkitdPath = resolveConfigPath(cfg.DockerBuild.BuildkitdPath, configDir)
+	}
+	if cfg.DockerBuild.hasBuildctl {
+		cfg.DockerBuild.BuildctlPath = resolveConfigPath(cfg.DockerBuild.BuildctlPath, configDir)
+	}
+	if cfg.DockerBuild.hasRunc {
+		cfg.DockerBuild.RuncPath = resolveConfigPath(cfg.DockerBuild.RuncPath, configDir)
+	}
+	if cfg.DockerBuild.hasPodman {
+		cfg.DockerBuild.PodmanPath = resolveConfigPath(cfg.DockerBuild.PodmanPath, configDir)
+	}
+	if cfg.DockerBuild.hasNewuidmap {
+		cfg.DockerBuild.NewuidmapPath = resolveConfigPath(cfg.DockerBuild.NewuidmapPath, configDir)
+	}
+	if cfg.DockerBuild.hasNewgidmap {
+		cfg.DockerBuild.NewgidmapPath = resolveConfigPath(cfg.DockerBuild.NewgidmapPath, configDir)
 	}
 }
 
@@ -439,6 +516,34 @@ func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfi
 	if overlay.DockerSocket.hasRules {
 		base.DockerSocket.Rules = cloneDockerSocketRules(overlay.DockerSocket.Rules)
 		base.DockerSocket.hasRules = true
+	}
+	if overlay.DockerBuild.hasEnabled {
+		base.DockerBuild.Enabled = overlay.DockerBuild.Enabled
+		base.DockerBuild.hasEnabled = true
+	}
+	if overlay.DockerBuild.hasBuildkitd {
+		base.DockerBuild.BuildkitdPath = overlay.DockerBuild.BuildkitdPath
+		base.DockerBuild.hasBuildkitd = true
+	}
+	if overlay.DockerBuild.hasBuildctl {
+		base.DockerBuild.BuildctlPath = overlay.DockerBuild.BuildctlPath
+		base.DockerBuild.hasBuildctl = true
+	}
+	if overlay.DockerBuild.hasRunc {
+		base.DockerBuild.RuncPath = overlay.DockerBuild.RuncPath
+		base.DockerBuild.hasRunc = true
+	}
+	if overlay.DockerBuild.hasPodman {
+		base.DockerBuild.PodmanPath = overlay.DockerBuild.PodmanPath
+		base.DockerBuild.hasPodman = true
+	}
+	if overlay.DockerBuild.hasNewuidmap {
+		base.DockerBuild.NewuidmapPath = overlay.DockerBuild.NewuidmapPath
+		base.DockerBuild.hasNewuidmap = true
+	}
+	if overlay.DockerBuild.hasNewgidmap {
+		base.DockerBuild.NewgidmapPath = overlay.DockerBuild.NewgidmapPath
+		base.DockerBuild.hasNewgidmap = true
 	}
 	return base
 }

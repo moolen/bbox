@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -99,6 +101,132 @@ func TestSupervisorStartRedirectsTCPConnectRuntime(t *testing.T) {
 	}
 }
 
+func TestSupervisorStartSupportsGoTCPExchangeRuntimeIPv6(t *testing.T) {
+	launcher := buildLauncherBinary(t)
+
+	var (
+		traceMu sync.Mutex
+		trace   []string
+	)
+	prevTraceHook := notificationTraceHook
+	notificationTraceHook = func(req *seccomp.ScmpNotifReq) {
+		if req == nil {
+			return
+		}
+		traceMu.Lock()
+		trace = append(trace, formatNotifTraceForTest(req))
+		traceMu.Unlock()
+	}
+	t.Cleanup(func() {
+		notificationTraceHook = prevTraceHook
+	})
+
+	rawListener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("tcp6 listener unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = rawListener.Close() })
+
+	requestPayload := []byte("ping")
+	replyPayload := []byte("pong")
+	acceptedConn := make(chan struct{}, 1)
+	exchangeDone := make(chan error, 1)
+	go func() {
+		conn, acceptErr := rawListener.Accept()
+		if acceptErr != nil {
+			exchangeDone <- acceptErr
+			return
+		}
+		defer conn.Close()
+		acceptedConn <- struct{}{}
+
+		buf := make([]byte, len(requestPayload))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			exchangeDone <- err
+			return
+		}
+		if !bytes.Equal(buf, requestPayload) {
+			exchangeDone <- fmt.Errorf("payload=%q want=%q", buf, requestPayload)
+			return
+		}
+		if _, err := conn.Write(replyPayload); err != nil {
+			exchangeDone <- err
+			return
+		}
+		exchangeDone <- nil
+	}()
+
+	restore := setLauncherCommandForTest(t, func() (string, []string, error) {
+		return launcher, nil, nil
+	})
+	t.Cleanup(restore)
+
+	clientPath := buildGoTCPExchangeProbeForSeccompTest(t)
+
+	s, err := NewSupervisor(RuntimeTargets{
+		RawTCPAddrV6: rawListener.Addr().String(),
+	})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close supervisor: %v", closeErr)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.Command(
+		clientPath,
+		"[2001:db8::77]:443",
+		hex.EncodeToString(requestPayload),
+		hex.EncodeToString(replyPayload),
+	)
+	var stderr bytes.Buffer
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &stderr
+
+	if err := s.Prepare(ctx, cmd); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v stderr=%s", err, stderr.String())
+	}
+	if err := s.Start(ctx, cmd.Process.Pid); err != nil {
+		_ = cmd.Wait()
+		t.Fatalf("supervisor start: %v stderr=%s", err, stderr.String())
+	}
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
+
+	select {
+	case <-acceptedConn:
+	case err := <-waitDone:
+		t.Fatalf("wait before accept: %v stderr=%s trace=%v", err, stderr.String(), trace)
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for redirected tcp accept trace=%v", trace)
+	}
+
+	select {
+	case acceptErr := <-exchangeDone:
+		if acceptErr != nil {
+			t.Fatalf("raw ingress exchange: %v trace=%v", acceptErr, trace)
+		}
+	case err := <-waitDone:
+		t.Fatalf("wait before exchange finished: %v stderr=%s trace=%v", err, stderr.String(), trace)
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for redirected tcp payload exchange trace=%v", trace)
+	}
+
+	if err := <-waitDone; err != nil {
+		t.Fatalf("wait: %v stderr=%s trace=%v", err, stderr.String(), trace)
+	}
+}
+
 func TestSupervisorStartRedirectsConnectedUDPDNSRuntime(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -158,6 +286,292 @@ func TestSupervisorStartRedirectsConnectedUDPDNSRuntime(t *testing.T) {
 	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
+	}
+	if err := s.Start(ctx, cmd.Process.Pid); err != nil {
+		_ = cmd.Wait()
+		t.Fatalf("supervisor start: %v stderr=%s", err, stderr.String())
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v stderr=%s", err, stderr.String())
+	}
+}
+
+func TestSupervisorStartAllowsUnixSocketWhileDNSRoundTripPending(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	launcher := buildLauncherBinary(t)
+
+	query := []byte{0xde, 0xad, 0xbe, 0xef}
+	reply := []byte{0xca, 0xfe, 0xba, 0xbe}
+
+	restore := setLauncherCommandForTest(t, func() (string, []string, error) {
+		return launcher, nil, nil
+	})
+	t.Cleanup(restore)
+
+	unixSockPath := filepath.Join(t.TempDir(), "listener.sock")
+	unixListener, err := net.Listen("unix", unixSockPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = unixListener.Close() })
+
+	accepted := make(chan struct{}, 1)
+	go func() {
+		conn, acceptErr := unixListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+		accepted <- struct{}{}
+	}()
+
+	dnsStarted := make(chan struct{}, 1)
+	releaseDNS := make(chan struct{})
+
+	s, err := NewSupervisor(RuntimeTargets{
+		DNSRoundTrip: func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
+			if network != "udp" {
+				return nil, fmt.Errorf("network=%q want udp", network)
+			}
+			if host != "192.0.2.53" || port != 53 {
+				return nil, fmt.Errorf("destination=%s:%d", host, port)
+			}
+			if !bytes.Equal(payload, query) {
+				return nil, fmt.Errorf("payload=%x want=%x", payload, query)
+			}
+			select {
+			case dnsStarted <- struct{}{}:
+			default:
+			}
+			select {
+			case <-releaseDNS:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second):
+				return nil, fmt.Errorf("timed out waiting to release dns callback")
+			}
+			return append([]byte(nil), reply...), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close supervisor: %v", closeErr)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.Command(
+		python,
+		"-c",
+		`import socket,sys,threading,time
+errors=[]
+reply=bytes.fromhex(sys.argv[4])
+def dns_worker():
+    try:
+        s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(5)
+        sent=s.sendto(bytes.fromhex(sys.argv[3]), (sys.argv[1], int(sys.argv[2])))
+        if sent != len(bytes.fromhex(sys.argv[3])):
+            raise RuntimeError(f"short dns send {sent}")
+        data, _ = s.recvfrom(512)
+        if data != reply:
+            raise RuntimeError(f"unexpected dns reply {data!r}")
+    except Exception as exc:
+        errors.append(f"dns:{exc!r}")
+def unix_worker():
+    time.sleep(0.2)
+    try:
+        s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(sys.argv[5])
+        s.send(b"x")
+        s.close()
+    except Exception as exc:
+        errors.append(f"unix:{exc!r}")
+t1=threading.Thread(target=dns_worker)
+t2=threading.Thread(target=unix_worker)
+t1.start()
+t2.start()
+t2.join()
+t1.join()
+if errors:
+    raise SystemExit("; ".join(errors))
+`,
+		"192.0.2.53",
+		"53",
+		fmt.Sprintf("%x", query),
+		fmt.Sprintf("%x", reply),
+		unixSockPath,
+	)
+	var stderr bytes.Buffer
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &stderr
+
+	if err := s.Prepare(ctx, cmd); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := s.Start(ctx, cmd.Process.Pid); err != nil {
+		_ = cmd.Wait()
+		t.Fatalf("supervisor start: %v stderr=%s", err, stderr.String())
+	}
+
+	select {
+	case <-dnsStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for dns callback to start")
+	}
+
+	select {
+	case <-accepted:
+	case <-time.After(3 * time.Second):
+		close(releaseDNS)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatal("timed out waiting for unix socket accept while dns callback was pending")
+	}
+
+	close(releaseDNS)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v stderr=%s", err, stderr.String())
+	}
+}
+
+func TestSupervisorStartRedirectsConnectedUDPDNSRuntimeCWriteRead(t *testing.T) {
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("cc not available")
+	}
+	launcher := buildLauncherBinary(t)
+
+	query := []byte{0xde, 0xad, 0xbe, 0xef}
+	reply := []byte{0xca, 0xfe, 0xba, 0xbe}
+
+	restore := setLauncherCommandForTest(t, func() (string, []string, error) {
+		return launcher, nil, nil
+	})
+	t.Cleanup(restore)
+
+	clientPath := buildCConnectedUDPDNSWriteProbeForSeccompTest(t)
+
+	var (
+		traceMu sync.Mutex
+		trace   []string
+	)
+	prevTraceHook := notificationTraceHook
+	notificationTraceHook = func(req *seccomp.ScmpNotifReq) {
+		if req == nil {
+			return
+		}
+		traceMu.Lock()
+		trace = append(trace, formatNotifTraceForTest(req))
+		traceMu.Unlock()
+	}
+	t.Cleanup(func() {
+		notificationTraceHook = prevTraceHook
+	})
+	s, err := NewSupervisor(RuntimeTargets{
+		DNSRoundTrip: func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
+			if network != "udp" {
+				return nil, fmt.Errorf("network=%q want udp", network)
+			}
+			if host != "192.0.2.53" || port != 53 {
+				return nil, fmt.Errorf("destination=%s:%d", host, port)
+			}
+			if !bytes.Equal(payload, query) {
+				return nil, fmt.Errorf("payload=%x want=%x", payload, query)
+			}
+			return append([]byte(nil), reply...), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close supervisor: %v", closeErr)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.Command(
+		clientPath,
+		"192.0.2.53",
+		"53",
+		fmt.Sprintf("%x", query),
+		fmt.Sprintf("%x", reply),
+	)
+	var stderr bytes.Buffer
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &stderr
+
+	if err := s.Prepare(ctx, cmd); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v stderr=%s", err, stderr.String())
+	}
+	if err := s.Start(ctx, cmd.Process.Pid); err != nil {
+		_ = cmd.Wait()
+		t.Fatalf("supervisor start: %v stderr=%s", err, stderr.String())
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v stderr=%s trace=%v", err, stderr.String(), trace)
+	}
+}
+
+func TestSupervisorStartDoesNotInheritNotifyFDIntoPayload(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	launcher := buildLauncherBinary(t)
+
+	restore := setLauncherCommandForTest(t, func() (string, []string, error) {
+		return launcher, nil, nil
+	})
+	t.Cleanup(restore)
+
+	s, err := NewSupervisor(RuntimeTargets{})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close supervisor: %v", closeErr)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.Command(
+		python,
+		"-c",
+		"import os,sys\nfor fd in range(3, 256):\n    try:\n        os.close(fd)\n    except OSError:\n        pass\nsys.exit(0)\n",
+	)
+	var stderr bytes.Buffer
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &stderr
+
+	if err := s.Prepare(ctx, cmd); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v stderr=%s", err, stderr.String())
 	}
 	if err := s.Start(ctx, cmd.Process.Pid); err != nil {
 		_ = cmd.Wait()
@@ -379,7 +793,6 @@ func TestSupervisorStartSupportsLibcGetaddrinfoDNSRuntimeAFUnspecWithHostRespons
 	t.Cleanup(func() {
 		notificationTraceHook = prevTraceHook
 	})
-
 	s, err := NewSupervisor(RuntimeTargets{
 		DNSRoundTrip: func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
 			return roundTripHostDNSForSeccompTest(ctx, network, nameserver, payload)
@@ -464,7 +877,6 @@ func TestSupervisorStartSupportsLibcGetaddrinfoDNSRuntimeCClient(t *testing.T) {
 	t.Cleanup(func() {
 		notificationTraceHook = prevTraceHook
 	})
-
 	s, err := NewSupervisor(RuntimeTargets{
 		DNSRoundTrip: func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
 			if network != "udp" {
@@ -508,6 +920,154 @@ func TestSupervisorStartSupportsLibcGetaddrinfoDNSRuntimeCClient(t *testing.T) {
 	}
 }
 
+func TestSupervisorStartSupportsLibcGetaddrinfoDNSRuntimeCClientFromChildProcess(t *testing.T) {
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("cc not available")
+	}
+	launcher := buildLauncherBinary(t)
+
+	restore := setLauncherCommandForTest(t, func() (string, []string, error) {
+		return launcher, nil, nil
+	})
+	t.Cleanup(restore)
+
+	clientPath := buildCGetaddrinfoProbeForSeccompTest(t)
+
+	s, err := NewSupervisor(RuntimeTargets{
+		DNSRoundTrip: func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
+			if network != "udp" {
+				return nil, fmt.Errorf("network=%q want udp", network)
+			}
+			if port != 53 {
+				return nil, fmt.Errorf("port=%d want 53", port)
+			}
+			return buildDNSAnswer(t, payload, [4]byte{127, 0, 0, 1}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close supervisor: %v", closeErr)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.Command(
+		"/bin/sh",
+		"-c",
+		`"$1" "$2" "$3" & wait $!`,
+		"sh",
+		clientPath,
+		"example.com",
+		"80",
+	)
+	var stderr bytes.Buffer
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &stderr
+
+	if err := s.Prepare(ctx, cmd); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v stderr=%s", err, stderr.String())
+	}
+	if err := s.Start(ctx, cmd.Process.Pid); err != nil {
+		_ = cmd.Wait()
+		t.Fatalf("supervisor start: %v stderr=%s", err, stderr.String())
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v stderr=%s", err, stderr.String())
+	}
+}
+
+func TestSupervisorStartSupportsPureGoResolverDNSRuntime(t *testing.T) {
+	launcher := buildLauncherBinary(t)
+
+	restore := setLauncherCommandForTest(t, func() (string, []string, error) {
+		return launcher, nil, nil
+	})
+	t.Cleanup(restore)
+
+	clientPath := buildGoLookupProbeForSeccompTest(t)
+
+	var (
+		traceMu sync.Mutex
+		trace   []string
+	)
+	prevTraceHook := notificationTraceHook
+	notificationTraceHook = func(req *seccomp.ScmpNotifReq) {
+		if req == nil {
+			return
+		}
+		traceMu.Lock()
+		trace = append(trace, formatNotifTraceForTest(req))
+		traceMu.Unlock()
+	}
+	t.Cleanup(func() {
+		notificationTraceHook = prevTraceHook
+	})
+	var (
+		respMu sync.Mutex
+		resps  []string
+	)
+	prevResultHook := notificationResultTraceHook
+	notificationResultTraceHook = func(req *seccomp.ScmpNotifReq, resp *seccomp.ScmpNotifResp, respondErr error) {
+		respMu.Lock()
+		resps = append(resps, fmt.Sprintf("%s resp_error=%d resp_val=%d respond_err=%v", formatNotifTraceForTest(req), resp.Error, resp.Val, respondErr))
+		respMu.Unlock()
+	}
+	t.Cleanup(func() {
+		notificationResultTraceHook = prevResultHook
+	})
+
+	s, err := NewSupervisor(RuntimeTargets{
+		DNSRoundTrip: func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
+			if network != "udp" {
+				return nil, fmt.Errorf("network=%q want udp", network)
+			}
+			if port != 53 {
+				return nil, fmt.Errorf("port=%d want 53", port)
+			}
+			return buildDNSAnswer(t, payload, [4]byte{127, 0, 0, 1}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new supervisor: %v", err)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("close supervisor: %v", closeErr)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.Command(clientPath, "example.com", "127.0.0.1", "::1")
+	cmd.Env = append(os.Environ(), "GODEBUG=netdns=go")
+	var stderr bytes.Buffer
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &stderr
+
+	if err := s.Prepare(ctx, cmd); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v stderr=%s", err, stderr.String())
+	}
+	if err := s.Start(ctx, cmd.Process.Pid); err != nil {
+		_ = cmd.Wait()
+		t.Fatalf("supervisor start: %v stderr=%s", err, stderr.String())
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v stderr=%s trace=%v responses=%v", err, stderr.String(), trace, resps)
+	}
+}
+
 func TestSupervisorStartReconnectsConnectedUDPDNSRuntimeAfterAFUnspecDisconnect(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -522,6 +1082,36 @@ func TestSupervisorStartReconnectsConnectedUDPDNSRuntimeAfterAFUnspecDisconnect(
 		return launcher, nil, nil
 	})
 	t.Cleanup(restore)
+
+	var (
+		traceMu sync.Mutex
+		trace   []string
+	)
+	prevTraceHook := notificationTraceHook
+	notificationTraceHook = func(req *seccomp.ScmpNotifReq) {
+		if req == nil {
+			return
+		}
+		traceMu.Lock()
+		trace = append(trace, formatNotifTraceForTest(req))
+		traceMu.Unlock()
+	}
+	t.Cleanup(func() {
+		notificationTraceHook = prevTraceHook
+	})
+	var (
+		respMu sync.Mutex
+		resps  []string
+	)
+	prevResultHook := notificationResultTraceHook
+	notificationResultTraceHook = func(req *seccomp.ScmpNotifReq, resp *seccomp.ScmpNotifResp, respondErr error) {
+		respMu.Lock()
+		resps = append(resps, fmt.Sprintf("%s resp_error=%d resp_val=%d respond_err=%v", formatNotifTraceForTest(req), resp.Error, resp.Val, respondErr))
+		respMu.Unlock()
+	}
+	t.Cleanup(func() {
+		notificationResultTraceHook = prevResultHook
+	})
 
 	s, err := NewSupervisor(RuntimeTargets{
 		DNSRoundTrip: func(ctx context.Context, network, host string, port int, payload []byte) ([]byte, error) {
@@ -591,7 +1181,7 @@ sys.exit(0 if data == bytes.fromhex(sys.argv[4]) else 1)`,
 		t.Fatalf("supervisor start: %v stderr=%s", err, stderr.String())
 	}
 	if err := cmd.Wait(); err != nil {
-		t.Fatalf("wait: %v stderr=%s", err, stderr.String())
+		t.Fatalf("wait: %v stderr=%s trace=%v responses=%v", err, stderr.String(), trace, resps)
 	}
 }
 
@@ -2416,6 +3006,8 @@ func formatNotifTraceForTest(req *seccomp.ScmpNotifReq) string {
 		name = "fcntl"
 	}
 	switch int(req.Data.Syscall) {
+	case unix.SYS_SOCKET:
+		return fmt.Sprintf("%s family=%d type=%d protocol=%d", name, int(req.Data.Args[0]), int(req.Data.Args[1]), int(req.Data.Args[2]))
 	case unix.SYS_RECVFROM:
 		return fmt.Sprintf("%s fd=%d len=%d flags=%#x addr=%#x addrlen=%#x", name, int(req.Data.Args[0]), int(req.Data.Args[2]), int(req.Data.Args[3]), uintptr(req.Data.Args[4]), uintptr(req.Data.Args[5]))
 	case unix.SYS_SENDMMSG, unix.SYS_RECVMMSG:
@@ -2523,6 +3115,239 @@ int main(int argc, char **argv) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build c getaddrinfo probe: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return binaryPath
+}
+
+func buildCConnectedUDPDNSWriteProbeForSeccompTest(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "bbox-seccompnotify-c-udp-write-")
+	if err != nil {
+		t.Fatalf("mkdir temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	sourcePath := filepath.Join(dir, "main.c")
+	source := `#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+static int decode_hex(const char *in, unsigned char *out, size_t max_out) {
+  size_t len = strlen(in);
+  if (len % 2 != 0 || len / 2 > max_out) {
+    return -1;
+  }
+  for (size_t i = 0; i < len / 2; i++) {
+    unsigned int value = 0;
+    if (sscanf(in + (i * 2), "%2x", &value) != 1) {
+      return -1;
+    }
+    out[i] = (unsigned char)value;
+  }
+  return (int)(len / 2);
+}
+
+int main(int argc, char **argv) {
+  if (argc != 5) {
+    return 2;
+  }
+
+  unsigned char query[512];
+  unsigned char reply[512];
+  int query_len = decode_hex(argv[3], query, sizeof(query));
+  int reply_len = decode_hex(argv[4], reply, sizeof(reply));
+  if (query_len < 0 || reply_len < 0) {
+    fprintf(stderr, "hex decode failed\n");
+    return 2;
+  }
+
+  int fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0) {
+    perror("socket");
+    return 1;
+  }
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((unsigned short)atoi(argv[2]));
+  if (inet_pton(AF_INET, argv[1], &addr.sin_addr) != 1) {
+    fprintf(stderr, "inet_pton failed\n");
+    close(fd);
+    return 1;
+  }
+
+  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    perror("connect");
+    close(fd);
+    return 1;
+  }
+
+  ssize_t written = write(fd, query, (size_t)query_len);
+  if (written != query_len) {
+    perror("write");
+    close(fd);
+    return 1;
+  }
+
+  unsigned char buf[512];
+  ssize_t n = read(fd, buf, sizeof(buf));
+  if (n != reply_len) {
+    perror("read");
+    close(fd);
+    return 1;
+  }
+  if (memcmp(buf, reply, (size_t)reply_len) != 0) {
+    fprintf(stderr, "reply mismatch\n");
+    close(fd);
+    return 1;
+  }
+
+  close(fd);
+  return 0;
+}
+`
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Fatalf("write client source: %v", err)
+	}
+
+	binaryPath := filepath.Join(dir, "udp-write")
+	cmd := exec.Command("cc", "-O2", "-o", binaryPath, sourcePath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build c udp write probe: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return binaryPath
+}
+
+func buildGoLookupProbeForSeccompTest(t *testing.T) string {
+	t.Helper()
+
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("bbox-seccompnotify-go-lookup-%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir go lookup probe dir: %v", err)
+	}
+
+	sourcePath := filepath.Join(dir, "main.go")
+	const source = `package main
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"os"
+)
+
+func main() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: lookup <host> <want> [<want>...]")
+		os.Exit(2)
+	}
+	addrs, err := net.DefaultResolver.LookupHost(context.Background(), os.Args[1])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lookup: %v\n", err)
+		os.Exit(1)
+	}
+	for _, want := range os.Args[2:] {
+		for _, addr := range addrs {
+			if addr == want {
+				return
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "missing expected addresses %v in %v\n", os.Args[2:], addrs)
+	os.Exit(1)
+}
+`
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Fatalf("write go lookup probe: %v", err)
+	}
+
+	binaryPath := filepath.Join(dir, "lookup")
+	cmd := exec.Command("go", "build", "-o", binaryPath, sourcePath)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build go lookup probe: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return binaryPath
+}
+
+func buildGoTCPExchangeProbeForSeccompTest(t *testing.T) string {
+	t.Helper()
+
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("bbox-seccompnotify-go-tcp-%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir go tcp probe dir: %v", err)
+	}
+
+	sourcePath := filepath.Join(dir, "main.go")
+	const source = `package main
+
+import (
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"time"
+)
+
+func main() {
+	if len(os.Args) != 4 {
+		fmt.Fprintln(os.Stderr, "usage: tcp-exchange <addr> <payload-hex> <reply-hex>")
+		os.Exit(2)
+	}
+	payload, err := hex.DecodeString(os.Args[2])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "decode payload: %v\n", err)
+		os.Exit(1)
+	}
+	reply, err := hex.DecodeString(os.Args[3])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "decode reply: %v\n", err)
+		os.Exit(1)
+	}
+
+	conn, err := net.DialTimeout("tcp", os.Args[1], 2*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dial: %v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write(payload); err != nil {
+		fmt.Fprintf(os.Stderr, "write: %v\n", err)
+		os.Exit(1)
+	}
+	buf := make([]byte, len(reply))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		fmt.Fprintf(os.Stderr, "read: %v\n", err)
+		os.Exit(1)
+	}
+	if string(buf) != string(reply) {
+		fmt.Fprintf(os.Stderr, "reply=%q want=%q\n", buf, reply)
+		os.Exit(1)
+	}
+}
+`
+	if err := os.WriteFile(sourcePath, []byte(source), 0o644); err != nil {
+		t.Fatalf("write go tcp probe: %v", err)
+	}
+
+	binaryPath := filepath.Join(dir, "tcp-exchange")
+	cmd := exec.Command("go", "build", "-o", binaryPath, sourcePath)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build go tcp probe: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return binaryPath
 }
