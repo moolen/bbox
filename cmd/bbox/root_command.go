@@ -12,8 +12,7 @@ type cliOptions struct {
 	name                string
 	workDir             string
 	binaries            []string
-	mountRO             []string
-	mountRW             []string
+	mounts              []string
 	env                 []string
 	clearEnv            bool
 	clearEnvSet         bool
@@ -72,8 +71,7 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 	flags.StringVar(&opts.name, "name", "", "sandbox name")
 	flags.StringVar(&opts.workDir, "workdir", "", "working directory inside the sandbox")
 	flags.StringArrayVar(&opts.binaries, "bin", nil, "extra binary to stage into the sandbox")
-	flags.StringArrayVar(&opts.mountRO, "mount-ro", nil, "read-only bind mount in src:dst form")
-	flags.StringArrayVar(&opts.mountRW, "mount-rw", nil, "read-write bind mount in src:dst form")
+	flags.StringArrayVar(&opts.mounts, "mount", nil, "mount spec in key=value form")
 	flags.StringArrayVar(&opts.env, "env", nil, "environment entry in KEY=VALUE form")
 	flags.BoolVar(&opts.clearEnv, "clear-env", false, "do not inherit the host environment")
 	flags.StringVar(&opts.trafficMode, "traffic-mode", "proxy", "traffic mode: proxy or transparent")

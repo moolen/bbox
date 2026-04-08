@@ -1,10 +1,14 @@
 name: from-file
 workdir: /workspace
 bin: [bash, curl]
-mount_ro:
-  - /etc/ssl/certs:/etc/ssl/certs
-mount_rw:
-  - /host/cache:/cache
+mounts:
+  - type: bind
+    source: /etc/ssl/certs
+    target: /etc/ssl/certs
+    read_only: true
+  - type: bind
+    source: /host/cache
+    target: /cache
 env:
   - FOO=bar
 clear_env: true

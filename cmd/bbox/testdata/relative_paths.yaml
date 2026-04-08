@@ -1,6 +1,12 @@
 workdir: ./workspace
-mount_ro:
-  - ./certs:/etc/ssl/certs
-mount_rw:
-  - ../shared:./sandbox/shared
-  - /var/tmp:/abs-target
+mounts:
+  - type: bind
+    source: ./certs
+    target: /etc/ssl/certs
+    read_only: true
+  - type: bind
+    source: ../shared
+    target: ./sandbox/shared
+  - type: bind
+    source: /var/tmp
+    target: /abs-target

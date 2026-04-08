@@ -73,13 +73,9 @@ func toCLIFileConfig(raw rawCLIFileConfig) cliFileConfig {
 		cfg.Bin = cloneStringSlice(*raw.Bin)
 		cfg.hasBin = true
 	}
-	if raw.MountRO != nil {
-		cfg.MountRO = cloneStringSlice(*raw.MountRO)
-		cfg.hasMountRO = true
-	}
-	if raw.MountRW != nil {
-		cfg.MountRW = cloneStringSlice(*raw.MountRW)
-		cfg.hasMountRW = true
+	if raw.Mounts != nil {
+		cfg.Mounts = cloneMountConfigs(*raw.Mounts)
+		cfg.hasMounts = true
 	}
 	if raw.Env != nil {
 		cfg.Env = cloneStringSlice(*raw.Env)
@@ -176,11 +172,12 @@ func resolveCLIFileConfigPaths(cfg *cliFileConfig, configDir string) {
 	if cfg.hasWorkDir {
 		cfg.WorkDir = resolveConfigPath(cfg.WorkDir, configDir)
 	}
-	if cfg.hasMountRO {
-		cfg.MountRO = resolveConfigMountSpecs(cfg.MountRO, configDir)
-	}
-	if cfg.hasMountRW {
-		cfg.MountRW = resolveConfigMountSpecs(cfg.MountRW, configDir)
+	if cfg.hasMounts {
+		resolved := make([]cliMountConfig, 0, len(cfg.Mounts))
+		for _, mount := range cfg.Mounts {
+			resolved = append(resolved, resolveConfigMount(mount, configDir))
+		}
+		cfg.Mounts = resolved
 	}
 	if cfg.DockerBuild.hasBuildkitd {
 		cfg.DockerBuild.BuildkitdPath = resolveConfigPath(cfg.DockerBuild.BuildkitdPath, configDir)
@@ -208,17 +205,4 @@ func resolveConfigPath(value string, baseDir string) string {
 		return value
 	}
 	return filepath.Clean(filepath.Join(baseDir, value))
-}
-
-func resolveConfigMountSpecs(specs []string, baseDir string) []string {
-	out := make([]string, 0, len(specs))
-	for _, spec := range specs {
-		src, dst, ok := strings.Cut(spec, ":")
-		if !ok {
-			out = append(out, spec)
-			continue
-		}
-		out = append(out, resolveConfigPath(src, baseDir)+":"+resolveConfigPath(dst, baseDir))
-	}
-	return out
 }

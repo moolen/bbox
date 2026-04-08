@@ -12,8 +12,7 @@ type effectiveCLIConfig struct {
 	Name                string
 	WorkDir             string
 	Binaries            []string
-	MountsRO            []string
-	MountsRW            []string
+	Mounts              []cliMountConfig
 	Env                 []string
 	ClearEnv            bool
 	TrafficMode         string
@@ -58,7 +57,11 @@ func loadEffectiveCLIConfig(opts cliOptions, absCWD string) (effectiveCLIConfig,
 	}
 
 	mergedCfg := mergeCLIConfig(defaults, fileCfg, opts.flagOverrides, opts.audit)
-	mergedCfg = mergeCLIConfigLayer(mergedCfg, buildRuntimeCLIConfigLayer(opts))
+	runtimeLayer, err := buildRuntimeCLIConfigLayer(opts)
+	if err != nil {
+		return effectiveCLIConfig{}, err
+	}
+	mergedCfg = mergeCLIConfigLayer(mergedCfg, runtimeLayer)
 
 	return toEffectiveCLIConfig(mergedCfg, absCWD), nil
 }
@@ -83,7 +86,7 @@ func loadSelectedCLIFileConfig(configPath string, absCWD string) (cliFileConfig,
 	return loadCLIFileConfig(discoveredPath)
 }
 
-func buildRuntimeCLIConfigLayer(opts cliOptions) cliFileConfig {
+func buildRuntimeCLIConfigLayer(opts cliOptions) (cliFileConfig, error) {
 	runtimeLayer := cliFileConfig{}
 	if strings.TrimSpace(opts.name) != "" {
 		runtimeLayer.Name = opts.name
@@ -97,13 +100,16 @@ func buildRuntimeCLIConfigLayer(opts cliOptions) cliFileConfig {
 		runtimeLayer.Bin = append([]string(nil), opts.binaries...)
 		runtimeLayer.hasBin = true
 	}
-	if len(opts.mountRO) > 0 {
-		runtimeLayer.MountRO = append([]string(nil), opts.mountRO...)
-		runtimeLayer.hasMountRO = true
-	}
-	if len(opts.mountRW) > 0 {
-		runtimeLayer.MountRW = append([]string(nil), opts.mountRW...)
-		runtimeLayer.hasMountRW = true
+	if len(opts.mounts) > 0 {
+		runtimeLayer.Mounts = make([]cliMountConfig, 0, len(opts.mounts))
+		for _, spec := range opts.mounts {
+			mount, err := parseCLIMountSpec(spec)
+			if err != nil {
+				return cliFileConfig{}, err
+			}
+			runtimeLayer.Mounts = append(runtimeLayer.Mounts, toCLIMountConfig(mount))
+		}
+		runtimeLayer.hasMounts = true
 	}
 	if len(opts.env) > 0 {
 		runtimeLayer.Env = append([]string(nil), opts.env...)
@@ -117,7 +123,7 @@ func buildRuntimeCLIConfigLayer(opts cliOptions) cliFileConfig {
 		runtimeLayer.MaxRequestBodyBytes = opts.maxRequestBodyBytes
 		runtimeLayer.hasMaxRequestBodyBytes = true
 	}
-	return runtimeLayer
+	return runtimeLayer, nil
 }
 
 func toEffectiveCLIConfig(mergedCfg cliFileConfig, absCWD string) effectiveCLIConfig {
@@ -132,8 +138,7 @@ func toEffectiveCLIConfig(mergedCfg cliFileConfig, absCWD string) effectiveCLICo
 		Name:                mergedCfg.Name,
 		WorkDir:             workDir,
 		Binaries:            cloneStringSlice(mergedCfg.Bin),
-		MountsRO:            cloneStringSlice(mergedCfg.MountRO),
-		MountsRW:            cloneStringSlice(mergedCfg.MountRW),
+		Mounts:              cloneMountConfigs(mergedCfg.Mounts),
 		Env:                 cloneStringSlice(mergedCfg.Env),
 		ClearEnv:            mergedCfg.ClearEnv,
 		TrafficMode:         mergedCfg.TrafficMode,
