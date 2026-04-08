@@ -55,7 +55,7 @@ Add optional protocol-observability fields to structured access events and log e
 
 Initial semantics:
 
-- `Protocol` is a normalized protocol label such as `grpc`, `mysql`, `postgres`, `redis`, `ssh`, `http`, `https`, `tls_non_http`, or `unknown`.
+- `Protocol` is a normalized protocol label such as `grpc`, `mysql`, `postgres`, `redis`, `ssh`, `mongodb`, `amqp`, `nats`, `memcached`, `http`, `https`, `tls_non_http`, or `unknown`.
 - `ProtocolSource` records how bbox inferred the protocol, such as `http_headers`, `http_connect`, `tls_alpn`, `tls_client_hello`, or `first_bytes`.
 - `ProtocolConfidence` records inference strength, initially `definite`, `probable`, or `unknown`.
 
@@ -121,6 +121,14 @@ Initial protocol set:
   - Match RESP lead bytes such as `*`, `+`, `-`, `:`, `$`
 - `ssh`
   - Match `SSH-`
+- `mongodb`
+  - Match a plausible wire-protocol message header with a known opcode such as `OP_MSG`
+- `amqp`
+  - Match the exact AMQP protocol header
+- `nats`
+  - Match client-first textual commands such as `CONNECT `
+- `memcached`
+  - Match text protocol verbs such as `set ` or the binary protocol magic byte
 - `tls_non_http`
   - Match TLS ClientHello where the intercepted flow does not proceed through the HTTP/TLS MITM path as HTTP
 - `unknown`

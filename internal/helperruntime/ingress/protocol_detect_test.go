@@ -38,6 +38,49 @@ func TestDetectOpaqueTCPProtocol(t *testing.T) {
 			},
 		},
 		{
+			name: "mongodb op msg",
+			data: []byte{
+				0x15, 0x00, 0x00, 0x00,
+				0x01, 0x00, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00,
+				0xdd, 0x07, 0x00, 0x00,
+				0x00, 0x00, 0x00, 0x00,
+				0x00,
+			},
+			want: detectedProtocol{
+				Protocol:   "mongodb",
+				Source:     "first_bytes",
+				Confidence: "definite",
+			},
+		},
+		{
+			name: "amqp protocol header",
+			data: []byte{'A', 'M', 'Q', 'P', 0x00, 0x00, 0x09, 0x01},
+			want: detectedProtocol{
+				Protocol:   "amqp",
+				Source:     "first_bytes",
+				Confidence: "definite",
+			},
+		},
+		{
+			name: "nats connect preface",
+			data: []byte("CONNECT {\"verbose\":false}\r\n"),
+			want: detectedProtocol{
+				Protocol:   "nats",
+				Source:     "first_bytes",
+				Confidence: "probable",
+			},
+		},
+		{
+			name: "memcached text request",
+			data: []byte("set sample 0 60 5\r\nvalue\r\n"),
+			want: detectedProtocol{
+				Protocol:   "memcached",
+				Source:     "first_bytes",
+				Confidence: "probable",
+			},
+		},
+		{
 			name: "redis resp",
 			data: []byte("*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n"),
 			want: detectedProtocol{

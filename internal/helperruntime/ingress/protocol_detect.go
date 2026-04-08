@@ -16,6 +16,34 @@ func detectOpaqueTCPProtocol(prefix []byte) detectedProtocol {
 		return detectedProtocol{}
 	}
 
+	if isAMQPProtocolHeader(prefix) {
+		return detectedProtocol{
+			Protocol:   "amqp",
+			Source:     "first_bytes",
+			Confidence: "definite",
+		}
+	}
+	if isMongoDBWireMessage(prefix) {
+		return detectedProtocol{
+			Protocol:   "mongodb",
+			Source:     "first_bytes",
+			Confidence: "definite",
+		}
+	}
+	if isNATSClientPrefix(prefix) {
+		return detectedProtocol{
+			Protocol:   "nats",
+			Source:     "first_bytes",
+			Confidence: "probable",
+		}
+	}
+	if isMemcachedPrefix(prefix) {
+		return detectedProtocol{
+			Protocol:   "memcached",
+			Source:     "first_bytes",
+			Confidence: "probable",
+		}
+	}
 	if isMySQLGreeting(prefix) {
 		return detectedProtocol{
 			Protocol:   "mysql",
@@ -66,6 +94,29 @@ func detectOpaqueTCPProtocol(prefix []byte) detectedProtocol {
 	}
 }
 
+func isAMQPProtocolHeader(prefix []byte) bool {
+	if len(prefix) < 8 {
+		return false
+	}
+	return bytes.Equal(prefix[:8], []byte{'A', 'M', 'Q', 'P', 0x00, 0x00, 0x09, 0x01})
+}
+
+func isMongoDBWireMessage(prefix []byte) bool {
+	if len(prefix) < 16 {
+		return false
+	}
+	messageLength := binary.LittleEndian.Uint32(prefix[:4])
+	if messageLength < 16 || messageLength > 64<<20 {
+		return false
+	}
+	switch binary.LittleEndian.Uint32(prefix[12:16]) {
+	case 2004, 2010, 2012, 2013:
+		return true
+	default:
+		return false
+	}
+}
+
 func isMySQLGreeting(prefix []byte) bool {
 	if len(prefix) < 5 {
 		return false
@@ -106,6 +157,57 @@ func isRedisPrefix(prefix []byte) bool {
 	default:
 		return false
 	}
+}
+
+func isNATSClientPrefix(prefix []byte) bool {
+	for _, candidate := range [][]byte{
+		[]byte("CONNECT "),
+		[]byte("PUB "),
+		[]byte("HPUB "),
+		[]byte("SUB "),
+		[]byte("UNSUB "),
+		[]byte("PING\r\n"),
+		[]byte("PONG\r\n"),
+	} {
+		if bytes.HasPrefix(prefix, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMemcachedPrefix(prefix []byte) bool {
+	if len(prefix) == 0 {
+		return false
+	}
+	if prefix[0] == 0x80 || prefix[0] == 0x81 {
+		return true
+	}
+
+	lower := bytes.ToLower(prefix)
+	for _, candidate := range [][]byte{
+		[]byte("set "),
+		[]byte("add "),
+		[]byte("replace "),
+		[]byte("append "),
+		[]byte("prepend "),
+		[]byte("cas "),
+		[]byte("get "),
+		[]byte("gets "),
+		[]byte("delete "),
+		[]byte("incr "),
+		[]byte("decr "),
+		[]byte("touch "),
+		[]byte("stats"),
+		[]byte("version"),
+		[]byte("flush_all"),
+		[]byte("quit"),
+	} {
+		if bytes.HasPrefix(lower, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func looksLikeTLSClientHelloBytes(prefix []byte) bool {
