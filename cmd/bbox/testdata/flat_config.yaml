@@ -9,6 +9,7 @@ env:
   - FOO=bar
 clear_env: true
 traffic_mode: transparent
+policy_mode: audit
 max_request_body_bytes: 12345
 access_log: off
 report_policy_violations: true

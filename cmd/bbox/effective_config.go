@@ -17,6 +17,7 @@ type effectiveCLIConfig struct {
 	Env                 []string
 	ClearEnv            bool
 	TrafficMode         string
+	PolicyMode          string
 	MaxRequestBodyBytes int64
 	Policy              cliPolicyConfig
 	Reporting           bbox.ReportingOptions
@@ -57,7 +58,7 @@ func loadEffectiveCLIConfig(opts cliOptions, absCWD string) (effectiveCLIConfig,
 		return effectiveCLIConfig{}, err
 	}
 
-	mergedCfg := mergeCLIConfig(defaults, fileCfg, opts.flagOverrides, opts.audit)
+	mergedCfg := mergeCLIConfig(defaults, fileCfg, opts.flagOverrides)
 	mergedCfg = mergeCLIConfigLayer(mergedCfg, buildRuntimeCLIConfigLayer(opts))
 
 	return toEffectiveCLIConfig(mergedCfg, absCWD), nil
@@ -137,6 +138,7 @@ func toEffectiveCLIConfig(mergedCfg cliFileConfig, absCWD string) effectiveCLICo
 		Env:                 cloneStringSlice(mergedCfg.Env),
 		ClearEnv:            mergedCfg.ClearEnv,
 		TrafficMode:         mergedCfg.TrafficMode,
+		PolicyMode:          mergedCfg.PolicyMode,
 		MaxRequestBodyBytes: mergedCfg.MaxRequestBodyBytes,
 		Policy:              mergedCfg.Policy,
 		Reporting: bbox.ReportingOptions{

@@ -93,6 +93,10 @@ func toCLIFileConfig(raw rawCLIFileConfig) cliFileConfig {
 		cfg.TrafficMode = *raw.TrafficMode
 		cfg.hasTrafficMode = true
 	}
+	if raw.PolicyMode != nil {
+		cfg.PolicyMode = *raw.PolicyMode
+		cfg.hasPolicyMode = true
+	}
 	if raw.MaxRequestBodyBytes != nil {
 		cfg.MaxRequestBodyBytes = *raw.MaxRequestBodyBytes
 		cfg.hasMaxRequestBodyBytes = true

@@ -62,6 +62,9 @@ func deriveFlagOverrides(cmd *cobra.Command, opts cliOptions) cliFlagOverrides {
 	if cmd.Flags().Changed("traffic-mode") {
 		overrides.TrafficMode = &opts.trafficMode
 	}
+	if cmd.Flags().Changed("policy-mode") {
+		overrides.PolicyMode = &opts.policyMode
+	}
 	if cmd.Flags().Changed("report-policy-violations") {
 		overrides.ReportPolicy = &opts.reportPolicy
 	}

@@ -3,11 +3,13 @@ package main
 func defaultCLIFileConfig() cliFileConfig {
 	return cliFileConfig{
 		TrafficMode:               "proxy",
+		PolicyMode:                "enforce",
 		AccessLog:                 "json",
 		ReportPolicyViolations:    true,
 		ReportAccessSummary:       true,
 		ReportRequestSummary:      true,
 		hasTrafficMode:            true,
+		hasPolicyMode:             true,
 		hasAccessLog:              true,
 		hasReportPolicyViolations: true,
 		hasReportAccessSummary:    true,
@@ -21,12 +23,16 @@ func defaultCLIFileConfig() cliFileConfig {
 	}
 }
 
-func mergeCLIConfig(defaults cliFileConfig, fileCfg cliFileConfig, flags cliFlagOverrides, audit bool) cliFileConfig {
+func mergeCLIConfig(defaults cliFileConfig, fileCfg cliFileConfig, flags cliFlagOverrides) cliFileConfig {
 	merged := mergeCLIConfigLayer(defaults, fileCfg)
 
 	if flags.TrafficMode != nil {
 		merged.TrafficMode = *flags.TrafficMode
 		merged.hasTrafficMode = true
+	}
+	if flags.PolicyMode != nil {
+		merged.PolicyMode = *flags.PolicyMode
+		merged.hasPolicyMode = true
 	}
 	if flags.ReportPolicy != nil {
 		merged.ReportPolicyViolations = *flags.ReportPolicy
@@ -43,15 +49,6 @@ func mergeCLIConfig(defaults cliFileConfig, fileCfg cliFileConfig, flags cliFlag
 	if flags.AccessLog != nil {
 		merged.AccessLog = *flags.AccessLog
 		merged.hasAccessLog = true
-	}
-
-	if audit {
-		merged.ReportPolicyViolations = true
-		merged.ReportAccessSummary = true
-		merged.ReportRequestSummary = true
-		merged.hasReportPolicyViolations = true
-		merged.hasReportAccessSummary = true
-		merged.hasReportRequestSummary = true
 	}
 
 	return merged
@@ -89,6 +86,10 @@ func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfi
 	if overlay.hasTrafficMode {
 		base.TrafficMode = overlay.TrafficMode
 		base.hasTrafficMode = true
+	}
+	if overlay.hasPolicyMode {
+		base.PolicyMode = overlay.PolicyMode
+		base.hasPolicyMode = true
 	}
 	if overlay.hasMaxRequestBodyBytes {
 		base.MaxRequestBodyBytes = overlay.MaxRequestBodyBytes

@@ -18,6 +18,7 @@ type cliOptions struct {
 	clearEnv            bool
 	clearEnvSet         bool
 	trafficMode         string
+	policyMode          string
 	maxRequestBodyBytes int64
 	maxBodySizeSet      bool
 	printPolicy         bool
@@ -25,7 +26,6 @@ type cliOptions struct {
 	reportAccess        bool
 	reportRequests      bool
 	accessLog           string
-	audit               bool
 	flagOverrides       cliFlagOverrides
 }
 
@@ -77,6 +77,7 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 	flags.StringArrayVar(&opts.env, "env", nil, "environment entry in KEY=VALUE form")
 	flags.BoolVar(&opts.clearEnv, "clear-env", false, "do not inherit the host environment")
 	flags.StringVar(&opts.trafficMode, "traffic-mode", "proxy", "traffic mode: proxy or transparent")
+	flags.StringVar(&opts.policyMode, "policy-mode", "enforce", "policy mode: enforce or audit")
 	flags.Int64Var(&opts.maxRequestBodyBytes, "max-request-body-bytes", 64<<10, "maximum request body inspection size for MITM")
 	flags.BoolVar(&opts.printPolicy, "print-policy", false, "print the effective policy before execution")
 
@@ -84,7 +85,6 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 	flags.BoolVar(&opts.reportAccess, "report-access-summary", true, "render a host access summary after execution")
 	flags.BoolVar(&opts.reportRequests, "report-request-summary", true, "render a request summary after execution")
 	flags.StringVar(&opts.accessLog, "access-log", "json", "access log mode: json or off")
-	flags.BoolVar(&opts.audit, "audit", false, "force audit reporting summaries on")
 
 	return cmd
 }

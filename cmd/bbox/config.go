@@ -71,6 +71,7 @@ type cliFileConfig struct {
 	Env                       []string              `yaml:"env"`
 	ClearEnv                  bool                  `yaml:"clear_env"`
 	TrafficMode               string                `yaml:"traffic_mode"`
+	PolicyMode                string                `yaml:"policy_mode"`
 	MaxRequestBodyBytes       int64                 `yaml:"max_request_body_bytes"`
 	AccessLog                 string                `yaml:"access_log"`
 	ReportPolicyViolations    bool                  `yaml:"report_policy_violations"`
@@ -87,6 +88,7 @@ type cliFileConfig struct {
 	hasEnv                    bool                  `yaml:"-"`
 	hasClearEnv               bool                  `yaml:"-"`
 	hasTrafficMode            bool                  `yaml:"-"`
+	hasPolicyMode             bool                  `yaml:"-"`
 	hasMaxRequestBodyBytes    bool                  `yaml:"-"`
 	hasAccessLog              bool                  `yaml:"-"`
 	hasReportPolicyViolations bool                  `yaml:"-"`
@@ -142,6 +144,7 @@ type rawCLIFileConfig struct {
 	Env                    *[]string                 `yaml:"env"`
 	ClearEnv               *bool                     `yaml:"clear_env"`
 	TrafficMode            *string                   `yaml:"traffic_mode"`
+	PolicyMode             *string                   `yaml:"policy_mode"`
 	MaxRequestBodyBytes    *int64                    `yaml:"max_request_body_bytes"`
 	AccessLog              *string                   `yaml:"access_log"`
 	ReportPolicyViolations *bool                     `yaml:"report_policy_violations"`
@@ -154,6 +157,7 @@ type rawCLIFileConfig struct {
 
 type cliFlagOverrides struct {
 	TrafficMode          *string
+	PolicyMode           *string
 	ReportPolicy         *bool
 	ReportAccessSummary  *bool
 	ReportRequestSummary *bool

@@ -36,7 +36,7 @@ func TestBuildRunConfigUsesEffectiveCLIConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
+	if cfg.manager.PolicyMode != bbox.PolicyModeEnforce {
 		t.Fatalf("policy mode = %q", cfg.manager.PolicyMode)
 	}
 }
@@ -188,7 +188,7 @@ func TestExecuteRootCommandRejectsMissingPayload(t *testing.T) {
 	}
 }
 
-func TestRootCommandAuditFlagPassesAuditReportingToRunner(t *testing.T) {
+func TestRootCommandPolicyModeFlagPassesPolicyModeToRunner(t *testing.T) {
 	var got runConfig
 
 	cmd := newRootCommand(commandDeps{
@@ -203,16 +203,16 @@ func TestRootCommandAuditFlagPassesAuditReportingToRunner(t *testing.T) {
 			return nil
 		},
 	})
-	cmd.SetArgs([]string{"--audit", "--", "bash"})
+	cmd.SetArgs([]string{"--policy-mode=audit", "--", "bash"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
 	if got.manager.PolicyMode != bbox.PolicyModeAudit {
-		t.Fatalf("expected audit mode, got %q", got.manager.PolicyMode)
+		t.Fatalf("expected audit policy mode, got %q", got.manager.PolicyMode)
 	}
 	if !got.reporting.PolicyViolations || !got.reporting.AccessSummary || !got.reporting.RequestSummary {
-		t.Fatalf("expected audit reporting to be enabled, got %#v", got.reporting)
+		t.Fatalf("expected reporting defaults to remain enabled, got %#v", got.reporting)
 	}
 }
 
@@ -280,6 +280,7 @@ clear_env: true
 func TestRootCommandDoesNotRegisterRemovedPolicyFlags(t *testing.T) {
 	cmd := newRootCommand(commandDeps{stdout: io.Discard, stderr: io.Discard})
 	for _, flag := range []string{
+		"audit",
 		"allowed-domain",
 		"allowed-domains-file",
 		"deny-domain",
@@ -288,22 +289,24 @@ func TestRootCommandDoesNotRegisterRemovedPolicyFlags(t *testing.T) {
 		"allow-http-method",
 		"allow-path",
 		"deny-path",
-		"policy-mode",
 		"mitm",
 	} {
 		if got := cmd.Flags().Lookup(flag); got != nil {
 			t.Fatalf("expected %q to be removed, found %q", flag, got.Name)
 		}
 	}
+	if got := cmd.Flags().Lookup("policy-mode"); got == nil {
+		t.Fatal("expected policy-mode flag to be registered")
+	}
 }
 
-func TestBuildConfigDefaultsToAuditReportingWithoutConfigFile(t *testing.T) {
+func TestBuildConfigDefaultsToEnforceReportingWithoutConfigFile(t *testing.T) {
 	cfg, err := buildConfig(cliOptions{}, []string{"bash"}, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
-		t.Fatalf("expected default policy mode to be audit, got %q", cfg.manager.PolicyMode)
+	if cfg.manager.PolicyMode != bbox.PolicyModeEnforce {
+		t.Fatalf("expected default policy mode to be enforce, got %q", cfg.manager.PolicyMode)
 	}
 	if !cfg.reporting.PolicyViolations || !cfg.reporting.AccessSummary || !cfg.reporting.RequestSummary {
 		t.Fatalf("expected default reporting to be enabled, got %#v", cfg.reporting)
@@ -333,6 +336,7 @@ func TestBuildConfigUsesBBoxYAMLWhenPresent(t *testing.T) {
 	}
 	writeBBoxYAML(t, root, `
 traffic_mode: transparent
+policy_mode: audit
 access_log: off
 max_request_body_bytes: 123
 policy:
@@ -349,6 +353,9 @@ policy:
 	}
 	if cfg.sandbox.TrafficMode != bbox.TrafficModeTransparent {
 		t.Fatalf("expected transparent traffic mode from config file, got %q", cfg.sandbox.TrafficMode)
+	}
+	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
+		t.Fatalf("expected policy mode from config file, got %q", cfg.manager.PolicyMode)
 	}
 	if cfg.accessLogMode != "off" {
 		t.Fatalf("expected access log mode off from config file, got %q", cfg.accessLogMode)
@@ -377,8 +384,10 @@ access_log: off
 report_policy_violations: false
 report_access_summary: false
 report_request_summary: false
+policy_mode: audit
 `)
 	trafficMode := "proxy"
+	policyMode := "enforce"
 	accessLog := "json"
 	reportPolicy := true
 	reportAccess := true
@@ -390,8 +399,10 @@ report_request_summary: false
 		reportPolicy:   true,
 		reportAccess:   true,
 		reportRequests: true,
+		policyMode:     "enforce",
 		flagOverrides: cliFlagOverrides{
 			TrafficMode:          &trafficMode,
+			PolicyMode:           &policyMode,
 			ReportPolicy:         &reportPolicy,
 			ReportAccessSummary:  &reportAccess,
 			ReportRequestSummary: &reportRequests,
@@ -403,6 +414,9 @@ report_request_summary: false
 	}
 	if cfg.sandbox.TrafficMode != bbox.TrafficModeProxy {
 		t.Fatalf("expected traffic mode override from CLI, got %q", cfg.sandbox.TrafficMode)
+	}
+	if cfg.manager.PolicyMode != bbox.PolicyModeEnforce {
+		t.Fatalf("expected policy mode override from CLI, got %q", cfg.manager.PolicyMode)
 	}
 	if cfg.accessLogMode != "json" {
 		t.Fatalf("expected access log override from CLI, got %q", cfg.accessLogMode)
@@ -618,7 +632,7 @@ access_log: json
 	}
 }
 
-func TestBuildConfigOmittedPolicyStillUsesAuditReportingDefaults(t *testing.T) {
+func TestBuildConfigOmittedPolicyStillUsesEnforceReportingDefaults(t *testing.T) {
 	root := t.TempDir()
 	writeBBoxYAML(t, root, `
 traffic_mode: proxy
@@ -629,8 +643,8 @@ access_log: json
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
-		t.Fatalf("expected default policy mode audit when policy section omitted, got %q", cfg.manager.PolicyMode)
+	if cfg.manager.PolicyMode != bbox.PolicyModeEnforce {
+		t.Fatalf("expected default policy mode enforce when policy section omitted, got %q", cfg.manager.PolicyMode)
 	}
 	if !cfg.reporting.PolicyViolations || !cfg.reporting.AccessSummary || !cfg.reporting.RequestSummary {
 		t.Fatalf("expected reporting defaults when policy section omitted, got %#v", cfg.reporting)
@@ -753,6 +767,7 @@ func TestRootCommandPrintPolicyShowsMergedConfigAndFlagState(t *testing.T) {
 	}
 	writeBBoxYAML(t, root, `
 traffic_mode: transparent
+policy_mode: audit
 policy:
   rules:
     - host_patterns:
@@ -796,6 +811,9 @@ policy:
 	if printed.Sandbox.TrafficMode != bbox.TrafficModeTransparent {
 		t.Fatalf("expected print-policy to show merged file traffic mode, got %q", printed.Sandbox.TrafficMode)
 	}
+	if printed.Manager.PolicyMode != bbox.PolicyModeAudit {
+		t.Fatalf("expected print-policy to show merged policy mode, got %q", printed.Manager.PolicyMode)
+	}
 	wantPolicy := bbox.NetworkPolicy{
 		Rules: []bbox.PolicyRule{
 			{HostPatterns: []string{"^api[.]example[.]com$"}},
@@ -809,25 +827,6 @@ policy:
 	}
 	if len(printed.Argv) != 1 || printed.Argv[0] != "bash" {
 		t.Fatalf("expected print-policy argv to match payload, got %v", printed.Argv)
-	}
-}
-
-func TestAuditFlagStillOverridesMergedConfig(t *testing.T) {
-	root := t.TempDir()
-	writeBBoxYAML(t, root, `
-report_policy_violations: false
-report_access_summary: false
-report_request_summary: false
-`)
-	cfg, err := buildConfig(cliOptions{audit: true}, []string{"bash"}, root, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
-		t.Fatalf("expected policy mode audit, got %q", cfg.manager.PolicyMode)
-	}
-	if !cfg.reporting.PolicyViolations || !cfg.reporting.AccessSummary || !cfg.reporting.RequestSummary {
-		t.Fatalf("expected audit flag to force reporting on, got %#v", cfg.reporting)
 	}
 }
 
@@ -845,19 +844,6 @@ func TestBuildConfigClearEnvSkipsInheritedEnv(t *testing.T) {
 	}
 	if !containsString(cfg.sandbox.Env, "FOO=bar") {
 		t.Fatalf("expected explicit env override, got %v", cfg.sandbox.Env)
-	}
-}
-
-func TestBuildConfigAuditShorthandEnablesAuditModeAndReporting(t *testing.T) {
-	cfg, err := buildConfig(cliOptions{audit: true}, []string{"bash"}, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
-		t.Fatalf("expected audit mode, got %q", cfg.manager.PolicyMode)
-	}
-	if !cfg.manager.Reporting.PolicyViolations || !cfg.manager.Reporting.AccessSummary || !cfg.manager.Reporting.RequestSummary {
-		t.Fatalf("expected audit shorthand to enable reporting, got %#v", cfg.manager.Reporting)
 	}
 }
 

@@ -16,6 +16,7 @@ env:
 
 clear_env: false
 traffic_mode: transparent
+policy_mode: enforce
 # traffic_mode: proxy
 access_log: json
 report_policy_violations: true

@@ -30,7 +30,7 @@ On Linux, the transparent seccomp launcher is embedded into `bbox` and executed 
 
 On macOS, `bbox` supports the same `bbox.yaml` shape, but the first backend is intentionally narrower:
 
-- supported: `traffic_mode: proxy`, `policy.rules`, `workdir`, `env`, `clear_env`, access logging, audit mode
+- supported: `traffic_mode: proxy`, `policy.rules`, `workdir`, `env`, `clear_env`, access logging, `policy_mode`
 - rejected explicitly on Darwin: `traffic_mode: transparent`, `mount_ro`, `mount_rw`, seccomp options
 
 `bin` remains part of the config on macOS, but it is interpreted as an executable allowlist for the Seatbelt profile instead of Linux staging metadata.
@@ -197,12 +197,11 @@ If you know every networked Dockerfile step is proxy-aware, you can switch the e
 
 Merge precedence is:
 1. CLI defaults
-2. `bbox.yaml` (if present)
-3. supported runtime flags that are explicitly set on the CLI override file values (for example `--name`, `--workdir`, `--bin`, `--mount-ro`, `--mount-rw`, `--env`, `--clear-env`, `--max-request-body-bytes`, `--traffic-mode`, reporting flags, and `--access-log`)
-4. `--audit` (forces audit reporting on)
+2. `bbox.yaml` (if present, including `policy_mode`)
+3. supported runtime flags that are explicitly set on the CLI override file values (for example `--name`, `--workdir`, `--bin`, `--mount-ro`, `--mount-rw`, `--env`, `--clear-env`, `--max-request-body-bytes`, `--traffic-mode`, `--policy-mode`, reporting flags, and `--access-log`)
 
-If no `bbox.yaml` is present, bbox still defaults to audit-first behavior:
-- policy mode is `audit`
+If no `bbox.yaml` is present, bbox defaults to enforce behavior:
+- policy mode is `enforce`
 - `report_policy_violations`, `report_access_summary`, and `report_request_summary` are enabled
 - `traffic_mode` defaults to `proxy`
 - `access_log` defaults to `json`
@@ -240,9 +239,8 @@ If you need per-attempt reporting instead of aggregates, inject an `AccessLogger
 
 ## CLI Flags
 
-Current policy-shaping CLI flags were intentionally removed in favor of config-file policy definition:
+Most policy-shaping CLI flags were intentionally removed in favor of config-file policy definition:
 
-- removed: `--policy-mode`
 - removed: `--allowed-domain`
 - removed: `--allowed-domains-file`
 - removed: `--deny-domain`
@@ -255,4 +253,4 @@ Current policy-shaping CLI flags were intentionally removed in favor of config-f
 
 Use `bbox.yaml` `policy:` to define allow/deny behavior, and keep runtime flags for execution/reporting behavior.
 
-The `--audit` flag remains available and forces reporting summaries on for that run.
+`--policy-mode=enforce|audit` overrides `bbox.yaml` for a run.

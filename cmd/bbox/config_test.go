@@ -101,6 +101,9 @@ func TestLoadCLIFileConfigDecodesRuleYAML(t *testing.T) {
 	if got.TrafficMode != "transparent" {
 		t.Fatalf("got traffic_mode %q", got.TrafficMode)
 	}
+	if got.PolicyMode != "audit" {
+		t.Fatalf("got policy_mode %q", got.PolicyMode)
+	}
 	if got.MaxRequestBodyBytes != 12345 {
 		t.Fatalf("got max_request_body_bytes %d", got.MaxRequestBodyBytes)
 	}
@@ -225,6 +228,22 @@ func TestLoadCLIFileConfigRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestLoadEffectiveCLIConfigRejectsInvalidPolicyMode(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "bbox.yaml")
+	if err := os.WriteFile(configPath, []byte("policy_mode: broken\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := buildConfig(cliOptions{}, []string{"bash"}, root, nil)
+	if err == nil {
+		t.Fatal("expected invalid policy_mode to fail")
+	}
+	if !strings.Contains(err.Error(), `unsupported policy mode "broken"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLoadCLIFileConfigAcceptsEmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bbox.yaml")
@@ -293,10 +312,11 @@ func TestLoadEffectiveCLIConfigExplicitPathErrorsForDirectory(t *testing.T) {
 	}
 }
 
-func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
+func TestMergeCLIConfigPrecedenceDefaultsFileFlags(t *testing.T) {
 	defaults := defaultCLIFileConfig()
 	fileCfg := cliFileConfig{
 		TrafficMode:            "transparent",
+		PolicyMode:             "audit",
 		ReportPolicyViolations: false,
 		ReportAccessSummary:    false,
 		ReportRequestSummary:   false,
@@ -308,6 +328,7 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 			},
 		},
 		hasTrafficMode:            true,
+		hasPolicyMode:             true,
 		hasAccessLog:              true,
 		hasMaxRequestBodyBytes:    true,
 		hasReportPolicyViolations: true,
@@ -317,17 +338,21 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlagsAudit(t *testing.T) {
 	fileCfg.Policy.hasRules = true
 	flags := cliFlagOverrides{
 		TrafficMode:         stringPtr("proxy"),
+		PolicyMode:          stringPtr("enforce"),
 		ReportAccessSummary: boolPtr(false),
 		AccessLog:           stringPtr("json"),
 	}
 
-	got := mergeCLIConfig(defaults, fileCfg, flags, true)
+	got := mergeCLIConfig(defaults, fileCfg, flags)
 
 	if got.TrafficMode != "proxy" {
 		t.Fatalf("got traffic_mode %q", got.TrafficMode)
 	}
-	if !got.ReportPolicyViolations || !got.ReportAccessSummary || !got.ReportRequestSummary {
-		t.Fatalf("expected audit reporting enabled, got %#v", got)
+	if got.PolicyMode != "enforce" {
+		t.Fatalf("got policy_mode %q", got.PolicyMode)
+	}
+	if got.ReportPolicyViolations || got.ReportAccessSummary || got.ReportRequestSummary {
+		t.Fatalf("expected flag/file reporting precedence, got %#v", got)
 	}
 	if got.AccessLog != "json" {
 		t.Fatalf("got access_log %q", got.AccessLog)
@@ -471,7 +496,7 @@ func TestMergeCLIConfigLeavesPathNormalizationToBuildConfig(t *testing.T) {
 		hasWorkDir: true,
 	}
 
-	got := mergeCLIConfig(defaults, fileCfg, cliFlagOverrides{}, false)
+	got := mergeCLIConfig(defaults, fileCfg, cliFlagOverrides{})
 	if got.WorkDir != "./workspace" {
 		t.Fatalf("got workdir %q want %q", got.WorkDir, "./workspace")
 	}

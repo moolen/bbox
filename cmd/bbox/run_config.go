@@ -62,6 +62,10 @@ func buildRunConfig(effective effectiveCLIConfig, payload []string, cwd string, 
 	if trafficMode != bbox.TrafficModeProxy && trafficMode != bbox.TrafficModeTransparent {
 		return runConfig{}, fmt.Errorf("unsupported traffic mode %q", effective.TrafficMode)
 	}
+	policyMode, err := normalizeCLIPolicyMode(effective.PolicyMode)
+	if err != nil {
+		return runConfig{}, err
+	}
 
 	envEntries, err := buildSandboxEnv(effective, environ)
 	if err != nil {
@@ -91,7 +95,7 @@ func buildRunConfig(effective effectiveCLIConfig, payload []string, cwd string, 
 		manager: bbox.ProxyOptions{
 			MaxRequestBodyBytes: effective.MaxRequestBodyBytes,
 			MITM:                bbox.MITMOptions{Enabled: trafficMode == bbox.TrafficModeTransparent},
-			PolicyMode:          bbox.PolicyModeAudit,
+			PolicyMode:          policyMode,
 			Reporting:           effective.Reporting,
 			DockerSocket:        buildDockerSocketOptions(effective.DockerSocket),
 		},
@@ -110,6 +114,17 @@ func buildRunConfig(effective effectiveCLIConfig, payload []string, cwd string, 
 		reporting:     effective.Reporting,
 		accessLogMode: accessLogMode,
 	}, nil
+}
+
+func normalizeCLIPolicyMode(mode string) (bbox.PolicyMode, error) {
+	switch bbox.PolicyMode(strings.ToLower(strings.TrimSpace(mode))) {
+	case "", bbox.PolicyModeEnforce:
+		return bbox.PolicyModeEnforce, nil
+	case bbox.PolicyModeAudit:
+		return bbox.PolicyModeAudit, nil
+	default:
+		return "", fmt.Errorf("unsupported policy mode %q", mode)
+	}
 }
 
 func normalizeAccessLogMode(mode string) (string, error) {
