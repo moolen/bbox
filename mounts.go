@@ -22,11 +22,32 @@ var reservedSandboxTargets = []string{
 func validateMounts(mounts []Mount) error {
 	seen := make(map[string]Mount)
 	for _, m := range mounts {
-		if !filepath.IsAbs(m.Source) {
-			return fmt.Errorf("mount source %q must be absolute", m.Source)
+		if m.Type == "" {
+			return fmt.Errorf("mount type is required")
 		}
-		if _, err := os.Stat(m.Source); err != nil {
-			return fmt.Errorf("mount source %q: %w", m.Source, err)
+		switch m.Type {
+		case MountTypeBind:
+			if m.Source == "" {
+				return fmt.Errorf("mount source is required for %q", m.Type)
+			}
+			if !filepath.IsAbs(m.Source) {
+				return fmt.Errorf("mount source %q must be absolute", m.Source)
+			}
+			if _, err := os.Stat(m.Source); err != nil {
+				return fmt.Errorf("mount source %q: %w", m.Source, err)
+			}
+			if m.Mode != 0 {
+				return fmt.Errorf("mount type %q must not set mode", m.Type)
+			}
+		case MountTypeEmptyDir:
+			if m.Source != "" {
+				return fmt.Errorf("mount type %q must not set source", m.Type)
+			}
+		default:
+			return fmt.Errorf("unknown mount type %q", m.Type)
+		}
+		if m.Target == "" {
+			return fmt.Errorf("mount target is required")
 		}
 		if !filepath.IsAbs(m.Target) {
 			return fmt.Errorf("mount target %q must be absolute", m.Target)
@@ -34,7 +55,7 @@ func validateMounts(mounts []Mount) error {
 
 		target := filepath.Clean(m.Target)
 		for _, reservedTarget := range reservedSandboxTargets {
-			if reservedTarget == "/usr" && m.ReadOnly && filepath.Clean(m.Source) == target && target == "/usr" {
+			if reservedTarget == "/usr" && m.Type == MountTypeBind && m.ReadOnly && filepath.Clean(m.Source) == target && target == "/usr" {
 				continue
 			}
 			if targetsOverlap(target, reservedTarget) {
@@ -115,6 +136,9 @@ func buildBwrapArgs(cfg bwrapArgsConfig) []string {
 	}
 
 	for _, mount := range cfg.mounts {
+		if mount.Type != MountTypeBind {
+			continue
+		}
 		flag := "--bind"
 		if mount.ReadOnly {
 			flag = "--ro-bind"

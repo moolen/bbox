@@ -169,11 +169,8 @@ func validateRunConfigPlatform(cfg runConfig) error {
 	if cfg.sandbox.TrafficMode == bbox.TrafficModeTransparent {
 		return fmt.Errorf("transparent traffic mode is not supported on darwin")
 	}
-	for _, mount := range cfg.sandbox.Mounts {
-		if mount.ReadOnly {
-			return fmt.Errorf("mount_ro is not supported on darwin")
-		}
-		return fmt.Errorf("mount_rw is not supported on darwin")
+	if len(cfg.sandbox.Mounts) > 0 {
+		return fmt.Errorf("mounts are not supported on darwin")
 	}
 	return nil
 }

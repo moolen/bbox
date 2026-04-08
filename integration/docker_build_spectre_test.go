@@ -144,6 +144,7 @@ func runDockerBuildFixture(t *testing.T, ctx context.Context, newManager proxyMa
 		Policy:      spec.policy,
 		WorkDir:     spec.fixture.sandboxRepoDir,
 		Mounts: []bbox.Mount{{
+			Type:     bbox.MountTypeBind,
 			Source:   spec.fixture.repoDir,
 			Target:   spec.fixture.sandboxRepoDir,
 			ReadOnly: false,

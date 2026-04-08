@@ -70,7 +70,7 @@ func TestFindConfigFileReturnsEmptyWhenMissing(t *testing.T) {
 	}
 }
 
-func TestLoadCLIFileConfigDecodesRuleYAML(t *testing.T) {
+func TestLoadCLIFileConfigDecodesStructuredMounts(t *testing.T) {
 	path := fixturePath(t, "flat_config.yaml")
 	got, err := loadCLIFileConfig(path)
 	if err != nil {
@@ -86,11 +86,21 @@ func TestLoadCLIFileConfigDecodesRuleYAML(t *testing.T) {
 	if !reflect.DeepEqual(got.Bin, []string{"bash", "curl"}) {
 		t.Fatalf("got bin %v", got.Bin)
 	}
-	if !reflect.DeepEqual(got.MountRO, []string{"/etc/ssl/certs:/etc/ssl/certs"}) {
-		t.Fatalf("got mount_ro %v", got.MountRO)
+	wantMounts := []cliMountConfig{
+		{
+			Type:     "bind",
+			Source:   "/etc/ssl/certs",
+			Target:   "/etc/ssl/certs",
+			ReadOnly: true,
+		},
+		{
+			Type:   "bind",
+			Source: "/host/cache",
+			Target: "/cache",
+		},
 	}
-	if !reflect.DeepEqual(got.MountRW, []string{"/host/cache:/cache"}) {
-		t.Fatalf("got mount_rw %v", got.MountRW)
+	if !reflect.DeepEqual(got.Mounts, wantMounts) {
+		t.Fatalf("got mounts %v want %v", got.Mounts, wantMounts)
 	}
 	if !reflect.DeepEqual(got.Env, []string{"FOO=bar"}) {
 		t.Fatalf("got env %v", got.Env)
@@ -185,7 +195,7 @@ func TestLoadCLIFileConfigDecodesDockerBuild(t *testing.T) {
 	}
 }
 
-func TestLoadCLIFileConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) {
+func TestLoadCLIFileConfigResolvesRelativePathsInStructuredMounts(t *testing.T) {
 	path := fixturePath(t, "relative_paths.yaml")
 	configDir := filepath.Dir(path)
 	got, err := loadCLIFileConfig(path)
@@ -198,19 +208,26 @@ func TestLoadCLIFileConfigResolvesRelativePathsFromConfigDirectory(t *testing.T)
 		t.Fatalf("got workdir %q want %q", got.WorkDir, wantWorkDir)
 	}
 
-	wantRO := []string{
-		filepath.Join(configDir, "certs") + ":/etc/ssl/certs",
+	wantMounts := []cliMountConfig{
+		{
+			Type:     "bind",
+			Source:   filepath.Join(configDir, "certs"),
+			Target:   "/etc/ssl/certs",
+			ReadOnly: true,
+		},
+		{
+			Type:   "bind",
+			Source: filepath.Join(configDir, "..", "shared"),
+			Target: filepath.Join(configDir, "sandbox", "shared"),
+		},
+		{
+			Type:   "bind",
+			Source: "/var/tmp",
+			Target: "/abs-target",
+		},
 	}
-	if !reflect.DeepEqual(got.MountRO, wantRO) {
-		t.Fatalf("got mount_ro %v want %v", got.MountRO, wantRO)
-	}
-
-	wantRW := []string{
-		filepath.Join(configDir, "..", "shared") + ":" + filepath.Join(configDir, "sandbox", "shared"),
-		"/var/tmp:/abs-target",
-	}
-	if !reflect.DeepEqual(got.MountRW, wantRW) {
-		t.Fatalf("got mount_rw %v want %v", got.MountRW, wantRW)
+	if !reflect.DeepEqual(got.Mounts, wantMounts) {
+		t.Fatalf("got mounts %v want %v", got.Mounts, wantMounts)
 	}
 }
 
@@ -241,6 +258,20 @@ func TestLoadEffectiveCLIConfigRejectsInvalidPolicyMode(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `unsupported policy mode "broken"`) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadCLIFileConfigRejectsRemovedMountKeys(t *testing.T) {
+	path := fixturePath(t, "removed_mount_keys.yaml")
+	_, err := loadCLIFileConfig(path)
+	if err == nil {
+		t.Fatal("expected removed mount keys to fail")
+	}
+	if !strings.Contains(err.Error(), "field mount_ro not found") && !strings.Contains(err.Error(), "field mount_rw not found") {
+		t.Fatalf("expected unknown-field error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "mount_ro") && !strings.Contains(err.Error(), "mount_rw") {
+		t.Fatalf("expected error to reference removed key, got %v", err)
 	}
 }
 

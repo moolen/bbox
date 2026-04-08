@@ -152,7 +152,7 @@ func TestSandboxMITMClassifiesGRPC(t *testing.T) {
 		Name:     "mitm-grpc",
 		Binaries: []string{clientBinary},
 		Mounts: []bbox.Mount{
-			{Source: filepath.Dir(clientBinary), Target: "/workspace", ReadOnly: true},
+			{Type: bbox.MountTypeBind, Source: filepath.Dir(clientBinary), Target: "/workspace", ReadOnly: true},
 		},
 		Policy: bbox.NetworkPolicy{
 			Rules: []bbox.PolicyRule{

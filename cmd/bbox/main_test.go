@@ -15,11 +15,11 @@ import (
 )
 
 func TestParseMountSpec(t *testing.T) {
-	got, err := parseMountSpec("/host/path:/sandbox/path", false)
+	got, err := parseCLIMountSpec("type=bind,source=/host/path,target=/sandbox/path")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Source != "/host/path" || got.Target != "/sandbox/path" || got.ReadOnly {
+	if got.Type != bbox.MountTypeBind || got.Source != "/host/path" || got.Target != "/sandbox/path" || got.ReadOnly {
 		t.Fatalf("unexpected mount: %#v", got)
 	}
 }
@@ -41,7 +41,7 @@ func TestBuildRunConfigUsesEffectiveCLIConfig(t *testing.T) {
 	}
 }
 
-func TestBuildConfigDefaultsMountsCurrentWorkingDirectory(t *testing.T) {
+func TestBuildConfigDefaultsMountsCurrentWorkingDirectoryAsBindMount(t *testing.T) {
 	cwd := t.TempDir()
 	cfg, err := buildConfig(cliOptions{}, []string{"bash", "-lc", "pwd"}, cwd, []string{"HOME=/tmp/home", "FOO=bar"})
 	if err != nil {
@@ -54,7 +54,10 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectory(t *testing.T) {
 	if len(cfg.sandbox.Mounts) != 1 {
 		t.Fatalf("expected exactly one default mount, got %d", len(cfg.sandbox.Mounts))
 	}
-	if cfg.sandbox.Mounts[0].Source != cwd || cfg.sandbox.Mounts[0].Target != cwd || cfg.sandbox.Mounts[0].ReadOnly {
+	if cfg.sandbox.Mounts[0].Type != bbox.MountTypeBind ||
+		cfg.sandbox.Mounts[0].Source != cwd ||
+		cfg.sandbox.Mounts[0].Target != cwd ||
+		cfg.sandbox.Mounts[0].ReadOnly {
 		t.Fatalf("unexpected default mount: %#v", cfg.sandbox.Mounts[0])
 	}
 	if len(cfg.argv) == 0 || cfg.argv[0] != "bash" {
@@ -65,6 +68,72 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectory(t *testing.T) {
 	}
 	if !containsString(cfg.sandbox.Env, "FOO=bar") {
 		t.Fatalf("expected inherited env in sandbox env, got %v", cfg.sandbox.Env)
+	}
+}
+
+func TestRootCommandRegistersStructuredMountFlagOnly(t *testing.T) {
+	cmd := newRootCommand(commandDeps{stdout: io.Discard, stderr: io.Discard})
+	if got := cmd.Flags().Lookup("mount"); got == nil {
+		t.Fatal("expected --mount flag")
+	}
+	if got := cmd.Flags().Lookup("mount-ro"); got != nil {
+		t.Fatalf("expected --mount-ro to be removed, got %q", got.Name)
+	}
+	if got := cmd.Flags().Lookup("mount-rw"); got != nil {
+		t.Fatalf("expected --mount-rw to be removed, got %q", got.Name)
+	}
+}
+
+func TestBuildConfigBuildsStructuredMountsFromCLIAndFile(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fileSource := t.TempDir()
+	cliSource := t.TempDir()
+	writeBBoxYAML(t, root, `
+mounts:
+  - type: bind
+    source: `+fileSource+`
+    target: /from-file
+    read_only: true
+`)
+
+	cfgFromFile, err := buildConfig(cliOptions{}, []string{"bash"}, nested, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsMount(cfgFromFile.sandbox.Mounts, bbox.Mount{
+		Type:     bbox.MountTypeBind,
+		Source:   fileSource,
+		Target:   "/from-file",
+		ReadOnly: true,
+	}) {
+		t.Fatalf("expected file-defined structured mount, got %v", cfgFromFile.sandbox.Mounts)
+	}
+
+	cfgFromCLI, err := buildConfig(cliOptions{
+		mounts: []string{"type=bind,source=" + cliSource + ",target=/from-cli"},
+	}, []string{"bash"}, nested, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsMount(cfgFromCLI.sandbox.Mounts, bbox.Mount{
+		Type:   bbox.MountTypeBind,
+		Source: cliSource,
+		Target: "/from-cli",
+	}) {
+		t.Fatalf("expected CLI-defined structured mount, got %v", cfgFromCLI.sandbox.Mounts)
+	}
+	if containsMount(cfgFromCLI.sandbox.Mounts, bbox.Mount{
+		Type:     bbox.MountTypeBind,
+		Source:   fileSource,
+		Target:   "/from-file",
+		ReadOnly: true,
+	}) {
+		t.Fatalf("expected CLI mounts to replace file mounts, got %v", cfgFromCLI.sandbox.Mounts)
 	}
 }
 
@@ -81,8 +150,11 @@ func TestBuildConfigNormalizesFileFlagsAndEnvironmentIntoOneEffectiveShape(t *te
 
 	writeBBoxYAML(t, root, `
 workdir: ./from-file
-mount_ro:
-  - ./certs:/etc/ssl/certs
+mounts:
+  - type: bind
+    source: ./certs
+    target: /etc/ssl/certs
+    read_only: true
 env:
   - FROM_FILE=1
 clear_env: true
@@ -113,6 +185,7 @@ traffic_mode: transparent
 		t.Fatalf("traffic mode = %q want %q", cfg.sandbox.TrafficMode, bbox.TrafficModeProxy)
 	}
 	wantMount := bbox.Mount{
+		Type:     bbox.MountTypeBind,
 		Source:   certsDir,
 		Target:   "/etc/ssl/certs",
 		ReadOnly: true,
@@ -517,7 +590,7 @@ docker_socket:
 	}
 }
 
-func TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime(t *testing.T) {
+func TestBuildConfigDarwinRejectsStructuredMountsAtRuntime(t *testing.T) {
 	prevPlatform := cliPlatform
 	cliPlatform = "darwin"
 	t.Cleanup(func() {
@@ -528,7 +601,7 @@ func TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime(t *testing
 	mountSource := t.TempDir()
 
 	cfg, err := buildConfig(cliOptions{
-		mountRO: []string{mountSource + ":/workspace"},
+		mounts: []string{"type=bind,source=" + mountSource + ",target=/workspace,read-only"},
 	}, []string{"/bin/sh"}, cwd, nil)
 	if err != nil {
 		t.Fatalf("buildConfig() error = %v", err)
@@ -548,7 +621,7 @@ func TestBuildConfigDarwinKeepsSameConfigButFailsUnsupportedAtRuntime(t *testing
 	if err == nil {
 		t.Fatal("expected explicit mount to fail on darwin")
 	}
-	if !strings.Contains(err.Error(), "mount_ro is not supported on darwin") {
+	if !strings.Contains(err.Error(), "mounts are not supported on darwin") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -754,7 +827,7 @@ clear_env: true
 	if len(cfg.sandbox.Binaries) != 0 {
 		t.Fatalf("expected host docker binary to be skipped, got %v", cfg.sandbox.Binaries)
 	}
-	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Source: "/usr", Target: "/usr", ReadOnly: true}) {
+	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: "/usr", Target: "/usr", ReadOnly: true}) {
 		t.Fatalf("did not expect /usr PATH mount to hide staged docker shim, got %v", cfg.sandbox.Mounts)
 	}
 }
@@ -847,7 +920,7 @@ func TestBuildConfigClearEnvSkipsInheritedEnv(t *testing.T) {
 	}
 }
 
-func TestBuildConfigResolvesRequestedBinariesAgainstEffectivePATHAndAddsPathMounts(t *testing.T) {
+func TestBuildConfigPathAvailabilityMountsUseTypedBindMounts(t *testing.T) {
 	cwd := t.TempDir()
 	pathRoot := filepath.Join(t.TempDir(), "toolchain")
 	pathDir := filepath.Join(pathRoot, "bin")
@@ -876,7 +949,13 @@ func TestBuildConfigResolvesRequestedBinariesAgainstEffectivePATHAndAddsPathMoun
 	if got := envValue(cfg.sandbox.Env, "PATH"); got != pathDir {
 		t.Fatalf("expected sandbox PATH %q, got %q", pathDir, got)
 	}
-	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{Source: pathRoot, Target: pathRoot, ReadOnly: true}) {
+	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{
+		Type:     bbox.MountTypeBind,
+		Source:   pathRoot,
+		Target:   pathRoot,
+		ReadOnly: true,
+		Mode:     0,
+	}) {
 		t.Fatalf("expected PATH root mount for %q in %v", pathRoot, cfg.sandbox.Mounts)
 	}
 }
@@ -913,10 +992,10 @@ func TestBuildConfigEnvPATHOverrideWinsOverInheritedPATHForMounts(t *testing.T) 
 	if got := envValue(cfg.sandbox.Env, "PATH"); got != overrideDir {
 		t.Fatalf("expected sandbox PATH %q, got %q", overrideDir, got)
 	}
-	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{Source: overrideRoot, Target: overrideRoot, ReadOnly: true}) {
+	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: overrideRoot, Target: overrideRoot, ReadOnly: true}) {
 		t.Fatalf("expected override PATH root mount in %v", cfg.sandbox.Mounts)
 	}
-	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Source: inheritedRoot, Target: inheritedRoot, ReadOnly: true}) {
+	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: inheritedRoot, Target: inheritedRoot, ReadOnly: true}) {
 		t.Fatalf("did not expect inherited PATH root mount in %v", cfg.sandbox.Mounts)
 	}
 }
@@ -931,7 +1010,7 @@ func TestBuildConfigCollapsesUsrPathEntriesIntoSingleUsrMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := bbox.Mount{Source: "/usr", Target: "/usr", ReadOnly: true}
+	want := bbox.Mount{Type: bbox.MountTypeBind, Source: "/usr", Target: "/usr", ReadOnly: true}
 	if !containsMount(cfg.sandbox.Mounts, want) {
 		t.Fatalf("expected /usr PATH mount in %v", cfg.sandbox.Mounts)
 	}
@@ -1047,11 +1126,25 @@ func containsString(values []string, want string) bool {
 
 func containsMount(values []bbox.Mount, want bbox.Mount) bool {
 	for _, value := range values {
-		if value == want {
+		if mountsEqual(value, want) {
 			return true
 		}
 	}
 	return false
+}
+
+func mountsEqual(got bbox.Mount, want bbox.Mount) bool {
+	if got.Type != want.Type {
+		return false
+	}
+	if want.Type == bbox.MountTypeBind {
+		return got.Type == want.Type &&
+			got.Source == want.Source &&
+			got.Target == want.Target &&
+			got.ReadOnly == want.ReadOnly &&
+			got.Mode == want.Mode
+	}
+	return got == want
 }
 
 func envValue(values []string, key string) string {

@@ -31,29 +31,24 @@ func buildRunConfig(effective effectiveCLIConfig, payload []string, cwd string, 
 		return runConfig{}, fmt.Errorf("resolve current working directory: %w", err)
 	}
 
-	mounts := make([]bbox.Mount, 0, 1+len(effective.MountsRO)+len(effective.MountsRW))
-	if cliPlatform != "darwin" && !hasMount(absCWD, absCWD, append(effective.MountsRO, effective.MountsRW...)) {
-		mounts = append(mounts, bbox.Mount{
-			Source:   absCWD,
-			Target:   absCWD,
-			ReadOnly: false,
-		})
+	explicitMounts := make([]bbox.Mount, 0, len(effective.Mounts))
+	for _, configuredMount := range effective.Mounts {
+		mount, err := toBBoxMount(configuredMount)
+		if err != nil {
+			return runConfig{}, err
+		}
+		explicitMounts = append(explicitMounts, mount)
 	}
 
-	for _, spec := range effective.MountsRO {
-		mount, err := parseMountSpec(spec, true)
-		if err != nil {
-			return runConfig{}, err
-		}
-		mounts = append(mounts, mount)
+	mounts := make([]bbox.Mount, 0, 1+len(explicitMounts))
+	if cliPlatform != "darwin" && !hasMount(absCWD, absCWD, explicitMounts) {
+		mounts = append(mounts, bbox.Mount{
+			Type:   bbox.MountTypeBind,
+			Source: absCWD,
+			Target: absCWD,
+		})
 	}
-	for _, spec := range effective.MountsRW {
-		mount, err := parseMountSpec(spec, false)
-		if err != nil {
-			return runConfig{}, err
-		}
-		mounts = append(mounts, mount)
-	}
+	mounts = append(mounts, explicitMounts...)
 
 	trafficMode := bbox.TrafficMode(strings.ToLower(strings.TrimSpace(effective.TrafficMode)))
 	if trafficMode == "" {
@@ -309,6 +304,7 @@ func pathMountForDir(dir string) (bbox.Mount, bool, error) {
 	}
 
 	return bbox.Mount{
+		Type:     bbox.MountTypeBind,
 		Source:   target,
 		Target:   target,
 		ReadOnly: true,
@@ -358,32 +354,15 @@ func mountTargetsOverlap(a, b string) bool {
 	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
-func parseMountSpec(spec string, readOnly bool) (bbox.Mount, error) {
-	source, target, ok := strings.Cut(spec, ":")
-	source = strings.TrimSpace(source)
-	target = strings.TrimSpace(target)
-	if !ok || source == "" || target == "" {
-		return bbox.Mount{}, fmt.Errorf("invalid mount spec %q, want src:dst", spec)
-	}
-	if !filepath.IsAbs(source) || !filepath.IsAbs(target) {
-		return bbox.Mount{}, fmt.Errorf("mount spec %q requires absolute src and dst", spec)
-	}
-	return bbox.Mount{
-		Source:   source,
-		Target:   target,
-		ReadOnly: readOnly,
-	}, nil
-}
-
-func hasMount(source, target string, specs []string) bool {
+func hasMount(source, target string, mounts []bbox.Mount) bool {
 	wantSource := filepath.Clean(source)
 	wantTarget := filepath.Clean(target)
-	for _, spec := range specs {
-		src, dst, ok := strings.Cut(spec, ":")
-		if !ok {
+	for _, mount := range mounts {
+		if mount.Type != bbox.MountTypeBind {
 			continue
 		}
-		if filepath.Clean(strings.TrimSpace(src)) == wantSource && filepath.Clean(strings.TrimSpace(dst)) == wantTarget {
+		if filepath.Clean(strings.TrimSpace(mount.Source)) == wantSource &&
+			filepath.Clean(strings.TrimSpace(mount.Target)) == wantTarget {
 			return true
 		}
 	}

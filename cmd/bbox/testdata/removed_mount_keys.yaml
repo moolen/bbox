@@ -1,0 +1,4 @@
+mount_ro:
+  - /etc/ssl/certs:/etc/ssl/certs
+mount_rw:
+  - /host/cache:/cache

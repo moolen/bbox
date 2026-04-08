@@ -67,13 +67,9 @@ func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfi
 		base.Bin = cloneStringSlice(overlay.Bin)
 		base.hasBin = true
 	}
-	if overlay.hasMountRO {
-		base.MountRO = cloneStringSlice(overlay.MountRO)
-		base.hasMountRO = true
-	}
-	if overlay.hasMountRW {
-		base.MountRW = cloneStringSlice(overlay.MountRW)
-		base.hasMountRW = true
+	if overlay.hasMounts {
+		base.Mounts = cloneMountConfigs(overlay.Mounts)
+		base.hasMounts = true
 	}
 	if overlay.hasEnv {
 		base.Env = cloneStringSlice(overlay.Env)

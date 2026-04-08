@@ -31,7 +31,7 @@ On Linux, the transparent seccomp launcher is embedded into `bbox` and executed 
 On macOS, `bbox` supports the same `bbox.yaml` shape, but the first backend is intentionally narrower:
 
 - supported: `traffic_mode: proxy`, `policy.rules`, `workdir`, `env`, `clear_env`, access logging, `policy_mode`
-- rejected explicitly on Darwin: `traffic_mode: transparent`, `mount_ro`, `mount_rw`, seccomp options
+- rejected explicitly on Darwin: `traffic_mode: transparent`, `mounts`, seccomp options
 
 `bin` remains part of the config on macOS, but it is interpreted as an executable allowlist for the Seatbelt profile instead of Linux staging metadata.
 
@@ -45,7 +45,7 @@ Discovery order:
 3. continue upward until filesystem root
 4. if none is found, run with built-in defaults
 
-If `bbox.yaml` is found in a parent directory, relative paths in `workdir`, `mount_ro`, and `mount_rw` are resolved relative to the directory containing that `bbox.yaml`.
+If `bbox.yaml` is found in a parent directory, relative paths in `workdir` and `mounts` entries are resolved relative to the directory containing that `bbox.yaml`.
 
 `docker_socket.target_socket_path` is a host path and must be absolute. `docker_socket.mount_path` is the in-sandbox socket location and must also be absolute.
 
@@ -55,6 +55,18 @@ On Linux, bbox also adds read-only mounts for the effective `PATH` roots so thos
 
 On macOS, bbox does not mirror the Linux PATH mount behavior. Instead, the resolved payload command plus any explicit `bin` entries are used to build the generated Seatbelt executable allowlist.
 
+Structured `mounts` entries support:
+
+- `type: bind`: mount a host path into the sandbox (`source` + `target`, optional `read_only`). In bbox's current Linux backend, these use bubblewrap bind mounts and bring existing submounts along.
+- `type: empty_dir`: create an empty host-backed directory and mount it at `target` (optional `mode`, defaults to `0755`). The backing directory uses host disk storage and is scrubbed when the sandbox is removed.
+
+CLI mounts use repeated `--mount` flags. Examples:
+
+```bash
+bbox --mount type=bind,source=/host/certs,target=/etc/ssl/certs,read-only -- curl -sS https://example.com
+bbox --mount type=empty_dir,target=/workspace/tmp,mode=0700 -- sh -lc 'touch /workspace/tmp/file'
+```
+
 Example:
 
 ```yaml
@@ -62,10 +74,17 @@ name: demo-sandbox
 workdir: ./workspace
 bin:
   - curl
-mount_ro:
-  - ./certs:/etc/ssl/certs
-mount_rw:
-  - ../shared:/workspace/shared
+mounts:
+  - type: bind
+    source: ./certs
+    target: /etc/ssl/certs
+    read_only: true
+  - type: bind
+    source: ../shared
+    target: /workspace/shared
+  - type: empty_dir
+    target: /workspace/tmp
+    mode: 0755
 env:
   - API_TOKEN=redacted
 clear_env: false
@@ -112,7 +131,7 @@ docker_socket:
         - exec_start
 ```
 
-On macOS, omit `mount_ro`, `mount_rw`, and `traffic_mode: transparent`. Those settings are Linux-only today and fail with explicit runtime errors on Darwin.
+On macOS, omit `mounts` and `traffic_mode: transparent`. Those settings are Linux-only today and fail with explicit runtime errors on Darwin.
 
 ## Docker Socket Mediation
 
@@ -198,7 +217,7 @@ If you know every networked Dockerfile step is proxy-aware, you can switch the e
 Merge precedence is:
 1. CLI defaults
 2. `bbox.yaml` (if present, including `policy_mode`)
-3. supported runtime flags that are explicitly set on the CLI override file values (for example `--name`, `--workdir`, `--bin`, `--mount-ro`, `--mount-rw`, `--env`, `--clear-env`, `--max-request-body-bytes`, `--traffic-mode`, `--policy-mode`, reporting flags, and `--access-log`)
+3. supported runtime flags that are explicitly set on the CLI override file values (for example `--name`, `--workdir`, `--bin`, `--mount`, `--env`, `--clear-env`, `--max-request-body-bytes`, `--traffic-mode`, `--policy-mode`, reporting flags, and `--access-log`)
 
 If no `bbox.yaml` is present, bbox defaults to enforce behavior:
 - policy mode is `enforce`

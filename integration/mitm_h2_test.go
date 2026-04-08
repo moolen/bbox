@@ -202,7 +202,7 @@ func TestSandboxMITMHTTP2ConcurrentStreams(t *testing.T) {
 		Name:     "mitm-h2",
 		Binaries: []string{clientBinary},
 		Mounts: []bbox.Mount{
-			{Source: filepath.Dir(clientBinary), Target: "/workspace", ReadOnly: true},
+			{Type: bbox.MountTypeBind, Source: filepath.Dir(clientBinary), Target: "/workspace", ReadOnly: true},
 		},
 		Policy: bbox.NetworkPolicy{
 			Rules: []bbox.PolicyRule{

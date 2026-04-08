@@ -62,12 +62,19 @@ type cliDockerBuildConfig struct {
 	hasNewgidmap  bool   `yaml:"-"`
 }
 
+type cliMountConfig struct {
+	Type     string `yaml:"type"`
+	Source   string `yaml:"source"`
+	Target   string `yaml:"target"`
+	ReadOnly bool   `yaml:"read_only"`
+	Mode     uint32 `yaml:"mode"`
+}
+
 type cliFileConfig struct {
 	Name                      string                `yaml:"name"`
 	WorkDir                   string                `yaml:"workdir"`
 	Bin                       []string              `yaml:"bin"`
-	MountRO                   []string              `yaml:"mount_ro"`
-	MountRW                   []string              `yaml:"mount_rw"`
+	Mounts                    []cliMountConfig      `yaml:"mounts"`
 	Env                       []string              `yaml:"env"`
 	ClearEnv                  bool                  `yaml:"clear_env"`
 	TrafficMode               string                `yaml:"traffic_mode"`
@@ -83,8 +90,7 @@ type cliFileConfig struct {
 	hasName                   bool                  `yaml:"-"`
 	hasWorkDir                bool                  `yaml:"-"`
 	hasBin                    bool                  `yaml:"-"`
-	hasMountRO                bool                  `yaml:"-"`
-	hasMountRW                bool                  `yaml:"-"`
+	hasMounts                 bool                  `yaml:"-"`
 	hasEnv                    bool                  `yaml:"-"`
 	hasClearEnv               bool                  `yaml:"-"`
 	hasTrafficMode            bool                  `yaml:"-"`
@@ -139,8 +145,7 @@ type rawCLIFileConfig struct {
 	Name                   *string                   `yaml:"name"`
 	WorkDir                *string                   `yaml:"workdir"`
 	Bin                    *[]string                 `yaml:"bin"`
-	MountRO                *[]string                 `yaml:"mount_ro"`
-	MountRW                *[]string                 `yaml:"mount_rw"`
+	Mounts                 *[]cliMountConfig         `yaml:"mounts"`
 	Env                    *[]string                 `yaml:"env"`
 	ClearEnv               *bool                     `yaml:"clear_env"`
 	TrafficMode            *string                   `yaml:"traffic_mode"`
@@ -166,6 +171,10 @@ type cliFlagOverrides struct {
 
 func cloneStringSlice(in []string) []string {
 	return append([]string(nil), in...)
+}
+
+func cloneMountConfigs(in []cliMountConfig) []cliMountConfig {
+	return append([]cliMountConfig(nil), in...)
 }
 
 func cloneStringSliceMap(in map[string][]string) map[string][]string {

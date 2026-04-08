@@ -3,6 +3,7 @@
 package bbox
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 
@@ -41,6 +42,10 @@ func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
 	if tooling != nil {
 		mounts = appendBuilderMounts(mounts)
 	}
+	runtimeMounts, err := prepareRuntimeMounts(cfg.root, mounts)
+	if err != nil {
+		return nil, fmt.Errorf("prepare runtime mounts: %w", err)
+	}
 
 	bwrapArgs := buildBwrapArgs(bwrapArgsConfig{
 		root:                  cfg.root,
@@ -50,7 +55,7 @@ func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
 		unshareUser:           os.Geteuid() != 0 && tooling == nil,
 		capSysAdmin:           tooling != nil,
 		maxRequestBodyBytes:   cfg.maxRequestBody,
-		mounts:                mounts,
+		mounts:                runtimeMounts,
 		dockerSocketMount:     cfg.dockerSocketMount,
 		trafficMode:           cfg.mode,
 		payloadSeccompBPFPath: cfg.payloadSeccompPath,
@@ -80,6 +85,7 @@ func appendBuilderMounts(mounts []Mount) []Mount {
 		}
 	}
 	return append(mounts, Mount{
+		Type:     MountTypeBind,
 		Source:   defaultBuilderCgroupPath,
 		Target:   defaultBuilderCgroupPath,
 		ReadOnly: true,

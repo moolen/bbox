@@ -58,7 +58,7 @@ func TestTransparentSandboxLibcGetaddrinfoUsesManagedDNS(t *testing.T) {
 
 	sandbox, err := manager.NewSandbox(ctx, SandboxOptions{
 		Binaries:    []string{hostClientPath},
-		Mounts:      []Mount{{Source: clientDir, Target: sandboxClientDir, ReadOnly: true}},
+		Mounts:      []Mount{{Type: MountTypeBind, Source: clientDir, Target: sandboxClientDir, ReadOnly: true}},
 		TrafficMode: TrafficModeTransparent,
 		WorkDir:     "/tmp",
 		Policy: NetworkPolicy{
@@ -134,7 +134,7 @@ func TestTransparentSandboxAuditModeAllowsPolicyDeniedDNS(t *testing.T) {
 	sandbox, err := manager.NewSandbox(ctx, SandboxOptions{
 		Name:        "audit-dns-mode",
 		Binaries:    []string{clientPath},
-		Mounts:      []Mount{{Source: clientDir, Target: sandboxClientDir, ReadOnly: true}},
+		Mounts:      []Mount{{Type: MountTypeBind, Source: clientDir, Target: sandboxClientDir, ReadOnly: true}},
 		TrafficMode: TrafficModeTransparent,
 		PolicyMode:  PolicyModeAudit,
 		Policy: NetworkPolicy{
