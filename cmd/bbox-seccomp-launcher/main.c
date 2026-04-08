@@ -22,6 +22,7 @@ extern char **environ;
 #define LAUNCHER_SOCK_FD_ENV "BBOX_SECCOMP_NOTIFY_SOCK_FD"
 #define PAYLOAD_SECCOMP_BPF_FLAG "--payload-seccomp-bpf"
 #define X32_SYSCALL_BIT 0x40000000U
+#define MIN_LAUNCHER_CONTROL_FD 64U
 #define MIN_MANAGED_CHILD_FD 128U
 
 #ifndef CLOSE_RANGE_CLOEXEC
@@ -442,7 +443,7 @@ int main(int argc, char *argv[]) {
     if (inherited_sock_fd < 0) {
         return 1;
     }
-    sock_fd = fcntl(inherited_sock_fd, F_DUPFD_CLOEXEC, 128);
+    sock_fd = fcntl(inherited_sock_fd, F_DUPFD_CLOEXEC, MIN_LAUNCHER_CONTROL_FD);
     if (sock_fd < 0) {
         fprintf(stderr, "duplicate launcher socket: %s\n", strerror(errno));
         return 1;
