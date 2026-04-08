@@ -15,21 +15,24 @@ type AccessLogger interface {
 
 // AccessLogEntry describes a single access attempt.
 type AccessLogEntry struct {
-	Time             time.Time
-	SandboxID        string
-	TrafficMode      TrafficMode
-	Kind             string
-	Host             string
-	Port             int
-	Method           string
-	Path             string
-	Allowed          bool
-	StatusCode       int
-	Result           string
-	Error            string
-	PolicyMode       PolicyMode
-	PolicyAllowed    bool
-	PolicyViolations []string
+	Time               time.Time
+	SandboxID          string
+	TrafficMode        TrafficMode
+	Kind               string
+	Protocol           string
+	ProtocolSource     string
+	ProtocolConfidence string
+	Host               string
+	Port               int
+	Method             string
+	Path               string
+	Allowed            bool
+	StatusCode         int
+	Result             string
+	Error              string
+	PolicyMode         PolicyMode
+	PolicyAllowed      bool
+	PolicyViolations   []string
 }
 
 // AccessedDomain aggregates access attempts for a host.

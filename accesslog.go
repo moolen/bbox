@@ -9,40 +9,46 @@ import (
 )
 
 type accessEvent struct {
-	Time             time.Time
-	SandboxID        string
-	TrafficMode      TrafficMode
-	Kind             string
-	Host             string
-	Port             int
-	Method           string
-	Path             string
-	Allowed          bool
-	StatusCode       int
-	Result           string
-	Error            string
-	PolicyMode       PolicyMode
-	PolicyAllowed    bool
-	PolicyViolations []string
+	Time               time.Time
+	SandboxID          string
+	TrafficMode        TrafficMode
+	Kind               string
+	Protocol           string
+	ProtocolSource     string
+	ProtocolConfidence string
+	Host               string
+	Port               int
+	Method             string
+	Path               string
+	Allowed            bool
+	StatusCode         int
+	Result             string
+	Error              string
+	PolicyMode         PolicyMode
+	PolicyAllowed      bool
+	PolicyViolations   []string
 }
 
 func (e accessEvent) toAccessLogEntry() AccessLogEntry {
 	return AccessLogEntry{
-		Time:             e.Time,
-		SandboxID:        e.SandboxID,
-		TrafficMode:      e.TrafficMode,
-		Kind:             e.Kind,
-		Host:             e.Host,
-		Port:             e.Port,
-		Method:           e.Method,
-		Path:             e.Path,
-		Allowed:          e.Allowed,
-		StatusCode:       e.StatusCode,
-		Result:           e.Result,
-		Error:            e.Error,
-		PolicyMode:       e.PolicyMode,
-		PolicyAllowed:    e.PolicyAllowed,
-		PolicyViolations: append([]string(nil), e.PolicyViolations...),
+		Time:               e.Time,
+		SandboxID:          e.SandboxID,
+		TrafficMode:        e.TrafficMode,
+		Kind:               e.Kind,
+		Protocol:           e.Protocol,
+		ProtocolSource:     e.ProtocolSource,
+		ProtocolConfidence: e.ProtocolConfidence,
+		Host:               e.Host,
+		Port:               e.Port,
+		Method:             e.Method,
+		Path:               e.Path,
+		Allowed:            e.Allowed,
+		StatusCode:         e.StatusCode,
+		Result:             e.Result,
+		Error:              e.Error,
+		PolicyMode:         e.PolicyMode,
+		PolicyAllowed:      e.PolicyAllowed,
+		PolicyViolations:   append([]string(nil), e.PolicyViolations...),
 	}
 }
 

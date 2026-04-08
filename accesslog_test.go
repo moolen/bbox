@@ -577,6 +577,92 @@ func TestAccessLogEntryIncludesTrafficMode(t *testing.T) {
 	}
 }
 
+func TestAccessLogEntryIncludesProtocolMetadata(t *testing.T) {
+	eventTime := time.Date(2026, 4, 8, 10, 0, 0, 0, time.UTC)
+	event := accessEvent{
+		Time:               eventTime,
+		SandboxID:          "sandbox-a",
+		TrafficMode:        TrafficModeTransparent,
+		Kind:               "transparent_connect",
+		Host:               "example.com",
+		Port:               443,
+		Method:             "CONNECT",
+		Path:               "/",
+		Allowed:            true,
+		StatusCode:         200,
+		Result:             "allowed",
+		Error:              "",
+		PolicyMode:         PolicyModeAudit,
+		PolicyAllowed:      false,
+		PolicyViolations:   []string{"connect denied by policy"},
+		Protocol:           "https",
+		ProtocolSource:     "alpn",
+		ProtocolConfidence: "high",
+	}
+
+	entry := event.toAccessLogEntry()
+
+	if !entry.Time.Equal(eventTime) {
+		t.Fatalf("expected time %v, got %v", eventTime, entry.Time)
+	}
+	if entry.SandboxID != "sandbox-a" {
+		t.Fatalf("expected sandbox-a, got %q", entry.SandboxID)
+	}
+	if entry.TrafficMode != TrafficModeTransparent {
+		t.Fatalf("expected transparent traffic mode, got %q", entry.TrafficMode)
+	}
+	if entry.Kind != "transparent_connect" {
+		t.Fatalf("expected kind transparent_connect, got %q", entry.Kind)
+	}
+	if entry.Host != "example.com" {
+		t.Fatalf("expected host example.com, got %q", entry.Host)
+	}
+	if entry.Port != 443 {
+		t.Fatalf("expected port 443, got %d", entry.Port)
+	}
+	if entry.Method != "CONNECT" {
+		t.Fatalf("expected method CONNECT, got %q", entry.Method)
+	}
+	if entry.Path != "/" {
+		t.Fatalf("expected path /, got %q", entry.Path)
+	}
+	if !entry.Allowed {
+		t.Fatal("expected allowed to be true")
+	}
+	if entry.StatusCode != 200 {
+		t.Fatalf("expected status code 200, got %d", entry.StatusCode)
+	}
+	if entry.Result != "allowed" {
+		t.Fatalf("expected result allowed, got %q", entry.Result)
+	}
+	if entry.Error != "" {
+		t.Fatalf("expected empty error, got %q", entry.Error)
+	}
+	if entry.PolicyMode != PolicyModeAudit {
+		t.Fatalf("expected policy mode audit, got %q", entry.PolicyMode)
+	}
+	if entry.PolicyAllowed {
+		t.Fatal("expected policy allowed to be false")
+	}
+	if len(entry.PolicyViolations) != 1 || entry.PolicyViolations[0] != "connect denied by policy" {
+		t.Fatalf("expected policy violations to round-trip, got %#v", entry.PolicyViolations)
+	}
+	if entry.Protocol != "https" {
+		t.Fatalf("expected protocol https, got %q", entry.Protocol)
+	}
+	if entry.ProtocolSource != "alpn" {
+		t.Fatalf("expected protocol source alpn, got %q", entry.ProtocolSource)
+	}
+	if entry.ProtocolConfidence != "high" {
+		t.Fatalf("expected protocol confidence high, got %q", entry.ProtocolConfidence)
+	}
+
+	event.PolicyViolations[0] = "mutated"
+	if entry.PolicyViolations[0] != "connect denied by policy" {
+		t.Fatalf("expected policy violations copy isolation, got %#v", entry.PolicyViolations)
+	}
+}
+
 func TestAccessedDomainsTracksTrafficModeKinds(t *testing.T) {
 	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
 	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
@@ -613,6 +699,53 @@ func TestAccessedDomainsTracksTrafficModeKinds(t *testing.T) {
 	}
 	if !entry.MITMSeen {
 		t.Fatal("expected MITMSeen to be true")
+	}
+}
+
+func TestAccessedDomainsTracksProtocolMetadataWithoutChangingKinds(t *testing.T) {
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{}))
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	manager.recordAccessEvent(accessEvent{
+		Time:               time.Date(2026, 4, 8, 11, 0, 0, 0, time.UTC),
+		SandboxID:          "sandbox-a",
+		TrafficMode:        TrafficModeTransparent,
+		Kind:               "connect",
+		Host:               "example.com",
+		Port:               443,
+		Result:             "allowed",
+		Protocol:           "https",
+		ProtocolSource:     "sni",
+		ProtocolConfidence: "medium",
+	})
+	manager.recordAccessEvent(accessEvent{
+		Time:               time.Date(2026, 4, 8, 11, 1, 0, 0, time.UTC),
+		SandboxID:          "sandbox-a",
+		TrafficMode:        TrafficModeTransparent,
+		Kind:               "http",
+		Host:               "example.com",
+		Port:               80,
+		Result:             "allowed",
+		Protocol:           "http",
+		ProtocolSource:     "method",
+		ProtocolConfidence: "high",
+	})
+
+	snapshot := manager.accessedDomainsSnapshot("sandbox-a")
+	entry := findAccessedDomain(t, snapshot, "example.com")
+	if entry.Attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", entry.Attempts)
+	}
+	if !entry.ConnectSeen {
+		t.Fatal("expected ConnectSeen to be true")
+	}
+	if !entry.HTTPSeen {
+		t.Fatal("expected HTTPSeen to be true")
+	}
+	if entry.MITMSeen {
+		t.Fatal("expected MITMSeen to remain false")
 	}
 }
 
