@@ -216,6 +216,67 @@ func TestRootCommandAuditFlagPassesAuditReportingToRunner(t *testing.T) {
 	}
 }
 
+func TestRootCommandChangedFlagsOverrideMergedConfig(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeBBoxYAML(t, root, `
+traffic_mode: transparent
+access_log: json
+max_request_body_bytes: 7
+report_policy_violations: true
+report_access_summary: true
+report_request_summary: true
+clear_env: true
+`)
+
+	var got runConfig
+	cmd := newRootCommand(commandDeps{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		getwd: func() (string, error) {
+			return nested, nil
+		},
+		environ: func() []string { return []string{"SECRET=value"} },
+		run: func(cfg runConfig) error {
+			got = cfg
+			return nil
+		},
+	})
+	cmd.SetArgs([]string{
+		"--traffic-mode=proxy",
+		"--report-policy-violations=false",
+		"--report-access-summary=false",
+		"--report-request-summary=false",
+		"--access-log=off",
+		"--max-request-body-bytes=123",
+		"--clear-env=false",
+		"--",
+		"bash",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got.sandbox.TrafficMode != bbox.TrafficModeProxy {
+		t.Fatalf("expected changed traffic-mode flag to override file config, got %q", got.sandbox.TrafficMode)
+	}
+	if got.manager.MaxRequestBodyBytes != 123 {
+		t.Fatalf("expected changed max-request-body-bytes flag to override file config, got %d", got.manager.MaxRequestBodyBytes)
+	}
+	if got.accessLogMode != "off" {
+		t.Fatalf("expected changed access-log flag to override file config, got %q", got.accessLogMode)
+	}
+	if got.reporting.PolicyViolations || got.reporting.AccessSummary || got.reporting.RequestSummary {
+		t.Fatalf("expected changed reporting flags to override file config, got %#v", got.reporting)
+	}
+	if !containsString(got.sandbox.Env, "SECRET=value") {
+		t.Fatalf("expected changed clear-env flag to restore inherited env, got %v", got.sandbox.Env)
+	}
+}
+
 func TestRootCommandDoesNotRegisterRemovedPolicyFlags(t *testing.T) {
 	cmd := newRootCommand(commandDeps{stdout: io.Discard, stderr: io.Discard})
 	for _, flag := range []string{
