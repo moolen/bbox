@@ -3,7 +3,6 @@ package integration_test
 import (
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 )
 
 const alpineMinirootfsVersion = "3.18.9"
+const alpineMinirootfsOverrideEnvKey = "BBOX_TEST_ALPINE_MINIROOTFS"
 
 var (
 	alpineMinirootfsOnce sync.Once
@@ -49,6 +49,22 @@ func TestDockerBuildMatrixFixtureUsesLocalRootfsBase(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fixture.repoDir, "alpine-minirootfs.tar.gz")); err != nil {
 		t.Fatalf("expected staged alpine minirootfs archive: %v", err)
+	}
+}
+
+func TestRequireAlpineMinirootfsUsesRepositoryFixtureByDefault(t *testing.T) {
+	path := requireAlpineMinirootfs(t)
+
+	arch, err := alpineMinirootfsArch(runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(filepath.Join("testdata", fmt.Sprintf("alpine-minirootfs-%s-%s.tar.gz", alpineMinirootfsVersion, arch)))
+	if err != nil {
+		t.Fatalf("resolve expected alpine minirootfs path: %v", err)
+	}
+	if path != want {
+		t.Fatalf("requireAlpineMinirootfs() = %q, want %q", path, want)
 	}
 }
 
@@ -217,48 +233,42 @@ func requireAlpineMinirootfs(t *testing.T) string {
 	t.Helper()
 
 	alpineMinirootfsOnce.Do(func() {
-		alpineMinirootfsPath, alpineMinirootfsErr = downloadAlpineMinirootfs()
+		alpineMinirootfsPath, alpineMinirootfsErr = resolveAlpineMinirootfs()
 	})
 	if alpineMinirootfsErr != nil {
-		t.Fatalf("download alpine minirootfs: %v", alpineMinirootfsErr)
+		t.Fatalf("resolve alpine minirootfs fixture: %v", alpineMinirootfsErr)
 	}
 	return alpineMinirootfsPath
 }
 
-func downloadAlpineMinirootfs() (string, error) {
+func resolveAlpineMinirootfs() (string, error) {
+	if override := strings.TrimSpace(os.Getenv(alpineMinirootfsOverrideEnvKey)); override != "" {
+		if filepath.IsAbs(override) {
+			if _, err := os.Stat(override); err != nil {
+				return "", fmt.Errorf("stat %s from %s: %w", override, alpineMinirootfsOverrideEnvKey, err)
+			}
+			return override, nil
+		}
+		abs, err := filepath.Abs(override)
+		if err != nil {
+			return "", fmt.Errorf("resolve %s path %q: %w", alpineMinirootfsOverrideEnvKey, override, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return "", fmt.Errorf("stat %s from %s: %w", abs, alpineMinirootfsOverrideEnvKey, err)
+		}
+		return abs, nil
+	}
+
 	arch, err := alpineMinirootfsArch(runtime.GOARCH)
 	if err != nil {
 		return "", err
 	}
-
-	url := fmt.Sprintf(
-		"https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/%s/alpine-minirootfs-%s-%s.tar.gz",
-		arch,
-		alpineMinirootfsVersion,
-		arch,
-	)
-	response, err := (&http.Client{}).Get(url)
+	path, err := filepath.Abs(filepath.Join("testdata", fmt.Sprintf("alpine-minirootfs-%s-%s.tar.gz", alpineMinirootfsVersion, arch)))
 	if err != nil {
-		return "", fmt.Errorf("download %s: %w", url, err)
+		return "", fmt.Errorf("resolve repository alpine minirootfs path: %w", err)
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download %s: unexpected status %s", url, response.Status)
-	}
-
-	dir, err := os.MkdirTemp("", "bbox-alpine-minirootfs-")
-	if err != nil {
-		return "", fmt.Errorf("create alpine minirootfs cache dir: %w", err)
-	}
-	path := filepath.Join(dir, "alpine-minirootfs.tar.gz")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return "", fmt.Errorf("create cached alpine minirootfs %s: %w", path, err)
-	}
-	defer file.Close()
-
-	if _, err := io.Copy(file, response.Body); err != nil {
-		return "", fmt.Errorf("write cached alpine minirootfs %s: %w", path, err)
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("stat repository alpine minirootfs fixture %s: %w", path, err)
 	}
 	return path, nil
 }

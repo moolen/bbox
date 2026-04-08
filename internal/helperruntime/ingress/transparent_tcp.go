@@ -14,7 +14,7 @@ import (
 )
 
 const http2ClientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-const transparentProtocolSniffTimeout = 250 * time.Millisecond
+const transparentProtocolSniffTimeout = time.Second
 
 func ServeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, connectPort int) {
 	if conn == nil {

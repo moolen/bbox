@@ -149,9 +149,11 @@ func (m *ProxyManager) handleDNSRequest(ctx context.Context, sandboxID string, r
 		}
 		return &helperproto.DNSResponse{Error: err.Error()}
 	}
-	payload, err = stripAAAARecords(payload)
-	if err != nil {
-		return &helperproto.DNSResponse{Error: err.Error()}
+	if m.trafficModeForSandbox(sandboxID) == TrafficModeTransparent {
+		payload, err = stripAAAARecords(payload)
+		if err != nil {
+			return &helperproto.DNSResponse{Error: err.Error()}
+		}
 	}
 	for i, host := range hosts {
 		event := eventWithPolicyMetadata(accessEvent{

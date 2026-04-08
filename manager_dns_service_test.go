@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -115,6 +116,123 @@ func TestStripAAAARecordsRemovesIPv6Answers(t *testing.T) {
 	if msg.Answers[0].Header.Type != dnsmessage.TypeA {
 		t.Fatalf("answer type = %v, want %v", msg.Answers[0].Header.Type, dnsmessage.TypeA)
 	}
+}
+
+func TestProxyManagerHandleDNSRequestPreservesAAAAInProxyMode(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		Rules: []PolicyRule{{HostPatterns: []string{"^allowed\\.example\\.com$"}}},
+	})
+	manager := newProxyManager(policy)
+	sandboxID := "sandbox-dns-proxy"
+	if err := manager.registerSandbox(sandboxID, policy); err != nil {
+		t.Fatalf("registerSandbox() error = %v", err)
+	}
+	if err := manager.attachSandbox(sandboxID, &Sandbox{trafficMode: TrafficModeProxy}); err != nil {
+		t.Fatalf("attachSandbox() error = %v", err)
+	}
+	t.Cleanup(func() {
+		manager.unregisterSandbox(sandboxID)
+		_ = manager.Close()
+	})
+
+	query := mustDNSQueryOfType(t, 8, "allowed.example.com.", dnsmessage.TypeAAAA)
+	reply := mustDNSResponseWithAAndAAAA(t, query, [4]byte{127, 0, 0, 1}, [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+	originalNewManagerDNSService := newManagerDNSService
+	newManagerDNSService = func() *managerDNSService {
+		return &managerDNSService{
+			dialContext: func(context.Context, string, string) (net.Conn, error) {
+				return stubDNSRoundTripConn(query, reply), nil
+			},
+			servers: []string{"127.0.0.1:53"},
+		}
+	}
+	t.Cleanup(func() {
+		newManagerDNSService = originalNewManagerDNSService
+	})
+
+	response := manager.handleDNSRequest(context.Background(), sandboxID, helperproto.DNSRequest{
+		Network: "udp",
+		Payload: query,
+	})
+	if response == nil || response.Error != "" {
+		t.Fatalf("unexpected DNS response: %#v", response)
+	}
+
+	var msg dnsmessage.Message
+	if err := msg.Unpack(response.Payload); err != nil {
+		t.Fatalf("Unpack() error = %v", err)
+	}
+	if len(msg.Answers) != 2 {
+		t.Fatalf("len(Answers) = %d, want 2", len(msg.Answers))
+	}
+	if msg.Answers[0].Header.Type != dnsmessage.TypeA || msg.Answers[1].Header.Type != dnsmessage.TypeAAAA {
+		t.Fatalf("unexpected answer types: %v, %v", msg.Answers[0].Header.Type, msg.Answers[1].Header.Type)
+	}
+}
+
+func TestProxyManagerHandleDNSRequestStripsAAAAInTransparentMode(t *testing.T) {
+	policy := mustCompilePolicy(t, NetworkPolicy{
+		Rules: []PolicyRule{{HostPatterns: []string{"^allowed\\.example\\.com$"}}},
+	})
+	manager := newProxyManager(policy)
+	sandboxID := "sandbox-dns-transparent"
+	if err := manager.registerSandbox(sandboxID, policy); err != nil {
+		t.Fatalf("registerSandbox() error = %v", err)
+	}
+	if err := manager.attachSandbox(sandboxID, &Sandbox{trafficMode: TrafficModeTransparent}); err != nil {
+		t.Fatalf("attachSandbox() error = %v", err)
+	}
+	t.Cleanup(func() {
+		manager.unregisterSandbox(sandboxID)
+		_ = manager.Close()
+	})
+
+	query := mustDNSQueryOfType(t, 9, "allowed.example.com.", dnsmessage.TypeAAAA)
+	reply := mustDNSResponseWithAAndAAAA(t, query, [4]byte{127, 0, 0, 1}, [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+	originalNewManagerDNSService := newManagerDNSService
+	newManagerDNSService = func() *managerDNSService {
+		return &managerDNSService{
+			dialContext: func(context.Context, string, string) (net.Conn, error) {
+				return stubDNSRoundTripConn(query, reply), nil
+			},
+			servers: []string{"127.0.0.1:53"},
+		}
+	}
+	t.Cleanup(func() {
+		newManagerDNSService = originalNewManagerDNSService
+	})
+
+	response := manager.handleDNSRequest(context.Background(), sandboxID, helperproto.DNSRequest{
+		Network: "udp",
+		Payload: query,
+	})
+	if response == nil || response.Error != "" {
+		t.Fatalf("unexpected DNS response: %#v", response)
+	}
+
+	var msg dnsmessage.Message
+	if err := msg.Unpack(response.Payload); err != nil {
+		t.Fatalf("Unpack() error = %v", err)
+	}
+	if len(msg.Answers) != 1 {
+		t.Fatalf("len(Answers) = %d, want 1", len(msg.Answers))
+	}
+	if msg.Answers[0].Header.Type != dnsmessage.TypeA {
+		t.Fatalf("answer type = %v, want %v", msg.Answers[0].Header.Type, dnsmessage.TypeA)
+	}
+}
+
+func stubDNSRoundTripConn(query []byte, response []byte) net.Conn {
+	server, client := net.Pipe()
+	go func() {
+		defer server.Close()
+		buf := make([]byte, len(query))
+		if _, err := io.ReadFull(server, buf); err != nil {
+			return
+		}
+		_, _ = server.Write(response)
+	}()
+	return client
 }
 
 func hostNameserverAddrs(t *testing.T) []string {
