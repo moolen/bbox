@@ -137,14 +137,25 @@ type MITMOptions struct {
 	Enabled bool
 }
 
-// Mount binds a host path into the sandbox.
+type MountType string
+
+const (
+	MountTypeBind     MountType = "bind"
+	MountTypeEmptyDir MountType = "empty_dir"
+)
+
+// Mount defines a mount inside the sandbox.
 type Mount struct {
+	// Type declares the mount behavior.
+	Type MountType
 	// Source is the absolute host path to bind into the sandbox.
 	Source string
 	// Target is the absolute path inside the sandbox.
 	Target string
 	// ReadOnly controls whether the bind mount is read-only.
 	ReadOnly bool
+	// Mode configures permissions for mount types that create directories.
+	Mode uint32
 }
 
 // TrafficMode controls how sandbox traffic is handled.
