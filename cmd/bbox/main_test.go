@@ -23,6 +23,23 @@ func TestParseMountSpec(t *testing.T) {
 	}
 }
 
+func TestBuildRunConfigUsesEffectiveCLIConfig(t *testing.T) {
+	payload := []string{"/bin/sh"}
+	cwd := t.TempDir()
+	env := []string{"PATH=/usr/bin"}
+
+	effective := effectiveCLIConfig{
+		TrafficMode: "proxy",
+	}
+	cfg, err := buildRunConfig(effective, payload, cwd, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.manager.PolicyMode != bbox.PolicyModeAudit {
+		t.Fatalf("policy mode = %q", cfg.manager.PolicyMode)
+	}
+}
+
 func TestBuildConfigDefaultsMountsCurrentWorkingDirectory(t *testing.T) {
 	cwd := t.TempDir()
 	cfg, err := buildConfig(cliOptions{}, []string{"bash", "-lc", "pwd"}, cwd, []string{"HOME=/tmp/home", "FOO=bar"})
@@ -108,8 +125,6 @@ traffic_mode: transparent
 	if !containsString(cfg.sandbox.Env, "FROM_FLAG=1") || !containsString(cfg.sandbox.Env, "FROM_HOST=1") {
 		t.Fatalf("expected merged environment entries in sandbox env, got %v", cfg.sandbox.Env)
 	}
-
-	t.Fatalf("characterization: effective config normalization is still spread across buildConfig, loadCLIFileConfig, and merge helpers")
 }
 
 func TestBuildCLIProcessRunOptionsForwardsStdinWithoutTTY(t *testing.T) {
