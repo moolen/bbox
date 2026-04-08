@@ -253,7 +253,6 @@ func runDarwinCommand(cmd *exec.Cmd, opts RunOptions) (*RunResult, error) {
 		}()
 	}
 
-	waitErr := cmd.Wait()
 	wg.Wait()
 	close(copyErrCh)
 	for err := range copyErrCh {
@@ -261,6 +260,7 @@ func runDarwinCommand(cmd *exec.Cmd, opts RunOptions) (*RunResult, error) {
 			return nil, err
 		}
 	}
+	waitErr := cmd.Wait()
 
 	result := &RunResult{
 		Stdout: append([]byte(nil), stdoutBuf.Bytes()...),

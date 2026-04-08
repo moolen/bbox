@@ -1,6 +1,7 @@
 package bbox
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -15,6 +16,20 @@ import (
 	"testing"
 	"time"
 )
+
+type slowBuffer struct {
+	delay time.Duration
+	buf   bytes.Buffer
+}
+
+func (b *slowBuffer) Write(p []byte) (int, error) {
+	time.Sleep(b.delay)
+	return b.buf.Write(p)
+}
+
+func (b *slowBuffer) Bytes() []byte {
+	return b.buf.Bytes()
+}
 
 func TestNewSandboxDarwinRejectsTransparentMode(t *testing.T) {
 	prevPlatform := sandboxPlatform
@@ -258,6 +273,29 @@ func TestDarwinRuntimeInteractiveRunUsesSameSandboxLaunchPath(t *testing.T) {
 	}
 	if len(gotArgs) < 3 || gotArgs[0] != "-p" || gotArgs[2] != "/bin/sh" {
 		t.Fatalf("unexpected sandbox args: %#v", gotArgs)
+	}
+}
+
+func TestRunDarwinCommandDrainsPipesBeforeWait(t *testing.T) {
+	const chunkCount = 256
+	const chunk = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	expected := strings.Repeat(chunk, chunkCount)
+
+	cmd := exec.Command("sh", "-c", "i=0; while [ \"$i\" -lt 256 ]; do printf '"+chunk+"'; i=$((i+1)); done")
+	stdout := &slowBuffer{delay: time.Millisecond}
+
+	result, err := runDarwinCommand(cmd, RunOptions{Stdout: stdout})
+	if err != nil {
+		t.Fatalf("runDarwinCommand() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("unexpected exit code: %d", result.ExitCode)
+	}
+	if got := string(result.Stdout); got != expected {
+		t.Fatalf("stdout length = %d, want %d", len(got), len(expected))
+	}
+	if got := string(stdout.Bytes()); got != expected {
+		t.Fatalf("forwarded stdout length = %d, want %d", len(got), len(expected))
 	}
 }
 
