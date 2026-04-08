@@ -425,6 +425,32 @@ func TestMergeCLIConfigLeavesPathNormalizationToBuildConfig(t *testing.T) {
 	}
 }
 
+func TestToEffectiveCLIConfigNormalizesWorkDirAndReporting(t *testing.T) {
+	cwd := t.TempDir()
+	merged := cliFileConfig{
+		WorkDir:                "./workspace",
+		TrafficMode:            "proxy",
+		AccessLog:              "off",
+		ReportPolicyViolations: true,
+		ReportAccessSummary:    false,
+		ReportRequestSummary:   true,
+	}
+
+	got := toEffectiveCLIConfig(merged, cwd)
+	if got.WorkDir != filepath.Join(cwd, "workspace") {
+		t.Fatalf("got workdir %q", got.WorkDir)
+	}
+	if got.TrafficMode != "proxy" {
+		t.Fatalf("got traffic_mode %q", got.TrafficMode)
+	}
+	if got.AccessLog != "off" {
+		t.Fatalf("got access_log %q", got.AccessLog)
+	}
+	if !got.Reporting.PolicyViolations || got.Reporting.AccessSummary || !got.Reporting.RequestSummary {
+		t.Fatalf("unexpected reporting %#v", got.Reporting)
+	}
+}
+
 func stringPtr(v string) *string { return &v }
 
 func boolPtr(v bool) *bool { return &v }
