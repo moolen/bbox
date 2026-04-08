@@ -3,8 +3,8 @@ package bbox
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"os/exec"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,6 +80,31 @@ func TestGeneratedEmbeddedLaunchersRecordCurrentInputs(t *testing.T) {
 		if !strings.Contains(text, "// Generator script SHA256: "+scriptHash) {
 			t.Fatalf("%s does not record current generator script hash", name)
 		}
+	}
+}
+
+func TestArchitectureScriptDoesNotRequireRipgrep(t *testing.T) {
+	moduleRoot, err := packageRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	toolDir := t.TempDir()
+	for _, name := range []string{"bash", "dirname", "git", "go", "grep", "sort"} {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s not available", name)
+		}
+		if err := os.Symlink(target, filepath.Join(toolDir, name)); err != nil {
+			t.Fatalf("symlink %s: %v", name, err)
+		}
+	}
+
+	cmd := exec.Command("bash", "./scripts/check-architecture.sh")
+	cmd.Dir = moduleRoot
+	cmd.Env = append(os.Environ(), "PATH="+toolDir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run architecture script without rg in PATH: %v\n%s", err, output)
 	}
 }
 
