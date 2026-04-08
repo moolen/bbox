@@ -8,8 +8,8 @@ import (
 
 const (
 	minManagedHelperFD      = 3
-	minManagedTCPChildFD    = 32
-	minManagedUDPChildFD    = 128
+	minManagedTCPChildFD    = 256
+	minManagedUDPChildFD    = 512
 	minManagedReadWriteFDLo = minManagedUDPChildFD
 )
 

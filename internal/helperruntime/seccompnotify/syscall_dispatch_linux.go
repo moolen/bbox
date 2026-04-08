@@ -431,7 +431,11 @@ func (s *Supervisor) duplicateSocket(pid int, req *seccomp.ScmpNotifReq) (int, b
 
 	switch int(req.Data.Syscall) {
 	case unix.SYS_DUP:
-		childFD, err := s.addFDAtOrAbove(req.ID, state.HelperFD, minDupFDForState(state, 0), 0)
+		minFD := minDupFDForState(state, 0)
+		if minFD <= oldFD {
+			minFD = oldFD + 1
+		}
+		childFD, err := s.addFDAtOrAbove(req.ID, state.HelperFD, minFD, 0)
 		if err != nil {
 			return -1, false, err
 		}
@@ -465,6 +469,9 @@ func (s *Supervisor) duplicateSocket(pid int, req *seccomp.ScmpNotifReq) (int, b
 		switch cmd {
 		case unix.F_DUPFD:
 			minFD = minDupFDForState(state, minFD)
+			if minFD <= oldFD {
+				minFD = oldFD + 1
+			}
 			childFD, err := s.addFDAtOrAbove(req.ID, state.HelperFD, minFD, 0)
 			if err != nil {
 				return -1, false, err
@@ -475,6 +482,9 @@ func (s *Supervisor) duplicateSocket(pid int, req *seccomp.ScmpNotifReq) (int, b
 			return childFD, true, nil
 		case unix.F_DUPFD_CLOEXEC:
 			minFD = minDupFDForState(state, minFD)
+			if minFD <= oldFD {
+				minFD = oldFD + 1
+			}
 			childFD, err := s.addFDAtOrAbove(req.ID, state.HelperFD, minFD, unix.O_CLOEXEC)
 			if err != nil {
 				return -1, false, err

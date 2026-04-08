@@ -12,8 +12,15 @@ func minChildFDForSocketKind(kind SocketKind) int {
 }
 
 func minDupFDForState(state SocketState, requestedMin int) int {
-	if state.Kind == KindUDP && requestedMin < minManagedUDPChildFD {
-		return minManagedUDPChildFD
+	switch state.Kind {
+	case KindUDP:
+		if requestedMin < minManagedUDPChildFD {
+			return minManagedUDPChildFD
+		}
+	case KindTCP:
+		if requestedMin < minManagedTCPChildFD {
+			return minManagedTCPChildFD
+		}
 	}
 	return requestedMin
 }
