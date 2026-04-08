@@ -282,6 +282,18 @@ func startTrustedTLSServer(t *testing.T, handler http.Handler) *httptest.Server 
 	return server
 }
 
+func startTrustedHTTP2TLSServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{sharedTLSTestCertificate(t)},
+	}
+	server.StartTLS()
+	return server
+}
+
 func mustListenLoopbackPort(t *testing.T, port int) net.Listener {
 	t.Helper()
 

@@ -722,6 +722,105 @@ func TestHandleConnectRequestAuditModeAllowsTransparentPolicyViolationAndRecords
 	}
 }
 
+func TestHandleConnectRequestRecordsTransparentProtocolMetadata(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager, err := NewProxyManager(ProxyOptions{
+		NetworkPolicy: NetworkPolicy{
+			Rules: []PolicyRule{
+				{HostPatterns: []string{`^blocked[.]example$`}},
+			},
+		},
+		PolicyMode:   PolicyModeAudit,
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleConnectRequest(t.Context(), "sandbox-a", helperproto.ConnectRequest{
+		Host:        "blocked.example",
+		Port:        3306,
+		Transparent: true,
+		ProtocolMetadata: helperproto.ProtocolMetadata{
+			Protocol:   "mysql",
+			Source:     "first_bytes",
+			Confidence: "definite",
+		},
+	})
+
+	if response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected transparent connect response: %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected 1 access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "transparent_connect" {
+		t.Fatalf("expected transparent_connect access kind, got %q", entry.Kind)
+	}
+	if entry.Protocol != "mysql" {
+		t.Fatalf("expected protocol mysql, got %q", entry.Protocol)
+	}
+	if entry.ProtocolSource != "first_bytes" {
+		t.Fatalf("expected protocol source first_bytes, got %q", entry.ProtocolSource)
+	}
+	if entry.ProtocolConfidence != "definite" {
+		t.Fatalf("expected protocol confidence definite, got %q", entry.ProtocolConfidence)
+	}
+}
+
+func TestHandleConnectRequestAvoidsDuplicateTransparentEvents(t *testing.T) {
+	logger := &stubAccessLogger{}
+	manager, err := NewProxyManager(ProxyOptions{
+		NetworkPolicy: NetworkPolicy{
+			Rules: []PolicyRule{
+				{HostPatterns: []string{`^allowed[.]example$`}},
+			},
+		},
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	response := manager.handleConnectRequest(t.Context(), "sandbox-a", helperproto.ConnectRequest{
+		Host:        "blocked.example",
+		Port:        5432,
+		Transparent: true,
+		ProtocolMetadata: helperproto.ProtocolMetadata{
+			Protocol:   "postgres",
+			Source:     "first_bytes",
+			Confidence: "probable",
+		},
+	})
+
+	if response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("unexpected transparent connect response: %#v", response)
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("expected exactly 1 transparent access entry, got %d", len(logger.entries))
+	}
+
+	entry := logger.entries[0]
+	if entry.Kind != "transparent_connect" {
+		t.Fatalf("expected transparent_connect access kind, got %q", entry.Kind)
+	}
+	if entry.Protocol != "postgres" {
+		t.Fatalf("expected protocol postgres, got %q", entry.Protocol)
+	}
+}
+
 func TestHandleMITMRequestRecordsAccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/mitm" {
@@ -1000,6 +1099,149 @@ func TestHandleMITMRequestRejectsHostAuthorityMismatchUsingAuthorityPort(t *test
 	}
 	if entry.Result != "denied" {
 		t.Fatalf("expected denied entry result, got %q", entry.Result)
+	}
+}
+
+func TestProxyAndMITMAccessLogsIncludeProtocolMetadata(t *testing.T) {
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/proxy" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer httpServer.Close()
+
+	mitmServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mitm":
+			w.WriteHeader(http.StatusNoContent)
+		case "/grpc":
+			if r.ProtoMajor != 2 {
+				t.Fatalf("expected HTTP/2 gRPC request, got %q", r.Proto)
+			}
+			if got := r.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(got), "application/grpc") {
+				t.Fatalf("expected gRPC content-type, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/grpc")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte{0x00, 0x00, 0x00, 0x00, 0x00})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	mitmServer.EnableHTTP2 = true
+	mitmServer.StartTLS()
+	defer mitmServer.Close()
+
+	httpURL, err := url.Parse(httpServer.URL)
+	if err != nil {
+		t.Fatalf("parse HTTP server url: %v", err)
+	}
+	mitmURL, err := url.Parse(mitmServer.URL)
+	if err != nil {
+		t.Fatalf("parse MITM server url: %v", err)
+	}
+	httpPort, err := strconv.Atoi(httpURL.Port())
+	if err != nil {
+		t.Fatalf("parse HTTP server port: %v", err)
+	}
+	mitmPort, err := strconv.Atoi(mitmURL.Port())
+	if err != nil {
+		t.Fatalf("parse MITM server port: %v", err)
+	}
+
+	logger := &stubAccessLogger{}
+	manager := newProxyManager(mustCompilePolicy(t, NetworkPolicy{
+		Rules: []PolicyRule{
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				HTTPMethods:  []string{http.MethodGet},
+				PathPatterns: []string{`^/proxy$`, `^/mitm$`},
+			},
+			{
+				HostPatterns: []string{`^127[.]0[.]0[.]1$`},
+				HTTPMethods:  []string{http.MethodPost},
+				PathPatterns: []string{`^/grpc$`},
+			},
+		},
+	}))
+	manager.transport = mitmServer.Client().Transport.(*http.Transport).Clone()
+	manager.accessLogger = logger
+	if err := manager.registerSandbox("sandbox-a", nil); err != nil {
+		t.Fatalf("register sandbox: %v", err)
+	}
+
+	proxyResponse := manager.handleProxyRequest(t.Context(), "sandbox-a", helperproto.ProxyRequest{
+		Method: http.MethodGet,
+		URL:    httpServer.URL + "/proxy",
+		Header: http.Header{},
+	})
+	if proxyResponse == nil || proxyResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected proxy response: %#v", proxyResponse)
+	}
+
+	mitmResponse := manager.handleMITMRequest(t.Context(), "sandbox-a", helperproto.MITMRequest{
+		Scheme:    "https",
+		Authority: mitmURL.Host,
+		Host:      mitmURL.Hostname(),
+		Method:    http.MethodGet,
+		Path:      "/mitm",
+		Proto:     "HTTP/1.1",
+		Header:    http.Header{},
+	})
+	if mitmResponse == nil || mitmResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("unexpected MITM response: %#v", mitmResponse)
+	}
+
+	grpcResponse := manager.handleMITMRequest(t.Context(), "sandbox-a", helperproto.MITMRequest{
+		Scheme:    "https",
+		Authority: mitmURL.Host,
+		Host:      mitmURL.Hostname(),
+		Method:    http.MethodPost,
+		Path:      "/grpc",
+		Proto:     "HTTP/2.0",
+		Header: http.Header{
+			"Content-Type": []string{"application/grpc+proto"},
+		},
+		Body: []byte{0x00, 0x00, 0x00, 0x00, 0x00},
+	})
+	if grpcResponse == nil || grpcResponse.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected gRPC MITM response: %#v", grpcResponse)
+	}
+
+	if len(logger.entries) != 3 {
+		t.Fatalf("expected 3 access entries, got %d", len(logger.entries))
+	}
+
+	var proxyEntry, httpsEntry, grpcEntry AccessLogEntry
+	for _, entry := range logger.entries {
+		switch {
+		case entry.Kind == "http" && entry.Path == "/proxy":
+			proxyEntry = entry
+		case entry.Kind == "mitm" && entry.Path == "/mitm":
+			httpsEntry = entry
+		case entry.Kind == "mitm" && entry.Path == "/grpc":
+			grpcEntry = entry
+		}
+	}
+
+	if proxyEntry.Protocol != "http" || proxyEntry.ProtocolSource != "http_headers" || proxyEntry.ProtocolConfidence != "definite" {
+		t.Fatalf("expected proxied HTTP metadata, got %#v", proxyEntry)
+	}
+	if proxyEntry.Port != httpPort {
+		t.Fatalf("expected proxy port %d, got %#v", httpPort, proxyEntry)
+	}
+
+	if httpsEntry.Protocol != "https" {
+		t.Fatalf("expected MITM HTTPS protocol, got %#v", httpsEntry)
+	}
+	if httpsEntry.Port != mitmPort {
+		t.Fatalf("expected MITM port %d, got %#v", mitmPort, httpsEntry)
+	}
+
+	if grpcEntry.Protocol != "grpc" || grpcEntry.ProtocolSource != "http_headers" || grpcEntry.ProtocolConfidence != "definite" {
+		t.Fatalf("expected MITM gRPC metadata, got %#v", grpcEntry)
 	}
 }
 

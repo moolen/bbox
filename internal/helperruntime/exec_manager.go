@@ -294,8 +294,8 @@ func (b *bridge) AuthorizeConnect(ctx context.Context, host string, port int) (*
 	return b.runtimeBridge.AuthorizeConnect(ctx, host, port)
 }
 
-func (b *bridge) AuthorizeTransparentConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
-	return b.runtimeBridge.AuthorizeTransparentConnect(ctx, host, port)
+func (b *bridge) AuthorizeTransparentConnect(ctx context.Context, host string, port int, metadata helperproto.ProtocolMetadata) (*helperproto.ConnectResponse, error) {
+	return b.runtimeBridge.AuthorizeTransparentConnect(ctx, host, port, metadata)
 }
 
 func (b *bridge) RequestLeafCert(ctx context.Context, host string) (tls.Certificate, error) {

@@ -67,6 +67,7 @@ func (s *managerProxyService) HandleProxyRequest(ctx context.Context, policy *co
 		}
 	}
 	host, port := normalizeHostPort(targetURL.Host, port)
+	protocol, protocolSource, protocolConfidence := classifyProxyAccessProtocol(targetURL.Scheme)
 	policyEval := policy.evaluateRequest(PolicyRequest{
 		Method: req.Method,
 		Host:   targetURL.Host,
@@ -75,12 +76,15 @@ func (s *managerProxyService) HandleProxyRequest(ctx context.Context, policy *co
 		Body:   req.Body,
 	})
 	event := eventWithPolicyMetadata(accessEvent{
-		SandboxID: sandboxID,
-		Kind:      "http",
-		Host:      host,
-		Port:      port,
-		Method:    req.Method,
-		Path:      path,
+		SandboxID:          sandboxID,
+		Kind:               "http",
+		Protocol:           protocol,
+		ProtocolSource:     protocolSource,
+		ProtocolConfidence: protocolConfidence,
+		Host:               host,
+		Port:               port,
+		Method:             req.Method,
+		Path:               path,
 	}, s.policyMode, policyEval)
 	if s.maxRequestBodyBytes > 0 && int64(len(req.Body)) > s.maxRequestBodyBytes {
 		err := "request body exceeds inspection limit"
@@ -181,6 +185,7 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 		path = "/"
 	}
 	host, port := mitmHostPort(req.Host, authority, scheme)
+	protocol, protocolSource, protocolConfidence := classifyMITMAccessProtocol(req)
 	policyEval := policy.evaluateRequest(PolicyRequest{
 		Method:       req.Method,
 		Host:         policyHost,
@@ -190,12 +195,15 @@ func (s *managerProxyService) HandleMITMRequest(ctx context.Context, policy *com
 		BodyTooLarge: req.BodyTooLarge,
 	})
 	event := eventWithPolicyMetadata(accessEvent{
-		SandboxID: sandboxID,
-		Kind:      "mitm",
-		Host:      host,
-		Port:      port,
-		Method:    req.Method,
-		Path:      path,
+		SandboxID:          sandboxID,
+		Kind:               "mitm",
+		Protocol:           protocol,
+		ProtocolSource:     protocolSource,
+		ProtocolConfidence: protocolConfidence,
+		Host:               host,
+		Port:               port,
+		Method:             req.Method,
+		Path:               path,
 	}, s.policyMode, policyEval)
 	if req.BodyTooLarge {
 		event.Allowed = false
@@ -452,4 +460,30 @@ func defaultPortForScheme(scheme string) int {
 	default:
 		return 0
 	}
+}
+
+func classifyProxyAccessProtocol(scheme string) (string, string, string) {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "https":
+		return "https", "http_headers", "definite"
+	case "http", "":
+		return "http", "http_headers", "definite"
+	default:
+		return strings.ToLower(strings.TrimSpace(scheme)), "http_headers", "probable"
+	}
+}
+
+func classifyMITMAccessProtocol(req helperproto.MITMRequest) (string, string, string) {
+	if isGRPCMITMRequest(req) {
+		return "grpc", "http_headers", "definite"
+	}
+	return "https", "http_connect", "definite"
+}
+
+func isGRPCMITMRequest(req helperproto.MITMRequest) bool {
+	if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(req.Proto)), "HTTP/2") {
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
+	return strings.HasPrefix(contentType, "application/grpc")
 }

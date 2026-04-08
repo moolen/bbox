@@ -76,6 +76,11 @@ func TestConnectRequestRoundTrip(t *testing.T) {
 			Host:        "example.com",
 			Port:        443,
 			Transparent: true,
+			ProtocolMetadata: ProtocolMetadata{
+				Protocol:   "mysql",
+				Source:     "first_bytes",
+				Confidence: "definite",
+			},
 		},
 	}
 	if err := enc.Encode(&want); err != nil {
@@ -92,7 +97,10 @@ func TestConnectRequestRoundTrip(t *testing.T) {
 	if got.ConnectRequest == nil {
 		t.Fatalf("unexpected connect request: %#v", got.ConnectRequest)
 	}
-	if got.ConnectRequest.Host != want.ConnectRequest.Host || got.ConnectRequest.Port != want.ConnectRequest.Port || got.ConnectRequest.Transparent != want.ConnectRequest.Transparent {
+	if got.ConnectRequest.Host != want.ConnectRequest.Host ||
+		got.ConnectRequest.Port != want.ConnectRequest.Port ||
+		got.ConnectRequest.Transparent != want.ConnectRequest.Transparent ||
+		got.ConnectRequest.ProtocolMetadata != want.ConnectRequest.ProtocolMetadata {
 		t.Fatalf("unexpected connect request payload: got=%#v want=%#v", got.ConnectRequest, want.ConnectRequest)
 	}
 }

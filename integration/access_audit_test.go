@@ -1452,3 +1452,111 @@ func TestSandboxInjectedAccessLoggerReceivesConnectAndMITMEntries(t *testing.T) 
 		t.Fatalf("expected mitm status 200, got %d", mitmEntry.StatusCode)
 	}
 }
+
+func TestTransparentModeLogsMySQLProtocolOnDeniedOpaqueTCP(t *testing.T) {
+	requireSandboxPrereqs(t)
+	requireTransparentRuntimePortsStrict(t)
+
+	clientPath := buildStaticTestClient(t, "opaque-mysql-client", `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"time"
+)
+
+func main() {
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:3306", 5*time.Second)
+	if err != nil {
+		fmt.Println("dial failed:", err)
+		return
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	payload := []byte{0x4a, 0x00, 0x00, 0x00, 0x0a, '8', '.', '0', '.', '3', '6', 0x00}
+	if _, err := conn.Write(payload); err != nil {
+		fmt.Println("write failed:", err)
+		return
+	}
+
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err != nil {
+		fmt.Println("read failed:", err)
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "unexpected upstream success")
+	os.Exit(1)
+}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := &recordingAccessLogger{}
+	manager, err := bbox.NewProxyManager(bbox.ProxyOptions{
+		AccessLogger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	sandbox, err := manager.NewSandbox(ctx, bbox.SandboxOptions{
+		Name:        "transparent-opaque-mysql-denied",
+		Binaries:    []string{clientPath},
+		TrafficMode: bbox.TrafficModeTransparent,
+		Policy:      bbox.NetworkPolicy{},
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	defer func() {
+		if err := sandbox.Close(); err != nil {
+			t.Fatalf("close sandbox: %v", err)
+		}
+	}()
+
+	result, err := sandbox.Run(ctx, []string{clientPath}, bbox.RunOptions{})
+	if err != nil {
+		t.Fatalf("run opaque TCP client: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected sandbox run result")
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected opaque TCP client to observe fail-closed behavior, exit=%d stdout=%q stderr=%q", result.ExitCode, string(result.Stdout), string(result.Stderr))
+	}
+	if strings.Contains(string(result.Stderr), "unexpected upstream success") {
+		t.Fatalf("expected opaque TCP flow to fail closed, stdout=%q stderr=%q", string(result.Stdout), string(result.Stderr))
+	}
+
+	entry, ok := findSandboxAccessLogEntry(logger.snapshot(), "transparent-opaque-mysql-denied", "transparent_connect")
+	if !ok {
+		t.Fatalf("expected transparent_connect access log entry, got %#v", logger.snapshot())
+	}
+	if entry.Allowed {
+		t.Fatalf("expected transparent opaque TCP to be denied, got %#v", entry)
+	}
+	if entry.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected denied transparent opaque TCP status 403, got %#v", entry)
+	}
+	if entry.Protocol != "mysql" {
+		t.Fatalf("expected protocol mysql, got %#v", entry)
+	}
+	if entry.ProtocolSource != "first_bytes" {
+		t.Fatalf("expected protocol source first_bytes, got %#v", entry)
+	}
+	if entry.ProtocolConfidence != "definite" {
+		t.Fatalf("expected protocol confidence definite, got %#v", entry)
+	}
+	if entry.Port != 3306 {
+		t.Fatalf("expected destination port 3306, got %#v", entry)
+	}
+}

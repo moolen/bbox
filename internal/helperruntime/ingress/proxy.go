@@ -31,7 +31,7 @@ type Bridge interface {
 	ProxyRoundTrip(context.Context, helperproto.ProxyRequest) (*helperproto.ProxyResponse, error)
 	Connect(context.Context, string, int) (uint64, <-chan helperproto.Envelope, *helperproto.ConnectResponse, error)
 	AuthorizeConnect(context.Context, string, int) (*helperproto.ConnectResponse, error)
-	AuthorizeTransparentConnect(context.Context, string, int) (*helperproto.ConnectResponse, error)
+	AuthorizeTransparentConnect(context.Context, string, int, helperproto.ProtocolMetadata) (*helperproto.ConnectResponse, error)
 	RequestLeafCert(context.Context, string) (tls.Certificate, error)
 	MITMRoundTrip(context.Context, helperproto.MITMRequest) (*helperproto.MITMResponse, error)
 

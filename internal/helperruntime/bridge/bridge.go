@@ -257,14 +257,14 @@ func (b *RuntimeBridge) Connect(ctx context.Context, host string, port int) (uin
 }
 
 func (b *RuntimeBridge) AuthorizeConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
-	return b.authorizeConnect(ctx, host, port, false)
+	return b.authorizeConnect(ctx, host, port, false, helperproto.ProtocolMetadata{})
 }
 
-func (b *RuntimeBridge) AuthorizeTransparentConnect(ctx context.Context, host string, port int) (*helperproto.ConnectResponse, error) {
-	return b.authorizeConnect(ctx, host, port, true)
+func (b *RuntimeBridge) AuthorizeTransparentConnect(ctx context.Context, host string, port int, metadata helperproto.ProtocolMetadata) (*helperproto.ConnectResponse, error) {
+	return b.authorizeConnect(ctx, host, port, true, metadata)
 }
 
-func (b *RuntimeBridge) authorizeConnect(ctx context.Context, host string, port int, transparent bool) (*helperproto.ConnectResponse, error) {
+func (b *RuntimeBridge) authorizeConnect(ctx context.Context, host string, port int, transparent bool, metadata helperproto.ProtocolMetadata) (*helperproto.ConnectResponse, error) {
 	id := b.nextID.Add(1)
 	ch := make(chan helperproto.Envelope, 1)
 
@@ -281,9 +281,10 @@ func (b *RuntimeBridge) authorizeConnect(ctx context.Context, host string, port 
 	if err := b.Send(helperproto.Envelope{
 		ID: id,
 		ConnectRequest: &helperproto.ConnectRequest{
-			Host:        host,
-			Port:        port,
-			Transparent: transparent,
+			Host:             host,
+			Port:             port,
+			Transparent:      transparent,
+			ProtocolMetadata: metadata,
 		},
 	}); err != nil {
 		return nil, err

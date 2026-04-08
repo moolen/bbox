@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/moolen/bbox/internal/helperproto"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
@@ -27,23 +28,34 @@ func ServeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, conne
 
 	switch detectTransparentTCPProtocol(reader) {
 	case transparentTCPProtocolTLS:
-		if !authorizeTransparentTCPConn(conn, rt, connectHost, connectPort, 443) {
+		if !authorizeTransparentTCPConn(conn, rt, connectHost, connectPort, 443, helperproto.ProtocolMetadata{
+			Protocol:   "https",
+			Source:     "tls_client_hello",
+			Confidence: "probable",
+		}) {
 			return
 		}
 		_ = conn.SetDeadline(time.Time{})
 		ServeTransparentHTTPSConn(wrappedConn, rt, connectHost, connectPort)
 	case transparentTCPProtocolHTTP:
-		if !authorizeTransparentTCPConn(conn, rt, connectHost, connectPort, 80) {
+		if !authorizeTransparentTCPConn(conn, rt, connectHost, connectPort, 80, helperproto.ProtocolMetadata{
+			Protocol:   "http",
+			Source:     "first_bytes",
+			Confidence: "probable",
+		}) {
 			return
 		}
 		_ = conn.SetDeadline(time.Time{})
 		serveTransparentHTTPConn(wrappedConn, rt, connectHost, connectPort)
 	default:
+		if !authorizeTransparentTCPConn(conn, rt, connectHost, connectPort, 0, opaqueProtocolMetadata(reader)) {
+			return
+		}
 		closeWithRST(conn)
 	}
 }
 
-func authorizeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, connectPort int, defaultPort int) bool {
+func authorizeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, connectPort int, defaultPort int, metadata helperproto.ProtocolMetadata) bool {
 	connectHost = strings.TrimSpace(connectHost)
 	if connectHost == "" {
 		return true
@@ -55,7 +67,7 @@ func authorizeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, c
 	ctx, cancel := context.WithTimeout(context.Background(), connectHandshakeTimeout)
 	defer cancel()
 
-	response, err := rt.AuthorizeTransparentConnect(ctx, connectHost, connectPort)
+	response, err := rt.AuthorizeTransparentConnect(ctx, connectHost, connectPort, metadata)
 	if err != nil {
 		closeWithRST(conn)
 		return false
@@ -104,6 +116,27 @@ func detectTransparentTCPProtocol(reader *bufio.Reader) transparentTCPProtocol {
 	return transparentTCPProtocolUnknown
 }
 
+func opaqueProtocolMetadata(reader *bufio.Reader) helperproto.ProtocolMetadata {
+	if reader == nil {
+		return helperproto.ProtocolMetadata{}
+	}
+
+	prefix, err := reader.Peek(reader.Buffered())
+	if err != nil && len(prefix) == 0 {
+		return helperproto.ProtocolMetadata{}
+	}
+
+	detected := detectOpaqueTCPProtocol(prefix)
+	if detected.Protocol == "" {
+		return helperproto.ProtocolMetadata{}
+	}
+	return helperproto.ProtocolMetadata{
+		Protocol:   detected.Protocol,
+		Source:     detected.Source,
+		Confidence: detected.Confidence,
+	}
+}
+
 func serveTransparentHTTPConn(conn net.Conn, rt Bridge, connectHost string, connectPort int) {
 	server := &http.Server{
 		Handler: h2c.NewHandler(
@@ -133,7 +166,7 @@ func looksLikeTLSClientHello(reader *bufio.Reader) bool {
 	if err != nil || len(header) < 3 {
 		return false
 	}
-	return header[0] == 0x16 && header[1] == 0x03 && header[2] >= 0x01 && header[2] <= 0x04
+	return looksLikeTLSClientHelloBytes(header)
 }
 
 func looksLikeHTTP2ClientPreface(reader *bufio.Reader) bool {

@@ -46,6 +46,33 @@ func TestServeTransparentTCPConnAcceptsFragmentedHTTP1Request(t *testing.T) {
 	<-done
 }
 
+func TestServeTransparentTCPConnAddsHTTPProtocolMetadataOnAuthorize(t *testing.T) {
+	rt := &stubTransparentBridge{
+		authorizeCh: make(chan struct{}, 1),
+		proxyCh:     make(chan struct{}, 1),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ServeTransparentTCPConn(serverConn, rt, "registry.npmjs.org", 80)
+	}()
+
+	if _, err := io.WriteString(clientConn, "GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("write HTTP request: %v", err)
+	}
+
+	awaitSignal(t, rt.authorizeCh, "transparent HTTP authorize")
+	if got := rt.lastTransparentAuthorize; got.Protocol != "http" || got.Source != "first_bytes" || got.Confidence != "probable" {
+		t.Fatalf("expected HTTP protocol metadata, got %#v", got)
+	}
+
+	_ = clientConn.Close()
+	<-done
+}
+
 func TestServeTransparentTCPConnAcceptsFragmentedTLSClientHelloPrefix(t *testing.T) {
 	rt := &stubTransparentBridge{
 		mitmEnabled: false,
@@ -73,6 +100,33 @@ func TestServeTransparentTCPConnAcceptsFragmentedTLSClientHelloPrefix(t *testing
 	<-done
 }
 
+func TestServeTransparentTCPConnAddsHTTPSProtocolMetadataOnAuthorize(t *testing.T) {
+	rt := &stubTransparentBridge{
+		mitmEnabled: false,
+		authorizeCh: make(chan struct{}, 1),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ServeTransparentTCPConn(serverConn, rt, "repo.maven.apache.org", 443)
+	}()
+
+	if _, err := clientConn.Write([]byte{0x16, 0x03, 0x03}); err != nil {
+		t.Fatalf("write TLS prefix: %v", err)
+	}
+
+	awaitSignal(t, rt.authorizeCh, "transparent TLS authorize")
+	if got := rt.lastTransparentAuthorize; got.Protocol != "https" || got.Source != "tls_client_hello" || got.Confidence != "probable" {
+		t.Fatalf("expected HTTPS protocol metadata, got %#v", got)
+	}
+
+	_ = clientConn.Close()
+	<-done
+}
+
 func TestDetectTransparentTCPProtocolReturnsUnknownForOpaquePayload(t *testing.T) {
 	reader := bufio.NewReaderSize(io.MultiReader(strings.NewReader("\x01\x02\x03opaque")), 32)
 	got := detectTransparentTCPProtocol(reader)
@@ -92,9 +146,10 @@ func awaitSignal(t *testing.T, ch <-chan struct{}, label string) {
 }
 
 type stubTransparentBridge struct {
-	mitmEnabled bool
-	authorizeCh chan struct{}
-	proxyCh     chan struct{}
+	mitmEnabled              bool
+	authorizeCh              chan struct{}
+	proxyCh                  chan struct{}
+	lastTransparentAuthorize helperproto.ProtocolMetadata
 }
 
 func (s *stubTransparentBridge) ReadLoop(context.Context) error { return nil }
@@ -122,7 +177,8 @@ func (s *stubTransparentBridge) AuthorizeConnect(context.Context, string, int) (
 	return nil, errors.New("unexpected AuthorizeConnect call")
 }
 
-func (s *stubTransparentBridge) AuthorizeTransparentConnect(context.Context, string, int) (*helperproto.ConnectResponse, error) {
+func (s *stubTransparentBridge) AuthorizeTransparentConnect(_ context.Context, _ string, _ int, metadata helperproto.ProtocolMetadata) (*helperproto.ConnectResponse, error) {
+	s.lastTransparentAuthorize = metadata
 	if s.authorizeCh != nil {
 		s.authorizeCh <- struct{}{}
 	}

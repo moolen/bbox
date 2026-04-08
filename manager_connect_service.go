@@ -28,11 +28,14 @@ func (s *managerConnectService) HandleConnectRequest(_ context.Context, policy *
 		eval = policy.evaluateConnect(req.Host, req.Port, false)
 	}
 	event := eventWithPolicyMetadata(accessEvent{
-		SandboxID: sandboxID,
-		Kind:      connectAccessKind(req.Transparent),
-		Host:      host,
-		Port:      port,
-		Method:    http.MethodConnect,
+		SandboxID:          sandboxID,
+		Kind:               connectAccessKind(req.Transparent),
+		Protocol:           req.ProtocolMetadata.Protocol,
+		ProtocolSource:     req.ProtocolMetadata.Source,
+		ProtocolConfidence: req.ProtocolMetadata.Confidence,
+		Host:               host,
+		Port:               port,
+		Method:             http.MethodConnect,
 	}, s.policyMode, eval)
 
 	if !eval.Allowed && s.policyMode != PolicyModeAudit {

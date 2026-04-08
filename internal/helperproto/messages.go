@@ -95,10 +95,17 @@ type ProxyResponse struct {
 	Error      string
 }
 
+type ProtocolMetadata struct {
+	Protocol   string
+	Source     string
+	Confidence string
+}
+
 type ConnectRequest struct {
-	Host        string
-	Port        int
-	Transparent bool
+	Host             string
+	Port             int
+	Transparent      bool
+	ProtocolMetadata ProtocolMetadata
 }
 
 type ConnectResponse struct {
