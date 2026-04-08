@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
 type linuxSandboxRuntime struct {
@@ -33,7 +35,7 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 		return nil, err
 	}
 
-	staged, err := stageSandboxRootWithBuilder(opts, runtimeBinary, m.CACertPEM(), mode)
+	staged, err := sandboxroot.Stage(toSandboxrootStageOptions(opts), runtimeBinary, m.CACertPEM(), sandboxroot.TrafficMode(mode))
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +153,6 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 	return &sandboxRuntimeBootstrap{
 		runtime: runtime,
 		root:    root,
-		builder: staged.Builder,
 	}, nil
 }
 

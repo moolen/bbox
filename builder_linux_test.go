@@ -13,7 +13,7 @@ import (
 
 func TestResolveDockerBuildSupportRejectsMissingRequiredTool(t *testing.T) {
 	dir := t.TempDir()
-	opts := DockerBuildOptions{
+	opts := sandboxroot.DockerBuildOptions{
 		Enabled:       true,
 		BuildkitdPath: writeExecutableFixture(t, dir, "buildkitd"),
 		BuildctlPath:  writeExecutableFixture(t, dir, "buildctl"),
@@ -23,7 +23,7 @@ func TestResolveDockerBuildSupportRejectsMissingRequiredTool(t *testing.T) {
 		NewuidmapPath: filepath.Join(dir, "missing-newuidmap"),
 	}
 
-	_, err := resolveDockerBuildSupport(opts)
+	_, err := sandboxroot.ResolveDockerBuildSupport(opts)
 	if err == nil {
 		t.Fatal("expected missing newuidmap to fail")
 	}

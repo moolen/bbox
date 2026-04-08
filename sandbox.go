@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
 // Sandbox is a long-lived bubblewrap helper plus its staged filesystem root and
@@ -344,7 +346,7 @@ func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {
 	if err := validateSeccompOptions(opts.Seccomp); err != nil {
 		return err
 	}
-	if _, err := resolveDockerBuildSupport(opts.DockerBuild); err != nil {
+	if _, err := sandboxroot.ResolveDockerBuildSupport(toSandboxrootDockerBuildOptions(opts.DockerBuild)); err != nil {
 		return err
 	}
 	return nil

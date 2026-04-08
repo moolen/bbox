@@ -19,7 +19,6 @@ type sandboxRuntime interface {
 type sandboxRuntimeBootstrap struct {
 	runtime sandboxRuntime
 	root    string
-	builder *BuilderTooling
 }
 
 var sandboxPlatform = runtime.GOOS

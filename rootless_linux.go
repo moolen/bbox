@@ -5,6 +5,8 @@ package bbox
 import (
 	"os"
 	"os/exec"
+
+	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
 const defaultBuilderCgroupPath = "/sys/fs/cgroup"
@@ -15,7 +17,7 @@ type bwrapCommandConfig struct {
 	proxyListenAddr    string
 	mitm               MITMOptions
 	opts               SandboxOptions
-	builder            *BuilderTooling
+	builder            *sandboxroot.BuilderTooling
 	mode               TrafficMode
 	payloadSeccompPath string
 	bridgeFD           int
@@ -29,7 +31,7 @@ func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
 	tooling := cfg.builder
 	if tooling == nil {
 		var err error
-		tooling, err = resolveDockerBuildSupport(cfg.opts.DockerBuild)
+		tooling, err = sandboxroot.ResolveDockerBuildSupport(toSandboxrootDockerBuildOptions(cfg.opts.DockerBuild))
 		if err != nil {
 			return nil, err
 		}
@@ -42,7 +44,7 @@ func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
 
 	bwrapArgs := buildBwrapArgs(bwrapArgsConfig{
 		root:                  cfg.root,
-		helperPath:            defaultSandboxBBoxPath,
+		helperPath:            sandboxroot.DefaultSandboxBBoxPath,
 		proxyListenAddr:       cfg.proxyListenAddr,
 		mitm:                  cfg.mitm,
 		unshareUser:           os.Geteuid() != 0 && tooling == nil,

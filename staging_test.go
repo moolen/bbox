@@ -14,7 +14,7 @@ import (
 
 func TestParseLddOutputFindsAbsolutePaths(t *testing.T) {
 	input := "\tlibcurl.so.4 => /usr/lib/libcurl.so.4 (0x0)\n\t/lib64/ld-linux-x86-64.so.2 (0x0)\n"
-	got := parseLddOutput(input)
+	got := sandboxroot.ParseLddOutput(input)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 paths, got %d", len(got))
 	}
@@ -22,7 +22,7 @@ func TestParseLddOutputFindsAbsolutePaths(t *testing.T) {
 
 func TestSandboxPathInRootMapsAbsolutePathUnderRoot(t *testing.T) {
 	root := t.TempDir()
-	got, err := sandboxPathInRoot(root, "/etc/hosts")
+	got, err := sandboxroot.SandboxPathInRoot(root, "/etc/hosts")
 	if err != nil {
 		t.Fatalf("sandboxPathInRoot failed: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestSandboxPathInRootMapsAbsolutePathUnderRoot(t *testing.T) {
 
 func TestSandboxPathInRootRejectsTraversal(t *testing.T) {
 	root := t.TempDir()
-	if _, err := sandboxPathInRoot(root, "../etc/shadow"); err == nil {
+	if _, err := sandboxroot.SandboxPathInRoot(root, "../etc/shadow"); err == nil {
 		t.Fatal("expected traversal path to be rejected")
 	}
 }
@@ -52,7 +52,7 @@ func TestCopyFileToPathStagesAbsoluteSandboxPathUnderRoot(t *testing.T) {
 	sandboxPath := filepath.Join(outsideDir, "nested", "dest.txt")
 	expectedDest := filepath.Join(root, strings.TrimPrefix(filepath.Clean(sandboxPath), string(filepath.Separator)))
 
-	if err := copyFileToPath(root, sourcePath, sandboxPath); err != nil {
+	if err := sandboxroot.CopyFileToPath(root, sourcePath, sandboxPath); err != nil {
 		t.Fatalf("copyFileToPath failed: %v", err)
 	}
 
@@ -71,7 +71,7 @@ func TestCopyFileToPathStagesAbsoluteSandboxPathUnderRoot(t *testing.T) {
 
 func TestWriteSandboxConfigWritesFilesUnderRoot(t *testing.T) {
 	root := t.TempDir()
-	if err := writeSandboxConfig(root, nil, TrafficModeProxy); err != nil {
+	if err := sandboxroot.WriteSandboxConfig(root, nil, sandboxroot.TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestWriteSandboxConfigWritesFilesUnderRoot(t *testing.T) {
 
 func TestWriteSandboxConfigWritesDNSLookupConfigInProxyMode(t *testing.T) {
 	root := t.TempDir()
-	if err := writeSandboxConfig(root, nil, TrafficModeProxy); err != nil {
+	if err := sandboxroot.WriteSandboxConfig(root, nil, sandboxroot.TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -113,12 +113,12 @@ func TestWriteSandboxConfigWritesDNSLookupConfigInProxyMode(t *testing.T) {
 func TestWriteSandboxConfigWritesMITMTrustFilesUnderRoot(t *testing.T) {
 	root := t.TempDir()
 	caPEM := []byte("test mitm ca\n")
-	hostTrust, err := hostTrustBundleContent()
+	hostTrust, err := sandboxroot.HostTrustBundleContent()
 	if err != nil {
 		t.Fatalf("hostTrustBundleContent failed: %v", err)
 	}
 
-	if err := writeSandboxConfig(root, caPEM, TrafficModeProxy); err != nil {
+	if err := sandboxroot.WriteSandboxConfig(root, caPEM, sandboxroot.TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -143,12 +143,12 @@ func TestWriteSandboxConfigWritesMITMTrustFilesUnderRoot(t *testing.T) {
 
 func TestWriteSandboxConfigWritesHostTrustFilesWhenMITMDisabled(t *testing.T) {
 	root := t.TempDir()
-	hostTrust, err := hostTrustBundleContent()
+	hostTrust, err := sandboxroot.HostTrustBundleContent()
 	if err != nil {
 		t.Fatalf("hostTrustBundleContent failed: %v", err)
 	}
 
-	if err := writeSandboxConfig(root, nil, TrafficModeProxy); err != nil {
+	if err := sandboxroot.WriteSandboxConfig(root, nil, sandboxroot.TrafficModeProxy); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -170,11 +170,11 @@ func TestWriteSandboxConfigWritesHostTrustFilesWhenMITMDisabled(t *testing.T) {
 
 func TestStageSandboxRootWritesMITMTrustFiles(t *testing.T) {
 	bboxPath := writeBBoxFixture(t)
-	hostTrust, err := hostTrustBundleContent()
+	hostTrust, err := sandboxroot.HostTrustBundleContent()
 	if err != nil {
 		t.Fatalf("hostTrustBundleContent failed: %v", err)
 	}
-	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, []byte("test mitm ca\n"), TrafficModeProxy)
+	root, err := stageRootForTest(SandboxOptions{}, bboxPath, []byte("test mitm ca\n"), TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestStageSandboxRootCopiesBBoxEntrypoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeProxy)
+	root, err := stageRootForTest(SandboxOptions{}, bboxPath, nil, TrafficModeProxy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestStageSandboxRootStagesDockerBuildTools(t *testing.T) {
 	newuidmapPath := writeExecutableFixture(t, dir, "newuidmap")
 	newgidmapPath := writeExecutableFixture(t, dir, "newgidmap")
 
-	root, err := stageSandboxRoot(SandboxOptions{
+	root, err := stageRootForTest(SandboxOptions{
 		DockerBuild: DockerBuildOptions{
 			Enabled:       true,
 			BuildkitdPath: buildkitdPath,
@@ -237,10 +237,10 @@ func TestStageSandboxRootStagesDockerBuildTools(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 
 	for _, sandboxPath := range []string{
-		defaultSandboxDockerShimPath,
-		defaultSandboxBuildkitdPath,
-		defaultSandboxBuildctlPath,
-		defaultSandboxRuncPath,
+		sandboxroot.DefaultSandboxDockerShimPath,
+		sandboxroot.DefaultSandboxBuildkitdPath,
+		sandboxroot.DefaultSandboxBuildctlPath,
+		sandboxroot.DefaultSandboxRuncPath,
 	} {
 		staged := filepath.Join(root, strings.TrimPrefix(sandboxPath, string(filepath.Separator)))
 		if _, err := os.Stat(staged); err != nil {
@@ -285,7 +285,7 @@ func TestStageSandboxRootReportsBuilderResolutionErrors(t *testing.T) {
 	bboxPath := writeExecutableFixture(t, dir, "bbox")
 	missingBuildkitdPath := filepath.Join(dir, "missing-buildkitd")
 
-	root, err := stageSandboxRoot(SandboxOptions{
+	root, err := stageRootForTest(SandboxOptions{
 		DockerBuild: DockerBuildOptions{
 			Enabled:       true,
 			BuildkitdPath: missingBuildkitdPath,
@@ -305,7 +305,7 @@ func TestStageSandboxRootDoesNotStageSeccompLauncher(t *testing.T) {
 		t.Fatalf("write stub bbox: %v", err)
 	}
 
-	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeTransparent)
+	root, err := stageRootForTest(SandboxOptions{}, bboxPath, nil, TrafficModeTransparent)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestStageSandboxRootDoesNotStageSeccompLauncher(t *testing.T) {
 
 func TestWriteSandboxConfigWritesTransparentResolvConf(t *testing.T) {
 	root := t.TempDir()
-	if err := writeSandboxConfig(root, nil, TrafficModeTransparent); err != nil {
+	if err := sandboxroot.WriteSandboxConfig(root, nil, sandboxroot.TrafficModeTransparent); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -349,7 +349,7 @@ func TestWriteSandboxConfigMirrorsHostResolvConfNameservers(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	if err := writeSandboxConfig(root, nil, TrafficModeTransparent); err != nil {
+	if err := sandboxroot.WriteSandboxConfig(root, nil, sandboxroot.TrafficModeTransparent); err != nil {
 		t.Fatalf("writeSandboxConfig failed: %v", err)
 	}
 
@@ -486,13 +486,13 @@ func TestBuildBwrapArgsIncludesUserNamespaceWhenEnabled(t *testing.T) {
 }
 
 func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
-	libPath, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2"))
+	libPath, ok := sandboxroot.FirstExistingPath(sandboxroot.NSSModuleCandidatePaths("libnss_dns.so.2"))
 	if !ok {
 		t.Skip("skip: libnss_dns.so.2 not available")
 	}
 
 	bboxPath := writeBBoxFixture(t)
-	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeTransparent)
+	root, err := stageRootForTest(SandboxOptions{}, bboxPath, nil, TrafficModeTransparent)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -503,7 +503,7 @@ func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
 		t.Fatalf("expected staged libnss_dns at %q: %v", expected, err)
 	}
 
-	deps, err := runtimeFilesForBinary(libPath)
+	deps, err := sandboxroot.RuntimeFilesForBinary(libPath)
 	if err != nil {
 		t.Fatalf("runtimeFilesForBinary failed: %v", err)
 	}
@@ -516,13 +516,13 @@ func TestStageSandboxRootStagesNSSDNSWhenAvailable(t *testing.T) {
 }
 
 func TestStageSandboxRootStagesNSSDNSInProxyModeWhenAvailable(t *testing.T) {
-	libPath, ok := firstExistingPath(nssModuleCandidatePaths("libnss_dns.so.2"))
+	libPath, ok := sandboxroot.FirstExistingPath(sandboxroot.NSSModuleCandidatePaths("libnss_dns.so.2"))
 	if !ok {
 		t.Skip("skip: libnss_dns.so.2 not available")
 	}
 
 	bboxPath := writeBBoxFixture(t)
-	root, err := stageSandboxRoot(SandboxOptions{}, bboxPath, nil, TrafficModeProxy)
+	root, err := stageRootForTest(SandboxOptions{}, bboxPath, nil, TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -541,7 +541,7 @@ func TestStageSandboxRootStagesShebangInterpreter(t *testing.T) {
 	}
 
 	bboxPath := writeBBoxFixture(t)
-	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, bboxPath, nil, TrafficModeProxy)
+	root, err := stageRootForTest(SandboxOptions{Binaries: []string{scriptPath}}, bboxPath, nil, TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -558,13 +558,13 @@ func TestStageSandboxRootStagesEnvShebangTarget(t *testing.T) {
 	if err := os.WriteFile(scriptPath, []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	resolvedSh, err := resolveBinary("sh")
+	resolvedSh, err := sandboxroot.ResolveBinary("sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	bboxPath := writeBBoxFixture(t)
-	root, err := stageSandboxRoot(SandboxOptions{Binaries: []string{scriptPath}}, bboxPath, nil, TrafficModeProxy)
+	root, err := stageRootForTest(SandboxOptions{Binaries: []string{scriptPath}}, bboxPath, nil, TrafficModeProxy)
 	if err != nil {
 		t.Fatalf("stageSandboxRoot failed: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestStageSandboxRootStagesEnvShebangTarget(t *testing.T) {
 }
 
 func TestNSSModuleCandidatePaths(t *testing.T) {
-	candidates := nssModuleCandidatePaths("libnss_dns.so.2")
+	candidates := sandboxroot.NSSModuleCandidatePaths("libnss_dns.so.2")
 	if !containsString(candidates, "/usr/lib/libnss_dns.so.2") {
 		t.Fatalf("expected /usr/lib candidate in %v", candidates)
 	}
@@ -696,4 +696,23 @@ func writeBBoxFixture(t *testing.T) string {
 		t.Fatalf("write bbox fixture %q: %v", bboxPath, err)
 	}
 	return bboxPath
+}
+
+func stageRootForTest(opts SandboxOptions, runtimeBinary string, mitmCAPEM []byte, mode TrafficMode) (string, error) {
+	result, err := sandboxroot.Stage(sandboxroot.StageOptions{
+		Binaries: opts.Binaries,
+		DockerBuild: sandboxroot.DockerBuildOptions{
+			Enabled:       opts.DockerBuild.Enabled,
+			BuildkitdPath: opts.DockerBuild.BuildkitdPath,
+			BuildctlPath:  opts.DockerBuild.BuildctlPath,
+			RuncPath:      opts.DockerBuild.RuncPath,
+			PodmanPath:    opts.DockerBuild.PodmanPath,
+			NewuidmapPath: opts.DockerBuild.NewuidmapPath,
+			NewgidmapPath: opts.DockerBuild.NewgidmapPath,
+		},
+	}, runtimeBinary, mitmCAPEM, sandboxroot.TrafficMode(mode))
+	if err != nil {
+		return "", err
+	}
+	return result.Root, nil
 }

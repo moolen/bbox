@@ -1,15 +1,6 @@
 package bbox
 
-import (
-	"github.com/moolen/bbox/internal/sandboxroot"
-)
-
-const (
-	defaultSandboxDockerShimPath = sandboxroot.DefaultSandboxDockerShimPath
-	defaultSandboxBuildkitdPath  = sandboxroot.DefaultSandboxBuildkitdPath
-	defaultSandboxBuildctlPath   = sandboxroot.DefaultSandboxBuildctlPath
-	defaultSandboxRuncPath       = sandboxroot.DefaultSandboxRuncPath
-)
+import "github.com/moolen/bbox/internal/sandboxroot"
 
 // DockerBuildOptions enables the in-sandbox docker-build compatibility path.
 // The path fields are optional overrides primarily intended for tests and
@@ -24,10 +15,8 @@ type DockerBuildOptions struct {
 	NewgidmapPath string
 }
 
-type BuilderTooling = sandboxroot.BuilderTooling
-
-func resolveDockerBuildSupport(opts DockerBuildOptions) (*BuilderTooling, error) {
-	return sandboxroot.ResolveDockerBuildSupport(sandboxroot.DockerBuildOptions{
+func toSandboxrootDockerBuildOptions(opts DockerBuildOptions) sandboxroot.DockerBuildOptions {
+	return sandboxroot.DockerBuildOptions{
 		Enabled:       opts.Enabled,
 		BuildkitdPath: opts.BuildkitdPath,
 		BuildctlPath:  opts.BuildctlPath,
@@ -35,13 +24,5 @@ func resolveDockerBuildSupport(opts DockerBuildOptions) (*BuilderTooling, error)
 		PodmanPath:    opts.PodmanPath,
 		NewuidmapPath: opts.NewuidmapPath,
 		NewgidmapPath: opts.NewgidmapPath,
-	})
-}
-
-func validateSubordinateIDMappings() error {
-	return sandboxroot.ValidateSubordinateIDMappings()
-}
-
-func fileHasSubordinateIDEntry(path string, username string) (bool, error) {
-	return sandboxroot.FileHasSubordinateIDEntry(path, username)
+	}
 }

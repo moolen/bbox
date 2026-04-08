@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
 func TestBuildLinuxSandboxCommandUsesPodmanUnshareForDockerBuild(t *testing.T) {
@@ -156,7 +158,7 @@ func TestBuildLinuxSandboxCommandUsesProvidedBuilderTooling(t *testing.T) {
 				BuildkitdPath: filepath.Join(dir, "missing-buildkitd"),
 			},
 		},
-		builder: &BuilderTooling{
+		builder: &sandboxroot.BuilderTooling{
 			PodmanPath: podmanPath,
 		},
 		mode:       TrafficModeProxy,
