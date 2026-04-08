@@ -33,10 +33,11 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 		return nil, err
 	}
 
-	root, err := stageSandboxRoot(opts, runtimeBinary, m.CACertPEM(), mode)
+	staged, err := stageSandboxRootWithBuilder(opts, runtimeBinary, m.CACertPEM(), mode)
 	if err != nil {
 		return nil, err
 	}
+	root := staged.Root
 
 	parentBridge, childBridge, err := openBridgePair()
 	if err != nil {
@@ -87,6 +88,7 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 		proxyListenAddr:    m.listenAddr,
 		mitm:               m.mitm,
 		opts:               opts,
+		builder:            staged.Builder,
 		mode:               mode,
 		payloadSeccompPath: payloadSeccompBPFPath,
 		bridgeFD:           bridgeFD,
@@ -149,6 +151,7 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 	return &sandboxRuntimeBootstrap{
 		runtime: runtime,
 		root:    root,
+		builder: staged.Builder,
 	}, nil
 }
 

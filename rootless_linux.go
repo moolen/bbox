@@ -15,6 +15,7 @@ type bwrapCommandConfig struct {
 	proxyListenAddr    string
 	mitm               MITMOptions
 	opts               SandboxOptions
+	builder            *BuilderTooling
 	mode               TrafficMode
 	payloadSeccompPath string
 	bridgeFD           int
@@ -25,9 +26,13 @@ type bwrapCommandConfig struct {
 }
 
 func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
-	tooling, err := resolveDockerBuildSupport(cfg.opts.DockerBuild)
-	if err != nil {
-		return nil, err
+	tooling := cfg.builder
+	if tooling == nil {
+		var err error
+		tooling, err = resolveDockerBuildSupport(cfg.opts.DockerBuild)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	mounts := append([]Mount(nil), cfg.opts.Mounts...)
@@ -54,7 +59,7 @@ func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
 	if tooling != nil {
 		args := append([]string{"unshare", "bwrap"}, bwrapArgs...)
-		cmd = exec.Command(tooling.podmanPath, args...)
+		cmd = exec.Command(tooling.PodmanPath, args...)
 	} else {
 		cmd = exec.Command("bwrap", bwrapArgs...)
 	}

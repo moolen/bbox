@@ -3,9 +3,12 @@
 package bbox
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
 func TestResolveDockerBuildSupportRejectsMissingRequiredTool(t *testing.T) {
@@ -26,5 +29,24 @@ func TestResolveDockerBuildSupportRejectsMissingRequiredTool(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "newuidmap") {
 		t.Fatalf("expected error to mention newuidmap, got %v", err)
+	}
+}
+
+func TestValidateSubordinateIDMappings(t *testing.T) {
+	dir := t.TempDir()
+	subuidPath := filepath.Join(dir, "subuid")
+	subgidPath := filepath.Join(dir, "subgid")
+	username := "sandbox-user"
+	entry := username + ":100000:65536\n"
+
+	if err := os.WriteFile(subuidPath, []byte(entry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(subgidPath, []byte(entry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := sandboxroot.ValidateSubordinateIDMappingsForUser(username, subuidPath, subgidPath); err != nil {
+		t.Fatalf("validate subordinate id mappings failed: %v", err)
 	}
 }

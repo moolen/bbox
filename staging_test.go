@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
 func TestParseLddOutputFindsAbsolutePaths(t *testing.T) {
@@ -247,7 +249,38 @@ func TestStageSandboxRootStagesDockerBuildTools(t *testing.T) {
 	}
 }
 
-func TestStageSandboxRootUsesResolvedBuilderTooling(t *testing.T) {
+func TestStageRootCopiesResolvedFilesAndBuilderShim(t *testing.T) {
+	dir := t.TempDir()
+	runtimeBinary := writeExecutableFixture(t, dir, "bbox")
+	buildkitdPath := writeExecutableFixture(t, dir, "buildkitd")
+	buildctlPath := writeExecutableFixture(t, dir, "buildctl")
+	runcPath := writeExecutableFixture(t, dir, "runc")
+	podmanPath := writeExecutableFixture(t, dir, "podman")
+	newuidmapPath := writeExecutableFixture(t, dir, "newuidmap")
+	newgidmapPath := writeExecutableFixture(t, dir, "newgidmap")
+
+	result, err := sandboxroot.Stage(sandboxroot.StageOptions{
+		DockerBuild: sandboxroot.DockerBuildOptions{
+			Enabled:       true,
+			BuildkitdPath: buildkitdPath,
+			BuildctlPath:  buildctlPath,
+			RuncPath:      runcPath,
+			PodmanPath:    podmanPath,
+			NewuidmapPath: newuidmapPath,
+			NewgidmapPath: newgidmapPath,
+		},
+	}, runtimeBinary, nil, sandboxroot.TrafficModeProxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(result.Root) })
+
+	if _, err := os.Stat(filepath.Join(result.Root, "usr/bin/docker")); err != nil {
+		t.Fatalf("missing docker shim: %v", err)
+	}
+}
+
+func TestStageSandboxRootReportsBuilderResolutionErrors(t *testing.T) {
 	dir := t.TempDir()
 	bboxPath := writeExecutableFixture(t, dir, "bbox")
 	missingBuildkitdPath := filepath.Join(dir, "missing-buildkitd")
@@ -264,8 +297,6 @@ func TestStageSandboxRootUsesResolvedBuilderTooling(t *testing.T) {
 	if !strings.Contains(err.Error(), "resolve buildkitd") {
 		t.Fatalf("expected buildkitd resolve error, got %v", err)
 	}
-
-	t.Fatalf("characterization: stageSandboxRoot still depends on builder tool resolution/prereq wiring instead of an independent staging seam")
 }
 
 func TestStageSandboxRootDoesNotStageSeccompLauncher(t *testing.T) {

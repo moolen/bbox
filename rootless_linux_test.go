@@ -24,9 +24,9 @@ func TestBuildLinuxSandboxCommandUsesPodmanUnshareForDockerBuild(t *testing.T) {
 	t.Cleanup(func() { _ = bridgeFile.Close() })
 
 	cmd, err := buildLinuxSandboxCommand(bwrapCommandConfig{
-		runtimeBinary:    bboxPath,
-		root:             t.TempDir(),
-		proxyListenAddr:  "127.0.0.1:31111",
+		runtimeBinary:   bboxPath,
+		root:            t.TempDir(),
+		proxyListenAddr: "127.0.0.1:31111",
 		opts: SandboxOptions{
 			DockerBuild: DockerBuildOptions{
 				Enabled:       true,
@@ -134,6 +134,42 @@ func TestBuildLinuxSandboxCommandUsesPlainBwrapWithoutDockerBuild(t *testing.T) 
 	}
 	if !containsString(cmd.Args, "--unshare-user") {
 		t.Fatalf("expected --unshare-user in %v", cmd.Args)
+	}
+}
+
+func TestBuildLinuxSandboxCommandUsesProvidedBuilderTooling(t *testing.T) {
+	dir := t.TempDir()
+	bridgeFile, err := os.CreateTemp(t.TempDir(), "bridge-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bridgeFile.Close() })
+
+	podmanPath := writeExecutableFixture(t, dir, "podman")
+	cmd, err := buildLinuxSandboxCommand(bwrapCommandConfig{
+		runtimeBinary:   "/app/bbox",
+		root:            t.TempDir(),
+		proxyListenAddr: "127.0.0.1:31111",
+		opts: SandboxOptions{
+			DockerBuild: DockerBuildOptions{
+				Enabled:       true,
+				BuildkitdPath: filepath.Join(dir, "missing-buildkitd"),
+			},
+		},
+		builder: &BuilderTooling{
+			PodmanPath: podmanPath,
+		},
+		mode:       TrafficModeProxy,
+		bridgeFD:   3,
+		seccompFD:  -1,
+		extraFiles: []*os.File{bridgeFile},
+	})
+	if err != nil {
+		t.Fatalf("buildLinuxSandboxCommand failed: %v", err)
+	}
+
+	if got := filepath.Clean(cmd.Path); got != filepath.Clean(podmanPath) {
+		t.Fatalf("unexpected command path: got %q want %q", got, podmanPath)
 	}
 }
 
