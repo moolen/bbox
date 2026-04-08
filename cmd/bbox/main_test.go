@@ -102,6 +102,9 @@ traffic_mode: transparent
 	if !containsMount(cfg.sandbox.Mounts, wantMount) {
 		t.Fatalf("expected file-relative mount to be resolved and included, mounts=%v want=%#v", cfg.sandbox.Mounts, wantMount)
 	}
+	if containsString(cfg.sandbox.Env, "FROM_FILE=1") {
+		t.Fatalf("did not expect file env entry after runtime env replacement, got %v", cfg.sandbox.Env)
+	}
 	if !containsString(cfg.sandbox.Env, "FROM_FLAG=1") || !containsString(cfg.sandbox.Env, "FROM_HOST=1") {
 		t.Fatalf("expected merged environment entries in sandbox env, got %v", cfg.sandbox.Env)
 	}

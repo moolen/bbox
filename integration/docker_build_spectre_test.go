@@ -97,7 +97,7 @@ func TestDockerBuildProxyModeFailsClosedForNonProxyAwareClient(t *testing.T) {
 	}
 }
 
-func TestDockerBuildSpectreCharacterizesPlannerExecutorBoundary(t *testing.T) {
+func TestRequireSubordinateIDMappingReportsMissingCurrentUser(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subuid")
 	if err := os.WriteFile(path, []byte("nobody:100000:65536\n"), 0o644); err != nil {
 		t.Fatalf("write subordinate id file: %v", err)
