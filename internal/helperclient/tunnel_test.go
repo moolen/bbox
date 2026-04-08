@@ -1,4 +1,4 @@
-package bbox
+package helperclient
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 )
 
 func TestRunSessionFinishIsSingleShot(t *testing.T) {
-	session := newRunSession(io.Discard, io.Discard)
+	session := NewRunSession(io.Discard, io.Discard)
 	if !session.Finish(&RunResult{ExitCode: 0}, nil) {
 		t.Fatal("first finish should win")
 	}
@@ -23,8 +23,8 @@ func TestRunSessionFinishIsSingleShot(t *testing.T) {
 }
 
 func TestTunnelWriteCloseSendsTerminalCloseOnce(t *testing.T) {
-	client := newHelperClient(nil, "sandbox-a", &recordingConn{})
-	tunnel := newHostTunnel(client, 7, nopConn{})
+	client := New(nil, "sandbox-a", &recordingConn{})
+	tunnel := NewHostTunnel(client, 7, nopConn{})
 	tunnel.SendWriteClose(io.EOF)
 	tunnel.SendWriteClose(io.EOF)
 	if got := countTunnelCloseEnvelopes(client.conn.(*recordingConn).Bytes(), 7); got != 1 {

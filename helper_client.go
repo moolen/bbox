@@ -2,185 +2,230 @@ package bbox
 
 import (
 	"context"
-	"encoding/gob"
 	"errors"
-	"fmt"
 	"io"
-	"sync"
-	"sync/atomic"
+	"net"
 
+	"github.com/moolen/bbox/internal/helperclient"
 	"github.com/moolen/bbox/internal/helperproto"
 )
 
+type helperControl interface {
+	Start(context.Context) (string, error)
+	Run(context.Context, []string, RunOptions) (*RunResult, error)
+	Close() error
+}
+
 type helperClient struct {
-	sandboxID string
-	manager   *ProxyManager
-	conn      io.ReadWriteCloser
-	enc       *gob.Encoder
-	dec       *gob.Decoder
-	ctx       context.Context
-	cancel    context.CancelFunc
-
-	sendMu sync.Mutex
-
-	readyCh   chan helperReady
-	readyOnce sync.Once
-	loopDone  chan error
-	nextID    atomic.Uint64
-
-	execMu     sync.Mutex
-	currentMu  sync.Mutex
-	currentRun *runSession
-
-	tunnelMu       sync.Mutex
-	tunnels        map[uint64]*hostTunnel
-	pendingTunnels map[uint64]*hostTunnel
-
-	closeOnce sync.Once
+	client   *helperclient.Client
+	ctx      context.Context
+	conn     io.ReadWriteCloser
+	loopDone chan error
 }
 
 func newHelperClient(manager *ProxyManager, sandboxID string, conn io.ReadWriteCloser) *helperClient {
-	clientCtx, cancel := context.WithCancel(context.Background())
+	inner := helperclient.New(helperClientHost{manager: manager}, sandboxID, conn)
 	return &helperClient{
-		sandboxID:      sandboxID,
-		manager:        manager,
-		conn:           conn,
-		enc:            gob.NewEncoder(conn),
-		dec:            gob.NewDecoder(conn),
-		ctx:            clientCtx,
-		cancel:         cancel,
-		readyCh:        make(chan helperReady, 1),
-		loopDone:       make(chan error, 1),
-		tunnels:        make(map[uint64]*hostTunnel),
-		pendingTunnels: make(map[uint64]*hostTunnel),
+		client:   inner,
+		ctx:      inner.Context(),
+		conn:     conn,
+		loopDone: inner.LoopDone(),
 	}
 }
 
 func (c *helperClient) Start(ctx context.Context) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	go func() {
-		c.loopDone <- c.readLoop()
-	}()
-
-	if err := c.send(helperproto.Envelope{
-		ID: c.nextID.Add(1),
-		Hello: &helperproto.Hello{
-			ProtocolVersion: helperproto.ProtocolVersion,
-			SandboxID:       c.sandboxID,
-		},
-	}); err != nil {
-		return "", fmt.Errorf("send helper hello: %w", err)
-	}
-
-	select {
-	case ready := <-c.readyCh:
-		if ready.err != nil {
-			return "", ready.err
-		}
-		if ready.proxyAddr != "" {
-			return ready.proxyAddr, nil
-		}
-		if ready.hasTransparentListeners() {
-			return "", nil
-		}
-		return "", errors.New("helper did not report proxy or transparent listener readiness")
-	case err := <-c.loopDone:
-		if err == nil {
-			return "", errors.New("helper exited before signaling readiness")
-		}
-		return "", fmt.Errorf("wait for helper readiness: %w", err)
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
+	return c.client.Start(ctx)
 }
 
 func (c *helperClient) Run(ctx context.Context, argv []string, opts RunOptions) (*RunResult, error) {
+	if c == nil {
+		return nil, errors.New("helper client is nil")
+	}
+	result, err := c.client.Run(ctx, argv, helperclient.RunOptions{
+		Env:          append([]string(nil), opts.Env...),
+		WorkDir:      opts.WorkDir,
+		Interactive:  opts.Interactive,
+		Stdin:        opts.Stdin,
+		Stdout:       opts.Stdout,
+		Stderr:       opts.Stderr,
+		Terminal:     opts.Terminal,
+		TerminalSize: helperclient.TerminalSize{Rows: opts.TerminalSize.Rows, Cols: opts.TerminalSize.Cols},
+		Resize:       convertResizeChannel(ctx, opts.Resize),
+	})
+	if result == nil {
+		return nil, err
+	}
+	return &RunResult{
+		ExitCode: result.ExitCode,
+		Stdout:   append([]byte(nil), result.Stdout...),
+		Stderr:   append([]byte(nil), result.Stderr...),
+	}, err
+}
+
+func (c *helperClient) Close() error {
+	if c == nil {
+		return nil
+	}
+	return c.client.Close()
+}
+
+func (c *helperClient) readLoop() error {
+	return c.client.ReadLoop()
+}
+
+func (c *helperClient) handleConnectRequest(id uint64, req helperproto.ConnectRequest) {
+	c.client.HandleConnectRequest(id, req)
+}
+
+func (c *helperClient) handleTunnelFrame(id uint64, frame helperproto.TunnelFrame) {
+	c.client.HandleTunnelFrame(id, frame)
+}
+
+func (c *helperClient) shutdownTunnels() {
+	c.client.ShutdownTunnels()
+}
+
+func (c *helperClient) registerPendingTunnel(id uint64, tunnel *hostTunnel) {
+	if c == nil || tunnel == nil {
+		return
+	}
+	c.client.RegisterPendingTunnel(id, tunnel.inner)
+}
+
+func (c *helperClient) activateTunnel(id uint64) bool {
+	if c == nil {
+		return false
+	}
+	return c.client.ActivateTunnel(id)
+}
+
+type helperClientHost struct {
+	manager *ProxyManager
+}
+
+func (h helperClientHost) HandleProxyRequest(ctx context.Context, sandboxID string, req helperproto.ProxyRequest) *helperproto.ProxyResponse {
+	if h.manager == nil {
+		return nil
+	}
+	return h.manager.handleProxyRequest(ctx, sandboxID, req)
+}
+
+func (h helperClientHost) HandleConnectRequest(ctx context.Context, sandboxID string, req helperproto.ConnectRequest) *helperproto.ConnectResponse {
+	if h.manager == nil {
+		return nil
+	}
+	return h.manager.handleConnectRequest(ctx, sandboxID, req)
+}
+
+func (h helperClientHost) HandleDNSRequest(ctx context.Context, sandboxID string, req helperproto.DNSRequest) *helperproto.DNSResponse {
+	if h.manager == nil {
+		return nil
+	}
+	return h.manager.handleDNSRequest(ctx, sandboxID, req)
+}
+
+func (h helperClientHost) HandleLeafCertRequest(host string) *helperproto.LeafCertResponse {
+	if h.manager == nil {
+		return nil
+	}
+	return h.manager.handleLeafCertRequest(host)
+}
+
+func (h helperClientHost) HandleMITMRequest(ctx context.Context, sandboxID string, req helperproto.MITMRequest) *helperproto.MITMResponse {
+	if h.manager == nil {
+		return nil
+	}
+	return h.manager.handleMITMRequest(ctx, sandboxID, req)
+}
+
+func (h helperClientHost) DialTunnel(ctx context.Context, host string, port int) (net.Conn, error) {
+	if h.manager == nil {
+		return nil, errors.New("helper client host manager is nil")
+	}
+	return h.manager.dialTunnel(ctx, host, port)
+}
+
+func convertResizeChannel(ctx context.Context, sizes <-chan TerminalSize) <-chan helperclient.TerminalSize {
+	if sizes == nil {
+		return nil
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	c.execMu.Lock()
-	defer c.execMu.Unlock()
-
-	state := newRunSession(opts.Stdout, opts.Stderr)
-	if err := c.installRunSession(state); err != nil {
-		return nil, err
-	}
-
-	interactive := opts.Interactive || opts.Stdin != nil || opts.Stdout != nil || opts.Stderr != nil || opts.Terminal || opts.Resize != nil
-
-	var initialSize *helperproto.TerminalSize
-	if opts.TerminalSize.Rows > 0 || opts.TerminalSize.Cols > 0 {
-		initialSize = &helperproto.TerminalSize{
-			Rows: opts.TerminalSize.Rows,
-			Cols: opts.TerminalSize.Cols,
-		}
-	}
-
-	env := helperproto.Envelope{
-		ID: c.nextID.Add(1),
-		ExecRequest: &helperproto.ExecRequest{
-			Argv:        append([]string(nil), argv...),
-			Env:         append([]string(nil), opts.Env...),
-			WorkDir:     opts.WorkDir,
-			Interactive: interactive,
-			Terminal:    opts.Terminal,
-			InitialSize: initialSize,
-		},
-	}
-	if err := c.send(env); err != nil {
-		runErr := fmt.Errorf("send exec request: %w", err)
-		c.failCurrentRun(runErr)
-		return nil, runErr
-	}
-
-	if interactive {
-		if opts.Stdin != nil {
-			go c.pumpRunInput(env.ID, opts.Stdin)
-		}
-		if opts.Resize != nil {
-			go c.pumpRunResize(env.ID, opts.Resize)
-		}
-	}
-
-	select {
-	case outcome := <-state.resultCh:
-		return outcome.result, outcome.err
-	case err := <-c.loopDone:
-		if err == nil {
-			err = errors.New("helper bridge closed")
-		}
-		state.Finish(nil, err)
-		return nil, err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func (c *helperClient) Close() error {
-	var closeErr error
-
-	c.closeOnce.Do(func() {
-		c.cancel()
-		c.shutdownTunnels()
-		closeErr = c.conn.Close()
-		select {
-		case err := <-c.loopDone:
-			if normalized := normalizeLoopCloseError(err); normalized != nil {
-				closeErr = errors.Join(closeErr, normalized)
+	out := make(chan helperclient.TerminalSize)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case size, ok := <-sizes:
+				if !ok {
+					return
+				}
+				select {
+				case out <- helperclient.TerminalSize{Rows: size.Rows, Cols: size.Cols}:
+				case <-ctx.Done():
+					return
+				}
 			}
-		default:
 		}
-	})
-
-	return closeErr
+	}()
+	return out
 }
 
-func (c *helperClient) send(env helperproto.Envelope) error {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
-	return c.enc.Encode(&env)
+type runSession struct {
+	inner *helperclient.RunSession
+}
+
+func newRunSession(stdout, stderr io.Writer) *runSession {
+	return &runSession{inner: helperclient.NewRunSession(stdout, stderr)}
+}
+
+func (s *runSession) Finish(result *RunResult, err error) bool {
+	if s == nil {
+		return false
+	}
+	var converted *helperclient.RunResult
+	if result != nil {
+		converted = &helperclient.RunResult{
+			ExitCode: result.ExitCode,
+			Stdout:   append([]byte(nil), result.Stdout...),
+			Stderr:   append([]byte(nil), result.Stderr...),
+		}
+	}
+	return s.inner.Finish(converted, err)
+}
+
+type hostTunnel struct {
+	inner *helperclient.HostTunnel
+}
+
+func newHostTunnel(client *helperClient, id uint64, conn net.Conn) *hostTunnel {
+	if client == nil {
+		return nil
+	}
+	return &hostTunnel{inner: helperclient.NewHostTunnel(client.client, id, conn)}
+}
+
+func (t *hostTunnel) start() {
+	if t == nil {
+		return
+	}
+	t.inner.Start()
+}
+
+func (t *hostTunnel) shutdown() {
+	if t == nil {
+		return
+	}
+	t.inner.Shutdown()
+}
+
+func (t *hostTunnel) SendWriteClose(err error) {
+	if t == nil {
+		return
+	}
+	t.inner.SendWriteClose(err)
 }

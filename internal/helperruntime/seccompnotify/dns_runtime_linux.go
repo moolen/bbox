@@ -354,21 +354,8 @@ func (s *Supervisor) emulateDNSPPoll(pid int, req *seccomp.ScmpNotifReq) (int, b
 	return s.emulateDNSPollFDs(pid, uintptr(req.Data.Args[0]), int(req.Data.Args[1]))
 }
 
-func (s *Supervisor) lookupManagedUDPSocket(pid int, req *seccomp.ScmpNotifReq) (SocketState, bool) {
-	if s == nil || req == nil {
-		return SocketState{}, false
-	}
-	childFD := int(req.Data.Args[0])
-	if childFD < 0 {
-		return SocketState{}, false
-	}
-	state, ok := s.registry.LookupForPID(pid, childFD)
-	if !ok || state.Kind != KindUDP {
-		return SocketState{}, false
-	}
-	return state, true
-}
-
+// lookupManagedUDPSocket keeps DNS emulation scoped to sockets already under
+// helper-managed UDP state.
 func (s *Supervisor) emulateDNSPollFDs(pid int, fdsPtr uintptr, fdCount int) (int, bool, error) {
 	if fdCount < 0 {
 		return 0, true, unix.EINVAL

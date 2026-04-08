@@ -1,4 +1,4 @@
-package bbox
+package helperclient
 
 import (
 	"bytes"
@@ -8,6 +8,33 @@ import (
 
 	"github.com/moolen/bbox/internal/helperproto"
 )
+
+type TerminalSize struct {
+	Rows uint16
+	Cols uint16
+}
+
+type RunOptions struct {
+	Env          []string
+	WorkDir      string
+	Interactive  bool
+	Stdin        io.Reader
+	Stdout       io.Writer
+	Stderr       io.Writer
+	Terminal     bool
+	TerminalSize TerminalSize
+	Resize       <-chan TerminalSize
+}
+
+type RunResult struct {
+	ExitCode int
+	Stdout   []byte
+	Stderr   []byte
+}
+
+type RunSession struct {
+	inner *runSession
+}
 
 type runSession struct {
 	stdout       bytes.Buffer
@@ -29,6 +56,17 @@ func newRunSession(stdout, stderr io.Writer) *runSession {
 		stderrWriter: stderr,
 		resultCh:     make(chan runOutcome, 1),
 	}
+}
+
+func NewRunSession(stdout, stderr io.Writer) *RunSession {
+	return &RunSession{inner: newRunSession(stdout, stderr)}
+}
+
+func (s *RunSession) Finish(result *RunResult, err error) bool {
+	if s == nil {
+		return false
+	}
+	return s.inner.Finish(result, err)
 }
 
 func (s *runSession) Finish(result *RunResult, err error) bool {
@@ -81,7 +119,7 @@ func (s *runSession) HandleExecResult(result helperproto.ExecResult) bool {
 	}, execResultError(result))
 }
 
-func (c *helperClient) installRunSession(session *runSession) error {
+func (c *Client) installRunSession(session *runSession) error {
 	c.currentMu.Lock()
 	defer c.currentMu.Unlock()
 	if c.currentRun != nil {
@@ -91,13 +129,13 @@ func (c *helperClient) installRunSession(session *runSession) error {
 	return nil
 }
 
-func (c *helperClient) currentRunSession() *runSession {
+func (c *Client) currentRunSession() *runSession {
 	c.currentMu.Lock()
 	defer c.currentMu.Unlock()
 	return c.currentRun
 }
 
-func (c *helperClient) clearCurrentRun() *runSession {
+func (c *Client) clearCurrentRun() *runSession {
 	c.currentMu.Lock()
 	defer c.currentMu.Unlock()
 	session := c.currentRun
@@ -105,7 +143,7 @@ func (c *helperClient) clearCurrentRun() *runSession {
 	return session
 }
 
-func (c *helperClient) handleStream(frame helperproto.StreamFrame) {
+func (c *Client) handleStream(frame helperproto.StreamFrame) {
 	session := c.currentRunSession()
 	if session == nil {
 		return
@@ -113,7 +151,7 @@ func (c *helperClient) handleStream(frame helperproto.StreamFrame) {
 	session.HandleStream(frame)
 }
 
-func (c *helperClient) handleExecResult(result helperproto.ExecResult) {
+func (c *Client) handleExecResult(result helperproto.ExecResult) {
 	session := c.clearCurrentRun()
 	if session == nil {
 		return
@@ -121,7 +159,7 @@ func (c *helperClient) handleExecResult(result helperproto.ExecResult) {
 	session.HandleExecResult(result)
 }
 
-func (c *helperClient) failCurrentRun(err error) {
+func (c *Client) failCurrentRun(err error) {
 	session := c.clearCurrentRun()
 	if session == nil {
 		return
@@ -136,7 +174,7 @@ func execResultError(result helperproto.ExecResult) error {
 	return errors.New(result.Error)
 }
 
-func (c *helperClient) pumpRunInput(id uint64, src io.Reader) {
+func (c *Client) pumpRunInput(id uint64, src io.Reader) {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := src.Read(buf)
@@ -165,7 +203,7 @@ func (c *helperClient) pumpRunInput(id uint64, src io.Reader) {
 	}
 }
 
-func (c *helperClient) pumpRunResize(id uint64, sizes <-chan TerminalSize) {
+func (c *Client) pumpRunResize(id uint64, sizes <-chan TerminalSize) {
 	for size := range sizes {
 		if size.Rows == 0 && size.Cols == 0 {
 			continue

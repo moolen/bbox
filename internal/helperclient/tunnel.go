@@ -1,4 +1,4 @@
-package bbox
+package helperclient
 
 import (
 	"errors"
@@ -11,7 +11,7 @@ import (
 )
 
 type hostTunnel struct {
-	client *helperClient
+	client *Client
 	id     uint64
 	conn   net.Conn
 
@@ -24,7 +24,11 @@ type hostTunnel struct {
 	sendTerminalCloseOnce sync.Once
 }
 
-func newHostTunnel(client *helperClient, id uint64, conn net.Conn) *hostTunnel {
+type HostTunnel struct {
+	inner *hostTunnel
+}
+
+func newHostTunnel(client *Client, id uint64, conn net.Conn) *hostTunnel {
 	return &hostTunnel{
 		client: client,
 		id:     id,
@@ -34,7 +38,43 @@ func newHostTunnel(client *helperClient, id uint64, conn net.Conn) *hostTunnel {
 	}
 }
 
-func (c *helperClient) registerPendingTunnel(id uint64, tunnel *hostTunnel) {
+func NewHostTunnel(client *Client, id uint64, conn net.Conn) *HostTunnel {
+	return &HostTunnel{inner: newHostTunnel(client, id, conn)}
+}
+
+func (t *HostTunnel) Start() {
+	if t == nil {
+		return
+	}
+	t.inner.start()
+}
+
+func (t *HostTunnel) Shutdown() {
+	if t == nil {
+		return
+	}
+	t.inner.shutdown()
+}
+
+func (t *HostTunnel) SendWriteClose(err error) {
+	if t == nil {
+		return
+	}
+	t.inner.SendWriteClose(err)
+}
+
+func (c *Client) RegisterPendingTunnel(id uint64, tunnel *HostTunnel) {
+	if tunnel == nil {
+		return
+	}
+	c.registerPendingTunnel(id, tunnel.inner)
+}
+
+func (c *Client) ActivateTunnel(id uint64) bool {
+	return c.activateTunnel(id)
+}
+
+func (c *Client) registerPendingTunnel(id uint64, tunnel *hostTunnel) {
 	c.tunnelMu.Lock()
 	defer c.tunnelMu.Unlock()
 	if c.pendingTunnels == nil {
@@ -43,7 +83,7 @@ func (c *helperClient) registerPendingTunnel(id uint64, tunnel *hostTunnel) {
 	c.pendingTunnels[id] = tunnel
 }
 
-func (c *helperClient) activateTunnel(id uint64) bool {
+func (c *Client) activateTunnel(id uint64) bool {
 	c.tunnelMu.Lock()
 	defer c.tunnelMu.Unlock()
 	tunnel := c.pendingTunnels[id]
@@ -58,7 +98,7 @@ func (c *helperClient) activateTunnel(id uint64) bool {
 	return true
 }
 
-func (c *helperClient) unregisterTunnel(id uint64) *hostTunnel {
+func (c *Client) unregisterTunnel(id uint64) *hostTunnel {
 	c.tunnelMu.Lock()
 	defer c.tunnelMu.Unlock()
 	tunnel := c.tunnels[id]
@@ -70,7 +110,7 @@ func (c *helperClient) unregisterTunnel(id uint64) *hostTunnel {
 	return tunnel
 }
 
-func (c *helperClient) tunnel(id uint64) *hostTunnel {
+func (c *Client) tunnel(id uint64) *hostTunnel {
 	c.tunnelMu.Lock()
 	defer c.tunnelMu.Unlock()
 	tunnel := c.tunnels[id]
@@ -80,7 +120,7 @@ func (c *helperClient) tunnel(id uint64) *hostTunnel {
 	return c.pendingTunnels[id]
 }
 
-func (c *helperClient) handleTunnelFrame(id uint64, frame helperproto.TunnelFrame) {
+func (c *Client) HandleTunnelFrame(id uint64, frame helperproto.TunnelFrame) {
 	tunnel := c.tunnel(id)
 	if tunnel == nil {
 		return
@@ -91,7 +131,7 @@ func (c *helperClient) handleTunnelFrame(id uint64, frame helperproto.TunnelFram
 	})
 }
 
-func (c *helperClient) handleTunnelClose(id uint64, closeMsg helperproto.TunnelClose) {
+func (c *Client) HandleTunnelClose(id uint64, closeMsg helperproto.TunnelClose) {
 	tunnel := c.tunnel(id)
 	if tunnel == nil {
 		return
@@ -102,7 +142,7 @@ func (c *helperClient) handleTunnelClose(id uint64, closeMsg helperproto.TunnelC
 	})
 }
 
-func (c *helperClient) shutdownTunnels() {
+func (c *Client) ShutdownTunnels() {
 	c.tunnelMu.Lock()
 	tunnels := make([]*hostTunnel, 0, len(c.tunnels)+len(c.pendingTunnels))
 	for _, tunnel := range c.tunnels {

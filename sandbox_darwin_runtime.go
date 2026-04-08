@@ -20,7 +20,7 @@ import (
 )
 
 type darwinSandboxRuntime struct {
-	client *helperClient
+	client helperControl
 	cmd    *exec.Cmd
 	done   chan error
 

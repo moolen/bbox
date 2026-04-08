@@ -13,9 +13,80 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moolen/bbox/internal/helperclient"
 	"github.com/moolen/bbox/internal/helperproto"
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+func TestHelperClientStartAndRunViaInternalPackage(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	client := helperclient.New(nil, "sandbox-a", clientSide)
+	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = serverSide.Close() })
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(serverSide)
+		enc := gob.NewEncoder(serverSide)
+
+		var hello helperproto.Envelope
+		if err := dec.Decode(&hello); err != nil {
+			serverErrCh <- err
+			return
+		}
+		if hello.Hello == nil {
+			serverErrCh <- errors.New("expected hello envelope")
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: hello.ID,
+			Ready: &helperproto.Ready{
+				ProtocolVersion: helperproto.ProtocolVersion,
+				ProxyAddr:       "127.0.0.1:18080",
+			},
+		}); err != nil {
+			serverErrCh <- err
+			return
+		}
+
+		var req helperproto.Envelope
+		if err := dec.Decode(&req); err != nil {
+			serverErrCh <- err
+			return
+		}
+		if req.ExecRequest == nil {
+			serverErrCh <- errors.New("expected exec request")
+			return
+		}
+
+		serverErrCh <- enc.Encode(&helperproto.Envelope{
+			ID: req.ID,
+			ExecResult: &helperproto.ExecResult{
+				ExitCode: 0,
+			},
+		})
+	}()
+
+	proxyAddr, err := client.Start(context.Background())
+	if err != nil {
+		t.Fatalf("start internal helper client: %v", err)
+	}
+	if proxyAddr != "127.0.0.1:18080" {
+		t.Fatalf("unexpected proxy addr: got %q", proxyAddr)
+	}
+
+	result, err := client.Run(context.Background(), []string{"/bin/echo", "hello"}, helperclient.RunOptions{})
+	if err != nil {
+		t.Fatalf("run internal helper client: %v", err)
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("unexpected run result: %#v", result)
+	}
+
+	if err := <-serverErrCh; err != nil {
+		t.Fatalf("server side failed: %v", err)
+	}
+}
 
 func TestHelperClientRunSendFailureDoesNotWedgeFutureRuns(t *testing.T) {
 	client := newHelperClient(nil, "sandbox-a", failingConn{writeErr: errors.New("write failed")})
@@ -407,7 +478,7 @@ func packDNSQueryForHelperClientTest(t *testing.T, host string) []byte {
 
 func TestHelperClientTunnelActivationIsIdempotent(t *testing.T) {
 	client := newHelperClient(nil, "sandbox-a", failingConn{writeErr: io.EOF})
-	tunnel := &hostTunnel{}
+	tunnel := newHostTunnel(client, 7, nopConn{})
 	client.registerPendingTunnel(7, tunnel)
 	if !client.activateTunnel(7) {
 		t.Fatal("first activation should succeed")
@@ -421,6 +492,8 @@ type failingConn struct {
 	writeErr error
 }
 
+type nopConn struct{}
+
 func (c failingConn) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
@@ -432,6 +505,15 @@ func (c failingConn) Write([]byte) (int, error) {
 func (c failingConn) Close() error {
 	return nil
 }
+
+func (nopConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (nopConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (nopConn) Close() error                     { return nil }
+func (nopConn) LocalAddr() net.Addr              { return nil }
+func (nopConn) RemoteAddr() net.Addr             { return nil }
+func (nopConn) SetDeadline(time.Time) error      { return nil }
+func (nopConn) SetReadDeadline(time.Time) error  { return nil }
+func (nopConn) SetWriteDeadline(time.Time) error { return nil }
 
 func mustCompilePolicy(t *testing.T, policy NetworkPolicy) *compiledPolicy {
 	t.Helper()

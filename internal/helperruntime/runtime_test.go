@@ -81,10 +81,64 @@ func TestReadLoopRespondsToHelloWithReady(t *testing.T) {
 	closeReadLoop(t, peer, errCh)
 }
 
+func TestRunDispatchesWithoutOwningExecAndDNSState(t *testing.T) {
+	t.Parallel()
+
+	prevProxyRunner := runProxyModeFn
+	prevTransparentRunner := runTransparentModeFn
+	t.Cleanup(func() {
+		runProxyModeFn = prevProxyRunner
+		runTransparentModeFn = prevTransparentRunner
+	})
+
+	bridgeSide, peerSide := net.Pipe()
+	defer bridgeSide.Close()
+	defer peerSide.Close()
+
+	proxyCalls := 0
+	transparentCalls := 0
+	runProxyModeFn = func(_ context.Context, cfg Config) error {
+		proxyCalls++
+		if cfg.Bridge != bridgeSide {
+			t.Fatalf("proxy bridge mismatch: got %T", cfg.Bridge)
+		}
+		if cfg.Logger == nil {
+			t.Fatal("proxy config logger was not defaulted")
+		}
+		return nil
+	}
+	runTransparentModeFn = func(_ context.Context, cfg Config) error {
+		transparentCalls++
+		if cfg.Bridge != bridgeSide {
+			t.Fatalf("transparent bridge mismatch: got %T", cfg.Bridge)
+		}
+		if cfg.Logger == nil {
+			t.Fatal("transparent config logger was not defaulted")
+		}
+		return nil
+	}
+
+	if err := Run(context.Background(), Config{Bridge: bridgeSide}); err != nil {
+		t.Fatalf("Run() proxy dispatch error = %v", err)
+	}
+	if proxyCalls != 1 || transparentCalls != 0 {
+		t.Fatalf("proxy dispatch calls = (%d,%d), want (1,0)", proxyCalls, transparentCalls)
+	}
+
+	if err := Run(context.Background(), Config{
+		Bridge:      bridgeSide,
+		TrafficMode: TrafficModeTransparent,
+	}); err != nil {
+		t.Fatalf("Run() transparent dispatch error = %v", err)
+	}
+	if proxyCalls != 1 || transparentCalls != 1 {
+		t.Fatalf("transparent dispatch calls = (%d,%d), want (1,1)", proxyCalls, transparentCalls)
+	}
+}
+
 func TestRecordRawTCPOriginUsesRememberedDNSHostname(t *testing.T) {
 	b := &bridge{
-		rawTCPOrigins: make(map[string]rawTCPDestination),
-		dnsHostByIP:   make(map[string]dnsResolutionEntry),
+		transparent: newTransparentNet(),
 	}
 
 	query, err := (&dnsmessage.Message{
@@ -184,10 +238,12 @@ func TestHandleExecInputCancelTargetsCurrentRequestID(t *testing.T) {
 
 	cancelled := false
 	bridge := &bridge{
-		currentExec: &execState{
-			id: 41,
-			cancel: func() {
-				cancelled = true
+		exec: &execManager{
+			currentExec: &execState{
+				id: 41,
+				cancel: func() {
+					cancelled = true
+				},
 			},
 		},
 	}

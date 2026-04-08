@@ -18,7 +18,7 @@ import (
 )
 
 type linuxSandboxRuntime struct {
-	client *helperClient
+	client helperControl
 	cmd    *exec.Cmd
 	done   chan error
 

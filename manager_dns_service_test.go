@@ -295,8 +295,6 @@ func TestHelperClientRunRoundTripPreservesStreamOrdering(t *testing.T) {
 	if err := <-serverErrCh; err != nil {
 		t.Fatalf("server side failed: %v", err)
 	}
-
-	t.Fatalf("characterization: helper client run round-trip and stream routing are not yet isolated behind an independent seam")
 }
 
 func stubDNSRoundTripConn(query []byte, response []byte) net.Conn {

@@ -1,6 +1,8 @@
 package dockerbuild
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -409,7 +411,60 @@ func TestPlanForArgsDoesNotStartBuildkitd(t *testing.T) {
 		t.Fatalf("expected context path in plan args, got %v", plan.BuildctlArgs)
 	}
 
-	t.Fatalf("characterization: planner and buildkitd execution are not yet split behind independent seams")
+	if len(plan.CleanupPaths) != 0 {
+		cleanupPaths(plan.CleanupPaths)
+	}
+}
+
+func TestRunCLIUsesExecutorBuiltFromPlan(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	var gotPlan Plan
+	var gotEnv []string
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	oldGetwd := runCLIGetwd
+	oldBuild := runCLIExecutorForPlan
+	defer func() {
+		runCLIGetwd = oldGetwd
+		runCLIExecutorForPlan = oldBuild
+	}()
+
+	runCLIGetwd = func() (string, error) { return cwd, nil }
+	runCLIExecutorForPlan = func(plan Plan, env []string, stdoutWriter io.Writer, stderrWriter io.Writer) cliExecutor {
+		gotPlan = plan
+		gotEnv = append([]string(nil), env...)
+		if stdoutWriter != &stdout {
+			t.Fatalf("executor stdout writer = %T, want test buffer", stdoutWriter)
+		}
+		if stderrWriter != &stderr {
+			t.Fatalf("executor stderr writer = %T, want test buffer", stderrWriter)
+		}
+		return cliExecutorFunc(func() error {
+			_, _ = stdoutWriter.Write([]byte("executor ran\n"))
+			return nil
+		})
+	}
+
+	if err := RunCLI([]string{"build", "."}, []string{"PATH=/usr/bin"}, &stdout, &stderr); err != nil {
+		t.Fatalf("RunCLI failed: %v", err)
+	}
+	if gotPlan.OutputPath == "" {
+		t.Fatalf("expected plan to be built before executor dispatch, got %#v", gotPlan)
+	}
+	if !containsArgSequence(gotPlan.BuildctlArgs, []string{"--local", "context=" + cwd}) {
+		t.Fatalf("expected context path in executor plan, got %v", gotPlan.BuildctlArgs)
+	}
+	if !containsEnvEntry(gotEnv, "PATH=/usr/bin") {
+		t.Fatalf("expected executor env to include PATH, got %v", gotEnv)
+	}
+	if got := stdout.String(); !strings.Contains(got, "executor ran") {
+		t.Fatalf("expected executor output to be forwarded, got %q", got)
+	}
 }
 
 func TestWithBuilderRuntimeEnvAddsCgoResolverWhenUnset(t *testing.T) {

@@ -37,6 +37,9 @@ func main() {
 	}
 }
 
+// dispatch owns top-level entrypoint routing only. User-facing CLI parsing
+// stays in the root command, while helper, launcher, and docker-build shims
+// remain injected internal entrypoints.
 func dispatch(args []string, deps commandDeps, runHelper func([]string) error, runLauncher func([]string) error, runDockerBuild func([]string, []string, io.Writer, io.Writer) error) error {
 	if runHelper != nil && len(args) > 0 && args[0] == "internal-helper" {
 		return runHelper(args[1:])
