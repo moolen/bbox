@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"os"
 
@@ -63,50 +62,7 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().ArgsLenAtDash() < 0 || len(args) == 0 {
-				return fmt.Errorf("payload command required after --")
-			}
-
-			cwd, err := deps.getwd()
-			if err != nil {
-				return fmt.Errorf("resolve current working directory: %w", err)
-			}
-
-			opts.flagOverrides = cliFlagOverrides{}
-			if cmd.Flags().Changed("traffic-mode") {
-				opts.flagOverrides.TrafficMode = &opts.trafficMode
-			}
-			if cmd.Flags().Changed("max-request-body-bytes") {
-				opts.maxBodySizeSet = true
-			}
-			if cmd.Flags().Changed("clear-env") {
-				opts.clearEnvSet = true
-			}
-			if cmd.Flags().Changed("report-policy-violations") {
-				opts.flagOverrides.ReportPolicy = &opts.reportPolicy
-			}
-			if cmd.Flags().Changed("report-access-summary") {
-				opts.flagOverrides.ReportAccessSummary = &opts.reportAccess
-			}
-			if cmd.Flags().Changed("report-request-summary") {
-				opts.flagOverrides.ReportRequestSummary = &opts.reportRequests
-			}
-			if cmd.Flags().Changed("access-log") {
-				opts.flagOverrides.AccessLog = &opts.accessLog
-			}
-
-			cfg, err := buildConfig(opts, args, cwd, deps.environ())
-			if err != nil {
-				return err
-			}
-			cfg.stdout = deps.stdout
-			cfg.stderr = deps.stderr
-			if cfg.printPolicy {
-				if err := printPolicy(deps.stdout, cfg); err != nil {
-					return err
-				}
-			}
-			return deps.run(cfg)
+			return executeRootCommand(cmd, args, deps, opts)
 		},
 	}
 

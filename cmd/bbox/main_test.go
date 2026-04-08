@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/moolen/bbox"
+	"github.com/spf13/cobra"
 )
 
 func TestParseMountSpec(t *testing.T) {
@@ -169,6 +170,16 @@ func TestRootCommandRejectsMissingPayload(t *testing.T) {
 	cmd.SetArgs(nil)
 
 	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected missing payload to fail")
+	}
+	if !strings.Contains(err.Error(), "payload command required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestExecuteRootCommandRejectsMissingPayload(t *testing.T) {
+	err := executeRootCommand(new(cobra.Command), nil, commandDeps{}, cliOptions{})
 	if err == nil {
 		t.Fatal("expected missing payload to fail")
 	}
