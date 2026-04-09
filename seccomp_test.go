@@ -38,6 +38,9 @@ func TestSeccompProfileRulesIncludeExpectedBuiltins(t *testing.T) {
 	if !containsSeccompConditionalRule(baseline, "clone") {
 		t.Fatal("expected baseline profile to guard namespace clone flags")
 	}
+	if !containsSeccompRule(baseline, "clone3") {
+		t.Fatal("expected baseline profile to deny clone3")
+	}
 	if containsSeccompRule(baseline, "seccomp") {
 		t.Fatal("expected baseline profile to keep runtime seccomp available")
 	}
@@ -99,13 +102,14 @@ func TestDefaultSeccompHelpers(t *testing.T) {
 	}
 }
 
-func TestEffectiveSeccompOptionsDisablesDefaultProfileForDockerBuild(t *testing.T) {
+func TestEffectiveSeccompOptionsPreservesDefaultProfileForDockerBuild(t *testing.T) {
 	got := effectiveSeccompOptions(SandboxOptions{
 		DockerBuild: DockerBuildOptions{Enabled: true},
 	})
 
-	if !got.Disabled {
-		t.Fatalf("expected docker-build sandbox to disable default seccomp, got %#v", got)
+	want := SeccompOptions{}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("effectiveSeccompOptions() = %#v, want %#v", got, want)
 	}
 }
 

@@ -127,6 +127,36 @@ func TestServeTransparentTCPConnAddsHTTPSProtocolMetadataOnAuthorize(t *testing.
 	<-done
 }
 
+func TestServeTransparentTCPConnFailsClosedWithoutOriginalDestination(t *testing.T) {
+	rt := &stubTransparentBridge{
+		authorizeCh: make(chan struct{}, 1),
+		proxyCh:     make(chan struct{}, 1),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ServeTransparentTCPConn(serverConn, rt, "", 0)
+	}()
+
+	if _, err := io.WriteString(clientConn, "GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("write HTTP request: %v", err)
+	}
+
+	select {
+	case <-rt.authorizeCh:
+		t.Fatal("did not expect transparent authorization without original destination")
+	case <-rt.proxyCh:
+		t.Fatal("did not expect transparent proxy round trip without original destination")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	_ = clientConn.Close()
+	<-done
+}
+
 func TestDetectTransparentTCPProtocolReturnsUnknownForOpaquePayload(t *testing.T) {
 	reader := bufio.NewReaderSize(io.MultiReader(strings.NewReader("\x01\x02\x03opaque")), 32)
 	got := detectTransparentTCPProtocol(reader)

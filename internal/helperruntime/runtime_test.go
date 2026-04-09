@@ -285,7 +285,7 @@ func TestReadBoundedBodyFlagsOversize(t *testing.T) {
 	}
 }
 
-func TestTransparentHTTPRejectsMissingHost(t *testing.T) {
+func TestTransparentHTTPFailsClosedWithoutOriginalDestination(t *testing.T) {
 	ready, shutdown := startTransparentRuntimeReady(t)
 	defer shutdown()
 
@@ -299,22 +299,8 @@ func TestTransparentHTTPRejectsMissingHost(t *testing.T) {
 		t.Fatalf("write transparent HTTP request: %v", err)
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
-	if err != nil {
-		t.Fatalf("read transparent HTTP response: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("unexpected status: got %d want %d", resp.StatusCode, http.StatusBadRequest)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response body: %v", err)
-	}
-	if !strings.Contains(string(body), "host is required") {
-		t.Fatalf("unexpected response body: %q", string(body))
+	if _, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet}); err == nil {
+		t.Fatal("expected transparent listener without original destination to reset the connection")
 	}
 }
 
@@ -333,46 +319,34 @@ func TestRewriteTransparentHTTPRequestBuildsAbsoluteURL(t *testing.T) {
 }
 
 func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
-	bridgeSide, peerSide := net.Pipe()
-	defer peerSide.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- Run(ctx, Config{
-			Bridge:      bridgeSide,
-			TrafficMode: TrafficModeTransparent,
-			Logger:      log.New(io.Discard, "", 0),
-		})
-	}()
-
-	enc := gob.NewEncoder(peerSide)
-	dec := gob.NewDecoder(peerSide)
-	if err := enc.Encode(&helperproto.Envelope{
-		ID: 1,
-		Hello: &helperproto.Hello{
-			ProtocolVersion: helperproto.ProtocolVersion,
-			SandboxID:       "transparent-http-test",
-		},
-	}); err != nil {
-		t.Fatalf("send hello: %v", err)
-	}
-
-	var ready helperproto.Envelope
-	if err := dec.Decode(&ready); err != nil {
-		t.Fatalf("read ready: %v", err)
-	}
-	if ready.Ready == nil {
-		t.Fatalf("expected ready response, got %#v", ready)
-	}
-	if ready.Ready.TCPAddr == "" {
-		t.Fatal("expected transparent runtime to report a TCP ingress address")
-	}
+	bridge, tcpAddr, enc, dec, shutdown := startTransparentIngressBridgeHarness(t, false)
+	defer shutdown()
 
 	peerErrCh := make(chan error, 1)
 	go func() {
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if connectReq.ConnectRequest == nil || !connectReq.ConnectRequest.Transparent {
+			peerErrCh <- fmt.Errorf("expected transparent connect request, got %#v", connectReq)
+			return
+		}
+		if connectReq.ConnectRequest.Host != "example.com" || connectReq.ConnectRequest.Port != 80 {
+			peerErrCh <- fmt.Errorf("unexpected transparent connect payload: %#v", connectReq.ConnectRequest)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
 		var req helperproto.Envelope
 		if err := dec.Decode(&req); err != nil {
 			peerErrCh <- err
@@ -411,11 +385,12 @@ func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
 		peerErrCh <- nil
 	}()
 
-	conn, err := net.Dial("tcp", ready.Ready.TCPAddr)
+	conn, err := net.Dial("tcp", tcpAddr)
 	if err != nil {
 		t.Fatalf("dial transparent HTTP listener: %v", err)
 	}
 	defer conn.Close()
+	bridge.recordRawTCPOrigin(conn.LocalAddr().String(), "example.com", 80)
 
 	request := strings.Join([]string{
 		"GET /normalized/path?hello=world HTTP/1.1",
@@ -445,17 +420,6 @@ func TestTransparentHTTPNormalizesOriginFormRequest(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for proxy request")
-	}
-
-	cancel()
-	_ = peerSide.Close()
-	select {
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
-			t.Fatalf("unexpected transparent runtime shutdown error: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for transparent runtime to exit")
 	}
 }
 
@@ -498,13 +462,36 @@ func TestTransparentHTTPSRejectsMissingSNI(t *testing.T) {
 }
 
 func TestTransparentHTTPSRequestsLeafCertForSNIHost(t *testing.T) {
-	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	bridge, tcpAddr, enc, dec, shutdown := startTransparentIngressBridgeHarness(t, true)
 	defer shutdown()
 
 	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
 
 	peerErrCh := make(chan error, 1)
 	go func() {
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if connectReq.ConnectRequest == nil || !connectReq.ConnectRequest.Transparent {
+			peerErrCh <- fmt.Errorf("expected transparent connect request, got %#v", connectReq)
+			return
+		}
+		if connectReq.ConnectRequest.Host != "example.com" || connectReq.ConnectRequest.Port != 443 {
+			peerErrCh <- fmt.Errorf("unexpected transparent connect payload: %#v", connectReq.ConnectRequest)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
 		var certReq helperproto.Envelope
 		if err := dec.Decode(&certReq); err != nil {
 			peerErrCh <- err
@@ -528,12 +515,18 @@ func TestTransparentHTTPSRequestsLeafCertForSNIHost(t *testing.T) {
 		peerErrCh <- nil
 	}()
 
-	conn, err := tls.Dial("tcp", ready.TCPAddr, &tls.Config{
+	rawConn, err := net.Dial("tcp", tcpAddr)
+	if err != nil {
+		t.Fatalf("dial transparent HTTPS listener: %v", err)
+	}
+	defer rawConn.Close()
+	bridge.recordRawTCPOrigin(rawConn.LocalAddr().String(), "example.com", 443)
+	conn := tls.Client(rawConn, &tls.Config{
 		RootCAs:    roots,
 		ServerName: "example.com",
 		NextProtos: []string{"http/1.1"},
 	})
-	if err != nil {
+	if err := conn.HandshakeContext(context.Background()); err != nil {
 		t.Fatalf("dial transparent HTTPS listener with SNI: %v", err)
 	}
 	_ = conn.Close()
@@ -700,13 +693,36 @@ func TestTransparentHTTPSAuthorizesOriginalDestinationBeforeMITM(t *testing.T) {
 }
 
 func TestTransparentHTTPSForwardsDecryptedRequestsThroughMITMPath(t *testing.T) {
-	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	bridge, tcpAddr, enc, dec, shutdown := startTransparentIngressBridgeHarness(t, true)
 	defer shutdown()
 
 	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
 
 	peerErrCh := make(chan error, 1)
 	go func() {
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if connectReq.ConnectRequest == nil || !connectReq.ConnectRequest.Transparent {
+			peerErrCh <- fmt.Errorf("expected transparent connect request, got %#v", connectReq)
+			return
+		}
+		if connectReq.ConnectRequest.Host != "example.com" || connectReq.ConnectRequest.Port != 443 {
+			peerErrCh <- fmt.Errorf("unexpected transparent connect payload: %#v", connectReq.ConnectRequest)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
 		var certReq helperproto.Envelope
 		if err := dec.Decode(&certReq); err != nil {
 			peerErrCh <- err
@@ -767,12 +783,18 @@ func TestTransparentHTTPSForwardsDecryptedRequestsThroughMITMPath(t *testing.T) 
 		peerErrCh <- nil
 	}()
 
-	conn, err := tls.Dial("tcp", ready.TCPAddr, &tls.Config{
+	rawConn, err := net.Dial("tcp", tcpAddr)
+	if err != nil {
+		t.Fatalf("dial transparent HTTPS listener: %v", err)
+	}
+	bridge.recordRawTCPOrigin(rawConn.LocalAddr().String(), "example.com", 443)
+	conn := tls.Client(rawConn, &tls.Config{
 		RootCAs:    roots,
 		ServerName: "example.com",
 		NextProtos: []string{"http/1.1"},
 	})
-	if err != nil {
+	if err := conn.HandshakeContext(context.Background()); err != nil {
+		_ = rawConn.Close()
 		t.Fatalf("dial transparent HTTPS listener: %v", err)
 	}
 	defer conn.Close()
@@ -875,13 +897,36 @@ func TestProxyModeRejectsOversizedRequestBody(t *testing.T) {
 }
 
 func TestTransparentHTTPSSupportsHTTP2MITM(t *testing.T) {
-	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	bridge, tcpAddr, enc, dec, shutdown := startTransparentIngressBridgeHarness(t, true)
 	defer shutdown()
 
 	roots, certPEM, keyPEM := issueTestLeafCertPEM(t, "example.com")
 
 	peerErrCh := make(chan error, 1)
 	go func() {
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			peerErrCh <- err
+			return
+		}
+		if connectReq.ConnectRequest == nil || !connectReq.ConnectRequest.Transparent {
+			peerErrCh <- fmt.Errorf("expected transparent connect request, got %#v", connectReq)
+			return
+		}
+		if connectReq.ConnectRequest.Host != "example.com" || connectReq.ConnectRequest.Port != 443 {
+			peerErrCh <- fmt.Errorf("unexpected transparent connect payload: %#v", connectReq.ConnectRequest)
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			peerErrCh <- err
+			return
+		}
+
 		var certReq helperproto.Envelope
 		if err := dec.Decode(&certReq); err != nil {
 			peerErrCh <- err
@@ -932,10 +977,11 @@ func TestTransparentHTTPSSupportsHTTP2MITM(t *testing.T) {
 	transport := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 			var d net.Dialer
-			rawConn, err := d.DialContext(ctx, network, ready.TCPAddr)
+			rawConn, err := d.DialContext(ctx, network, tcpAddr)
 			if err != nil {
 				return nil, err
 			}
+			bridge.recordRawTCPOrigin(rawConn.LocalAddr().String(), "example.com", 443)
 
 			tlsCfg := cfg.Clone()
 			tlsCfg.RootCAs = roots
@@ -983,7 +1029,7 @@ func TestTransparentHTTPSSupportsHTTP2MITM(t *testing.T) {
 }
 
 func TestTransparentHTTPSupportsH2CPriorKnowledgeMultipleStreams(t *testing.T) {
-	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	bridge, tcpAddr, enc, dec, shutdown := startTransparentIngressBridgeHarness(t, false)
 	defer shutdown()
 
 	type result struct {
@@ -993,6 +1039,29 @@ func TestTransparentHTTPSupportsH2CPriorKnowledgeMultipleStreams(t *testing.T) {
 	reqDone := make(chan result, 2)
 
 	go func() {
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			reqDone <- result{err: err}
+			return
+		}
+		if connectReq.ConnectRequest == nil || !connectReq.ConnectRequest.Transparent {
+			reqDone <- result{err: fmt.Errorf("expected transparent connect request, got %#v", connectReq)}
+			return
+		}
+		if connectReq.ConnectRequest.Host != "example.com" || connectReq.ConnectRequest.Port != 80 {
+			reqDone <- result{err: fmt.Errorf("unexpected transparent connect payload: %#v", connectReq.ConnectRequest)}
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			reqDone <- result{err: err}
+			return
+		}
+
 		for i := 0; i < 2; i++ {
 			var proxyReq helperproto.Envelope
 			if err := dec.Decode(&proxyReq); err != nil {
@@ -1021,7 +1090,12 @@ func TestTransparentHTTPSupportsH2CPriorKnowledgeMultipleStreams(t *testing.T) {
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, network, ready.TCPAddr)
+			rawConn, err := d.DialContext(ctx, network, tcpAddr)
+			if err != nil {
+				return nil, err
+			}
+			bridge.recordRawTCPOrigin(rawConn.LocalAddr().String(), "example.com", 80)
+			return rawConn, nil
 		},
 	}
 	client := &http.Client{Transport: transport}
@@ -1086,7 +1160,7 @@ func TestTransparentHTTPSupportsH2CPriorKnowledgeMultipleStreams(t *testing.T) {
 }
 
 func TestTransparentHTTPSupportsHTTP2MultipleStreams(t *testing.T) {
-	ready, _, enc, dec, shutdown := startTransparentRuntimeBridge(t)
+	bridge, tcpAddr, enc, dec, shutdown := startTransparentIngressBridgeHarness(t, true)
 	defer shutdown()
 
 	const streamCount = 8
@@ -1099,6 +1173,29 @@ func TestTransparentHTTPSupportsHTTP2MultipleStreams(t *testing.T) {
 	reqDone := make(chan result, streamCount+1)
 
 	go func() {
+		var connectReq helperproto.Envelope
+		if err := dec.Decode(&connectReq); err != nil {
+			reqDone <- result{err: err}
+			return
+		}
+		if connectReq.ConnectRequest == nil || !connectReq.ConnectRequest.Transparent {
+			reqDone <- result{err: fmt.Errorf("expected transparent connect request, got %#v", connectReq)}
+			return
+		}
+		if connectReq.ConnectRequest.Host != "example.com" || connectReq.ConnectRequest.Port != 443 {
+			reqDone <- result{err: fmt.Errorf("unexpected transparent connect payload: %#v", connectReq.ConnectRequest)}
+			return
+		}
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: connectReq.ID,
+			ConnectResponse: &helperproto.ConnectResponse{
+				StatusCode: http.StatusOK,
+			},
+		}); err != nil {
+			reqDone <- result{err: err}
+			return
+		}
+
 		var certReq helperproto.Envelope
 		if err := dec.Decode(&certReq); err != nil {
 			reqDone <- result{err: err}
@@ -1150,10 +1247,11 @@ func TestTransparentHTTPSupportsHTTP2MultipleStreams(t *testing.T) {
 	transport := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 			var d net.Dialer
-			rawConn, err := d.DialContext(ctx, network, ready.TCPAddr)
+			rawConn, err := d.DialContext(ctx, network, tcpAddr)
 			if err != nil {
 				return nil, err
 			}
+			bridge.recordRawTCPOrigin(rawConn.LocalAddr().String(), "example.com", 443)
 
 			tlsCfg := cfg.Clone()
 			tlsCfg.RootCAs = roots
@@ -2732,6 +2830,65 @@ func startTransparentRuntimeReady(t *testing.T) (*helperproto.Ready, func()) {
 	}
 
 	return ready.Ready, shutdown
+}
+
+func startTransparentIngressBridgeHarness(t *testing.T, mitmEnabled bool) (*bridge, string, *gob.Encoder, *gob.Decoder, func()) {
+	t.Helper()
+
+	bridgeSide, peerSide := net.Pipe()
+	bridge := newBridge(bridgeSide, log.New(io.Discard, "", 0), "")
+	bridge.mitmEnabled = mitmEnabled
+
+	ctx, cancel := context.WithCancel(context.Background())
+	readLoopErrCh := make(chan error, 1)
+	go func() {
+		readLoopErrCh <- bridge.readLoop(ctx)
+	}()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for transparent ingress: %v", err)
+	}
+
+	serveErrCh := make(chan error, 1)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
+					serveErrCh <- nil
+					return
+				}
+				serveErrCh <- err
+				return
+			}
+			go bridge.handleTransparentTCPConn(conn)
+		}
+	}()
+
+	shutdown := func() {
+		cancel()
+		_ = listener.Close()
+		_ = peerSide.Close()
+		select {
+		case err := <-serveErrCh:
+			if err != nil {
+				t.Fatalf("unexpected transparent ingress serve error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for transparent ingress accept loop to exit")
+		}
+		select {
+		case err := <-readLoopErrCh:
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
+				t.Fatalf("unexpected transparent bridge shutdown error: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for transparent bridge readLoop to exit")
+		}
+	}
+
+	return bridge, listener.Addr().String(), gob.NewEncoder(peerSide), gob.NewDecoder(peerSide), shutdown
 }
 
 func startTransparentRuntimeBridge(t *testing.T) (*helperproto.Ready, net.Conn, *gob.Encoder, *gob.Decoder, func()) {

@@ -43,9 +43,10 @@ func buildRunConfig(effective effectiveCLIConfig, payload []string, cwd string, 
 	mounts := make([]bbox.Mount, 0, 1+len(explicitMounts))
 	if cliPlatform != "darwin" && !hasMount(absCWD, absCWD, explicitMounts) {
 		mounts = append(mounts, bbox.Mount{
-			Type:   bbox.MountTypeBind,
-			Source: absCWD,
-			Target: absCWD,
+			Type:     bbox.MountTypeBind,
+			Source:   absCWD,
+			Target:   absCWD,
+			ReadOnly: true,
 		})
 	}
 	mounts = append(mounts, explicitMounts...)

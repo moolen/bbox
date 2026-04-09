@@ -57,7 +57,7 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectoryAsBindMount(t *testing.
 	if cfg.sandbox.Mounts[0].Type != bbox.MountTypeBind ||
 		cfg.sandbox.Mounts[0].Source != cwd ||
 		cfg.sandbox.Mounts[0].Target != cwd ||
-		cfg.sandbox.Mounts[0].ReadOnly {
+		!cfg.sandbox.Mounts[0].ReadOnly {
 		t.Fatalf("unexpected default mount: %#v", cfg.sandbox.Mounts[0])
 	}
 	if len(cfg.argv) == 0 || cfg.argv[0] != "bash" {
@@ -68,6 +68,23 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectoryAsBindMount(t *testing.
 	}
 	if !containsString(cfg.sandbox.Env, "FOO=bar") {
 		t.Fatalf("expected inherited env in sandbox env, got %v", cfg.sandbox.Env)
+	}
+}
+
+func TestBuildConfigDoesNotAddDefaultReadOnlyCWDMountWhenCWDIsExplicitlyMounted(t *testing.T) {
+	cwd := t.TempDir()
+	cfg, err := buildConfig(cliOptions{
+		mounts: []string{"type=bind,source=" + cwd + ",target=" + cwd},
+	}, []string{"bash", "-lc", "pwd"}, cwd, []string{"HOME=/tmp/home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.sandbox.Mounts) != 1 {
+		t.Fatalf("expected explicit CWD mount to replace default mount, got %v", cfg.sandbox.Mounts)
+	}
+	if cfg.sandbox.Mounts[0].ReadOnly {
+		t.Fatalf("expected explicit CWD mount to preserve caller write semantics, got %#v", cfg.sandbox.Mounts[0])
 	}
 }
 

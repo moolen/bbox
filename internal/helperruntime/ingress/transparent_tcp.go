@@ -58,7 +58,8 @@ func ServeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, conne
 func authorizeTransparentTCPConn(conn net.Conn, rt Bridge, connectHost string, connectPort int, defaultPort int, metadata helperproto.ProtocolMetadata) bool {
 	connectHost = strings.TrimSpace(connectHost)
 	if connectHost == "" {
-		return true
+		closeWithRST(conn)
+		return false
 	}
 	if connectPort <= 0 {
 		connectPort = defaultPort

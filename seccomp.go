@@ -106,13 +106,7 @@ type preparedSeccompProgram struct {
 }
 
 func effectiveSeccompOptions(opts SandboxOptions) SeccompOptions {
-	if !opts.DockerBuild.Enabled {
-		return opts.Seccomp
-	}
-	if opts.Seccomp.Disabled || opts.Seccomp.Profile != "" || len(opts.Seccomp.Rules) > 0 {
-		return opts.Seccomp
-	}
-	return SeccompOptions{Disabled: true}
+	return opts.Seccomp
 }
 
 func (p *preparedSeccompProgram) Close() error {
@@ -474,6 +468,7 @@ var baselineSeccompRuleSpecs = func() []seccompRuleSpec {
 		denyOptionalSyscall("process_vm_writev"),
 		denyOptionalSyscall("kcmp"),
 		denyOptionalSyscall("pidfd_getfd"),
+		denyOptionalSyscall("clone3"),
 	}
 
 	namespaceCloneFlags := []uint64{
