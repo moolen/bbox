@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/moolen/bbox"
@@ -105,6 +106,7 @@ func buildRunConfig(effective effectiveCLIConfig, payload []string, cwd string, 
 			TrafficMode:  trafficMode,
 			Policy:       buildNetworkPolicy(effective.Policy),
 			WorkDir:      effective.WorkDir,
+			Seccomp:      defaultCLISeccompOptions(effective.DockerBuild.Enabled),
 			DockerSocket: buildDockerSocketOptions(effective.DockerSocket),
 			DockerBuild:  dockerBuild,
 		},
@@ -112,6 +114,13 @@ func buildRunConfig(effective effectiveCLIConfig, payload []string, cwd string, 
 		reporting:     effective.Reporting,
 		accessLogMode: accessLogMode,
 	}, nil
+}
+
+func defaultCLISeccompOptions(dockerBuildEnabled bool) bbox.SeccompOptions {
+	if dockerBuildEnabled {
+		return bbox.SeccompOptions{Disabled: true}
+	}
+	return bbox.SeccompOptions{Profile: bbox.SeccompProfileRestricted}
 }
 
 func normalizeCLIPolicyMode(mode string) (bbox.PolicyMode, error) {
@@ -139,9 +148,13 @@ func normalizeAccessLogMode(mode string) (string, error) {
 }
 
 func buildSandboxEnv(effective effectiveCLIConfig, environ []string) ([]string, error) {
-	var envEntries []string
-	if !effective.ClearEnv {
-		envEntries = append(envEntries, environ...)
+	envEntries := make([]string, 0, len(effective.CopyEnv)+len(effective.Env))
+	for _, key := range effective.CopyEnv {
+		entry, err := copyHostEnv(key, environ)
+		if err != nil {
+			return nil, err
+		}
+		envEntries = append(envEntries, entry)
 	}
 	for _, entry := range effective.Env {
 		if _, _, ok := strings.Cut(entry, "="); !ok {
@@ -150,6 +163,20 @@ func buildSandboxEnv(effective effectiveCLIConfig, environ []string) ([]string, 
 		envEntries = append(envEntries, entry)
 	}
 	return envEntries, nil
+}
+
+func copyHostEnv(key string, environ []string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("copy env key is required")
+	}
+	for i := len(environ) - 1; i >= 0; i-- {
+		entryKey, _, ok := strings.Cut(environ[i], "=")
+		if ok && entryKey == key {
+			return environ[i], nil
+		}
+	}
+	return "", fmt.Errorf("copy env %q: host environment variable is not set", key)
 }
 
 func withDockerBuildPATHEnv(envEntries []string, dockerBuildEnabled bool) []string {
@@ -306,7 +333,10 @@ func pathMountForDir(dir string) (bbox.Mount, bool, error) {
 	if eval, err := filepath.EvalSymlinks(dir); err == nil && strings.TrimSpace(eval) != "" {
 		resolved = filepath.Clean(eval)
 	}
-	target = pathMountTarget(dir, resolved)
+	target, ok := pathMountTarget(resolved)
+	if !ok {
+		return bbox.Mount{}, false, nil
+	}
 
 	info, err = os.Stat(target)
 	if err != nil {
@@ -324,17 +354,14 @@ func pathMountForDir(dir string) (bbox.Mount, bool, error) {
 	}, true, nil
 }
 
-func pathMountTarget(dir string, resolved string) string {
-	switch {
-	case resolved == "/usr" || strings.HasPrefix(resolved, "/usr/"):
-		return "/usr"
-	case filepath.Base(dir) == "bin" || filepath.Base(dir) == "sbin":
-		parent := filepath.Dir(dir)
-		if parent != string(filepath.Separator) && parent != "." {
-			return parent
-		}
+func pathMountTarget(resolved string) (string, bool) {
+	if resolved == "/usr" || strings.HasPrefix(resolved, "/usr/") {
+		return "/usr", true
 	}
-	return dir
+	if slices.Contains([]string{"/bin", "/sbin", "/usr/bin", "/usr/sbin"}, resolved) {
+		return "/usr", true
+	}
+	return "", false
 }
 
 func mountOverlapsAny(want bbox.Mount, existing []bbox.Mount) bool {

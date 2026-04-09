@@ -105,8 +105,8 @@ func TestLoadCLIFileConfigDecodesStructuredMounts(t *testing.T) {
 	if !reflect.DeepEqual(got.Env, []string{"FOO=bar"}) {
 		t.Fatalf("got env %v", got.Env)
 	}
-	if !got.ClearEnv {
-		t.Fatal("expected clear_env=true")
+	if !reflect.DeepEqual(got.CopyEnv, []string{"HOME", "SSH_AUTH_SOCK"}) {
+		t.Fatalf("got copy_env %v", got.CopyEnv)
 	}
 	if got.TrafficMode != "transparent" {
 		t.Fatalf("got traffic_mode %q", got.TrafficMode)
@@ -398,10 +398,10 @@ func TestMergeCLIConfigPrecedenceDefaultsFileFlags(t *testing.T) {
 
 func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testing.T) {
 	base := cliFileConfig{
-		ClearEnv:               true,
+		CopyEnv:                []string{"HOME"},
 		MaxRequestBodyBytes:    123,
 		Bin:                    []string{"bash"},
-		hasClearEnv:            true,
+		hasCopyEnv:             true,
 		hasMaxRequestBodyBytes: true,
 		hasBin:                 true,
 		Policy: cliPolicyConfig{
@@ -417,10 +417,10 @@ func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testin
 	}
 
 	overlay := cliFileConfig{
-		ClearEnv:               false,
+		CopyEnv:                []string{},
 		MaxRequestBodyBytes:    0,
 		Bin:                    []string{},
-		hasClearEnv:            true,
+		hasCopyEnv:             true,
 		hasMaxRequestBodyBytes: true,
 		hasBin:                 true,
 		Policy: cliPolicyConfig{
@@ -430,8 +430,8 @@ func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testin
 	}
 
 	got := mergeCLIConfigLayer(base, overlay)
-	if got.ClearEnv {
-		t.Fatal("expected clear_env override to false")
+	if len(got.CopyEnv) != 0 {
+		t.Fatalf("expected copy_env to be cleared, got %v", got.CopyEnv)
 	}
 	if got.MaxRequestBodyBytes != 0 {
 		t.Fatalf("got max_request_body_bytes %d want 0", got.MaxRequestBodyBytes)
@@ -441,6 +441,18 @@ func TestMergeCLIConfigLayerSupportsExplicitFalseZeroAndEmptyOverrides(t *testin
 	}
 	if len(got.Policy.Rules) != 0 {
 		t.Fatalf("expected policy rules to be cleared, got %v", got.Policy.Rules)
+	}
+}
+
+func TestToEffectiveCLIConfigPreservesCopyEnv(t *testing.T) {
+	cwd := t.TempDir()
+	merged := cliFileConfig{
+		CopyEnv: []string{"HOME", "SSH_AUTH_SOCK"},
+	}
+
+	got := toEffectiveCLIConfig(merged, cwd)
+	if !reflect.DeepEqual(got.CopyEnv, []string{"HOME", "SSH_AUTH_SOCK"}) {
+		t.Fatalf("got copy_env %v", got.CopyEnv)
 	}
 }
 

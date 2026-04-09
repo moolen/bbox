@@ -11,7 +11,9 @@ mounts:
     target: /cache
 env:
   - FOO=bar
-clear_env: true
+copy_env:
+  - HOME
+  - SSH_AUTH_SOCK
 traffic_mode: transparent
 policy_mode: audit
 max_request_body_bytes: 12345

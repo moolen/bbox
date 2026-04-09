@@ -81,9 +81,9 @@ func toCLIFileConfig(raw rawCLIFileConfig) cliFileConfig {
 		cfg.Env = cloneStringSlice(*raw.Env)
 		cfg.hasEnv = true
 	}
-	if raw.ClearEnv != nil {
-		cfg.ClearEnv = *raw.ClearEnv
-		cfg.hasClearEnv = true
+	if raw.CopyEnv != nil {
+		cfg.CopyEnv = cloneStringSlice(*raw.CopyEnv)
+		cfg.hasCopyEnv = true
 	}
 	if raw.TrafficMode != nil {
 		cfg.TrafficMode = *raw.TrafficMode

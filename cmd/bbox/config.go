@@ -76,7 +76,7 @@ type cliFileConfig struct {
 	Bin                       []string              `yaml:"bin"`
 	Mounts                    []cliMountConfig      `yaml:"mounts"`
 	Env                       []string              `yaml:"env"`
-	ClearEnv                  bool                  `yaml:"clear_env"`
+	CopyEnv                   []string              `yaml:"copy_env"`
 	TrafficMode               string                `yaml:"traffic_mode"`
 	PolicyMode                string                `yaml:"policy_mode"`
 	MaxRequestBodyBytes       int64                 `yaml:"max_request_body_bytes"`
@@ -92,7 +92,7 @@ type cliFileConfig struct {
 	hasBin                    bool                  `yaml:"-"`
 	hasMounts                 bool                  `yaml:"-"`
 	hasEnv                    bool                  `yaml:"-"`
-	hasClearEnv               bool                  `yaml:"-"`
+	hasCopyEnv                bool                  `yaml:"-"`
 	hasTrafficMode            bool                  `yaml:"-"`
 	hasPolicyMode             bool                  `yaml:"-"`
 	hasMaxRequestBodyBytes    bool                  `yaml:"-"`
@@ -147,7 +147,7 @@ type rawCLIFileConfig struct {
 	Bin                    *[]string                 `yaml:"bin"`
 	Mounts                 *[]cliMountConfig         `yaml:"mounts"`
 	Env                    *[]string                 `yaml:"env"`
-	ClearEnv               *bool                     `yaml:"clear_env"`
+	CopyEnv                *[]string                 `yaml:"copy_env"`
 	TrafficMode            *string                   `yaml:"traffic_mode"`
 	PolicyMode             *string                   `yaml:"policy_mode"`
 	MaxRequestBodyBytes    *int64                    `yaml:"max_request_body_bytes"`

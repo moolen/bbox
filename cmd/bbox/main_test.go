@@ -66,8 +66,8 @@ func TestBuildConfigDefaultsMountsCurrentWorkingDirectoryAsBindMount(t *testing.
 	if len(cfg.sandbox.Binaries) == 0 || cfg.sandbox.Binaries[0] != "bash" {
 		t.Fatalf("expected payload binary to be staged first, got %v", cfg.sandbox.Binaries)
 	}
-	if !containsString(cfg.sandbox.Env, "FOO=bar") {
-		t.Fatalf("expected inherited env in sandbox env, got %v", cfg.sandbox.Env)
+	if len(cfg.sandbox.Env) != 0 {
+		t.Fatalf("expected no inherited env by default, got %v", cfg.sandbox.Env)
 	}
 }
 
@@ -92,6 +92,12 @@ func TestRootCommandRegistersStructuredMountFlagOnly(t *testing.T) {
 	cmd := newRootCommand(commandDeps{stdout: io.Discard, stderr: io.Discard})
 	if got := cmd.Flags().Lookup("mount"); got == nil {
 		t.Fatal("expected --mount flag")
+	}
+	if got := cmd.Flags().Lookup("copy-env"); got == nil {
+		t.Fatal("expected --copy-env flag")
+	}
+	if got := cmd.Flags().Lookup("clear-env"); got != nil {
+		t.Fatalf("expected --clear-env to be removed, got %q", got.Name)
 	}
 	if got := cmd.Flags().Lookup("mount-ro"); got != nil {
 		t.Fatalf("expected --mount-ro to be removed, got %q", got.Name)
@@ -172,9 +178,10 @@ mounts:
     source: ./certs
     target: /etc/ssl/certs
     read_only: true
+copy_env:
+  - FROM_HOST
 env:
   - FROM_FILE=1
-clear_env: true
 traffic_mode: transparent
 `)
 
@@ -186,8 +193,6 @@ traffic_mode: transparent
 			TrafficMode: stringPtr("proxy"),
 		},
 	}
-	opts.clearEnvSet = true
-	opts.clearEnv = false
 
 	cfg, err := buildConfig(opts, []string{"bash", "-lc", "pwd"}, nested, []string{"FROM_HOST=1"})
 	if err != nil {
@@ -319,7 +324,8 @@ max_request_body_bytes: 7
 report_policy_violations: true
 report_access_summary: true
 report_request_summary: true
-clear_env: true
+copy_env:
+  - SECRET
 `)
 
 	var got runConfig
@@ -329,7 +335,7 @@ clear_env: true
 		getwd: func() (string, error) {
 			return nested, nil
 		},
-		environ: func() []string { return []string{"SECRET=value"} },
+		environ: func() []string { return []string{"SECRET=value", "HOME=/tmp/home"} },
 		run: func(cfg runConfig) error {
 			got = cfg
 			return nil
@@ -342,7 +348,7 @@ clear_env: true
 		"--report-request-summary=false",
 		"--access-log=off",
 		"--max-request-body-bytes=123",
-		"--clear-env=false",
+		"--copy-env=HOME",
 		"--",
 		"bash",
 	})
@@ -362,8 +368,11 @@ clear_env: true
 	if got.reporting.PolicyViolations || got.reporting.AccessSummary || got.reporting.RequestSummary {
 		t.Fatalf("expected changed reporting flags to override file config, got %#v", got.reporting)
 	}
-	if !containsString(got.sandbox.Env, "SECRET=value") {
-		t.Fatalf("expected changed clear-env flag to restore inherited env, got %v", got.sandbox.Env)
+	if !containsString(got.sandbox.Env, "HOME=/tmp/home") {
+		t.Fatalf("expected changed copy-env flag to copy requested env, got %v", got.sandbox.Env)
+	}
+	if containsString(got.sandbox.Env, "SECRET=value") {
+		t.Fatalf("did not expect file copy_env to survive CLI override, got %v", got.sandbox.Env)
 	}
 }
 
@@ -741,14 +750,15 @@ access_log: json
 	}
 }
 
-func TestRootCommandClearEnvFalseOverridesBBoxYAMLTrue(t *testing.T) {
+func TestRootCommandCopyEnvOverridesBBoxYAML(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeBBoxYAML(t, root, `
-clear_env: true
+copy_env:
+  - SECRET
 `)
 
 	var got runConfig
@@ -758,19 +768,22 @@ clear_env: true
 		getwd: func() (string, error) {
 			return nested, nil
 		},
-		environ: func() []string { return []string{"SECRET=value"} },
+		environ: func() []string { return []string{"SECRET=value", "HOME=/tmp/home"} },
 		run: func(cfg runConfig) error {
 			got = cfg
 			return nil
 		},
 	})
-	cmd.SetArgs([]string{"--clear-env=false", "--", "bash"})
+	cmd.SetArgs([]string{"--copy-env=HOME", "--", "bash"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !containsString(got.sandbox.Env, "SECRET=value") {
-		t.Fatalf("expected inherited env to be restored by --clear-env=false, got %v", got.sandbox.Env)
+	if !containsString(got.sandbox.Env, "HOME=/tmp/home") {
+		t.Fatalf("expected inherited env selected by --copy-env, got %v", got.sandbox.Env)
+	}
+	if containsString(got.sandbox.Env, "SECRET=value") {
+		t.Fatalf("did not expect file copy_env after CLI override, got %v", got.sandbox.Env)
 	}
 }
 
@@ -828,7 +841,6 @@ docker_build:
   newgidmap_path: ./tools/newgidmap
 env:
   - PATH=`+toolDir+`
-clear_env: true
 `)
 
 	cfg, err := buildConfig(cliOptions{}, []string{"docker", "build", "--target", "builder", "."}, root, []string{"PATH=/does/not/exist"})
@@ -837,6 +849,9 @@ clear_env: true
 	}
 	if !cfg.sandbox.DockerBuild.Enabled {
 		t.Fatal("expected docker build to be enabled")
+	}
+	if !cfg.sandbox.Seccomp.Disabled {
+		t.Fatalf("expected docker_build sandbox seccomp to be disabled by default, got %#v", cfg.sandbox.Seccomp)
 	}
 	if cfg.sandbox.DockerBuild.BuildkitdPath != filepath.Join(root, "tools/buildkitd") {
 		t.Fatalf("unexpected buildkitd path: %q", cfg.sandbox.DockerBuild.BuildkitdPath)
@@ -924,11 +939,9 @@ policy:
 	}
 }
 
-func TestBuildConfigClearEnvSkipsInheritedEnv(t *testing.T) {
+func TestBuildConfigDoesNotInheritEnvByDefault(t *testing.T) {
 	cfg, err := buildConfig(cliOptions{
-		clearEnv:    true,
-		clearEnvSet: true,
-		env:         []string{"FOO=bar"},
+		env: []string{"FOO=bar"},
 	}, []string{"bash"}, t.TempDir(), []string{"SECRET=value"})
 	if err != nil {
 		t.Fatal(err)
@@ -941,7 +954,40 @@ func TestBuildConfigClearEnvSkipsInheritedEnv(t *testing.T) {
 	}
 }
 
-func TestBuildConfigPathAvailabilityMountsUseTypedBindMounts(t *testing.T) {
+func TestBuildConfigCopyEnvCopiesOnlyRequestedKeys(t *testing.T) {
+	cfg, err := buildConfig(cliOptions{
+		copyEnv:    []string{"HOME"},
+		copyEnvSet: true,
+		env:        []string{"FOO=bar"},
+	}, []string{"bash"}, t.TempDir(), []string{"HOME=/tmp/home", "SECRET=value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(cfg.sandbox.Env, "HOME=/tmp/home") {
+		t.Fatalf("expected requested host env to be copied, got %v", cfg.sandbox.Env)
+	}
+	if containsString(cfg.sandbox.Env, "SECRET=value") {
+		t.Fatalf("did not expect unrequested env to be copied, got %v", cfg.sandbox.Env)
+	}
+	if !containsString(cfg.sandbox.Env, "FOO=bar") {
+		t.Fatalf("expected explicit env override, got %v", cfg.sandbox.Env)
+	}
+}
+
+func TestBuildConfigCopyEnvFailsWhenKeyIsMissing(t *testing.T) {
+	_, err := buildConfig(cliOptions{
+		copyEnv:    []string{"HOME", "SSH_AUTH_SOCK"},
+		copyEnvSet: true,
+	}, []string{"bash"}, t.TempDir(), []string{"HOME=/tmp/home"})
+	if err == nil {
+		t.Fatal("expected missing copied env to fail")
+	}
+	if !strings.Contains(err.Error(), `copy env "SSH_AUTH_SOCK"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildConfigDoesNotMountNonSystemPATHRoots(t *testing.T) {
 	cwd := t.TempDir()
 	pathRoot := filepath.Join(t.TempDir(), "toolchain")
 	pathDir := filepath.Join(pathRoot, "bin")
@@ -955,10 +1001,8 @@ func TestBuildConfigPathAvailabilityMountsUseTypedBindMounts(t *testing.T) {
 	}
 
 	cfg, err := buildConfig(cliOptions{
-		binaries:    []string{"tool-b"},
-		env:         []string{"PATH=" + pathDir},
-		clearEnv:    true,
-		clearEnvSet: true,
+		binaries: []string{"tool-b"},
+		env:      []string{"PATH=" + pathDir},
 	}, []string{"tool-a"}, cwd, []string{"PATH=/does/not/matter"})
 	if err != nil {
 		t.Fatal(err)
@@ -970,18 +1014,18 @@ func TestBuildConfigPathAvailabilityMountsUseTypedBindMounts(t *testing.T) {
 	if got := envValue(cfg.sandbox.Env, "PATH"); got != pathDir {
 		t.Fatalf("expected sandbox PATH %q, got %q", pathDir, got)
 	}
-	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{
+	if containsMount(cfg.sandbox.Mounts, bbox.Mount{
 		Type:     bbox.MountTypeBind,
 		Source:   pathRoot,
 		Target:   pathRoot,
 		ReadOnly: true,
 		Mode:     0,
 	}) {
-		t.Fatalf("expected PATH root mount for %q in %v", pathRoot, cfg.sandbox.Mounts)
+		t.Fatalf("did not expect non-system PATH root mount for %q in %v", pathRoot, cfg.sandbox.Mounts)
 	}
 }
 
-func TestBuildConfigEnvPATHOverrideWinsOverInheritedPATHForMounts(t *testing.T) {
+func TestBuildConfigEnvPATHOverrideWinsOverCopiedPATHForBinaryResolution(t *testing.T) {
 	cwd := t.TempDir()
 	inheritedRoot := filepath.Join(t.TempDir(), "inherited")
 	inheritedDir := filepath.Join(inheritedRoot, "bin")
@@ -998,7 +1042,9 @@ func TestBuildConfigEnvPATHOverrideWinsOverInheritedPATHForMounts(t *testing.T) 
 	overrideExtra := writeExecutableFixture(t, overrideDir, "tool-extra")
 
 	cfg, err := buildConfig(cliOptions{
-		env: []string{"PATH=" + overrideDir},
+		copyEnv:    []string{"PATH"},
+		copyEnvSet: true,
+		env:        []string{"PATH=" + overrideDir},
 	}, []string{"tool-new"}, cwd, []string{"PATH=" + inheritedDir})
 	if err != nil {
 		t.Fatal(err)
@@ -1013,20 +1059,18 @@ func TestBuildConfigEnvPATHOverrideWinsOverInheritedPATHForMounts(t *testing.T) 
 	if got := envValue(cfg.sandbox.Env, "PATH"); got != overrideDir {
 		t.Fatalf("expected sandbox PATH %q, got %q", overrideDir, got)
 	}
-	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: overrideRoot, Target: overrideRoot, ReadOnly: true}) {
-		t.Fatalf("expected override PATH root mount in %v", cfg.sandbox.Mounts)
+	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: overrideRoot, Target: overrideRoot, ReadOnly: true}) {
+		t.Fatalf("did not expect non-system PATH root mount in %v", cfg.sandbox.Mounts)
 	}
 	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: inheritedRoot, Target: inheritedRoot, ReadOnly: true}) {
-		t.Fatalf("did not expect inherited PATH root mount in %v", cfg.sandbox.Mounts)
+		t.Fatalf("did not expect copied PATH root mount in %v", cfg.sandbox.Mounts)
 	}
 }
 
 func TestBuildConfigCollapsesUsrPathEntriesIntoSingleUsrMount(t *testing.T) {
 	cwd := t.TempDir()
 	cfg, err := buildConfig(cliOptions{
-		env:         []string{"PATH=/usr/local/bin:/usr/bin"},
-		clearEnv:    true,
-		clearEnvSet: true,
+		env: []string{"PATH=/usr/local/bin:/usr/bin"},
 	}, []string{"/bin/true"}, cwd, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1049,8 +1093,7 @@ func TestBuildConfigCollapsesUsrPathEntriesIntoSingleUsrMount(t *testing.T) {
 func TestBuildConfigDockerBuildPrependsBuilderShimDirAndKeepsUsrMount(t *testing.T) {
 	cwd := t.TempDir()
 	cfg, err := buildRunConfig(effectiveCLIConfig{
-		ClearEnv: true,
-		Env:      []string{"PATH=/usr/local/bin:/usr/bin"},
+		Env: []string{"PATH=/usr/local/bin:/usr/bin"},
 		DockerBuild: cliDockerBuildConfig{
 			Enabled: true,
 		},
@@ -1071,20 +1114,13 @@ func TestBuildConfigDockerBuildPrependsBuilderShimDirAndKeepsUsrMount(t *testing
 	}
 }
 
-func TestPathMountTargetDoesNotCollapseRootBinDirectories(t *testing.T) {
-	tests := []struct {
-		dir      string
-		resolved string
-		want     string
-	}{
-		{dir: "/bin", resolved: "/bin", want: "/bin"},
-		{dir: "/sbin", resolved: "/sbin", want: "/sbin"},
+func TestBuildConfigCLIUsesRestrictedSeccompProfile(t *testing.T) {
+	cfg, err := buildConfig(cliOptions{}, []string{"bash"}, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	for _, tt := range tests {
-		if got := pathMountTarget(tt.dir, tt.resolved); got != tt.want {
-			t.Fatalf("pathMountTarget(%q, %q) = %q, want %q", tt.dir, tt.resolved, got, tt.want)
-		}
+	if cfg.sandbox.Seccomp.Profile != bbox.SeccompProfileRestricted {
+		t.Fatalf("expected CLI sandbox seccomp profile %q, got %#v", bbox.SeccompProfileRestricted, cfg.sandbox.Seccomp)
 	}
 }
 

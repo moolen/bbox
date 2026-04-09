@@ -39,8 +39,8 @@ func executeRootCommand(cmd *cobra.Command, args []string, deps commandDeps, opt
 	if cmd.Flags().Changed("max-request-body-bytes") {
 		opts.maxBodySizeSet = true
 	}
-	if cmd.Flags().Changed("clear-env") {
-		opts.clearEnvSet = true
+	if cmd.Flags().Changed("copy-env") {
+		opts.copyEnvSet = true
 	}
 
 	cfg, err := buildConfig(opts, args, cwd, deps.environ())

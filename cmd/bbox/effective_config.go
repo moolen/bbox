@@ -14,7 +14,7 @@ type effectiveCLIConfig struct {
 	Binaries            []string
 	Mounts              []cliMountConfig
 	Env                 []string
-	ClearEnv            bool
+	CopyEnv             []string
 	TrafficMode         string
 	PolicyMode          string
 	MaxRequestBodyBytes int64
@@ -116,9 +116,9 @@ func buildRuntimeCLIConfigLayer(opts cliOptions) (cliFileConfig, error) {
 		runtimeLayer.Env = append([]string(nil), opts.env...)
 		runtimeLayer.hasEnv = true
 	}
-	if opts.clearEnvSet {
-		runtimeLayer.ClearEnv = opts.clearEnv
-		runtimeLayer.hasClearEnv = true
+	if opts.copyEnvSet {
+		runtimeLayer.CopyEnv = append([]string(nil), opts.copyEnv...)
+		runtimeLayer.hasCopyEnv = true
 	}
 	if opts.maxBodySizeSet {
 		runtimeLayer.MaxRequestBodyBytes = opts.maxRequestBodyBytes
@@ -141,7 +141,7 @@ func toEffectiveCLIConfig(mergedCfg cliFileConfig, absCWD string) effectiveCLICo
 		Binaries:            cloneStringSlice(mergedCfg.Bin),
 		Mounts:              cloneMountConfigs(mergedCfg.Mounts),
 		Env:                 cloneStringSlice(mergedCfg.Env),
-		ClearEnv:            mergedCfg.ClearEnv,
+		CopyEnv:             cloneStringSlice(mergedCfg.CopyEnv),
 		TrafficMode:         mergedCfg.TrafficMode,
 		PolicyMode:          mergedCfg.PolicyMode,
 		MaxRequestBodyBytes: mergedCfg.MaxRequestBodyBytes,

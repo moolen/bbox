@@ -11,7 +11,9 @@
 name: spectre-builder
 workdir: .
 
-clear_env: false
+# Optional: selectively copy host env vars into the sandbox.
+# copy_env:
+#   - PATH
 traffic_mode: proxy
 policy_mode: audit
 access_log: json

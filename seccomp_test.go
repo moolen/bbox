@@ -50,6 +50,7 @@ func TestSeccompProfileRulesIncludeExpectedBuiltins(t *testing.T) {
 	}
 	for _, syscall := range []string{
 		"ptrace",
+		"process_vm_readv",
 		"process_vm_writev",
 		"pidfd_getfd",
 		"kcmp",
@@ -62,9 +63,6 @@ func TestSeccompProfileRulesIncludeExpectedBuiltins(t *testing.T) {
 	restricted := seccompProfileRules(SeccompProfileRestricted)
 	if !containsSeccompRule(restricted, "seccomp") {
 		t.Fatal("expected restricted profile to deny the seccomp syscall")
-	}
-	if !containsSeccompRule(restricted, "process_vm_readv") {
-		t.Fatal("expected restricted profile to deny process_vm_readv")
 	}
 	if !containsSeccompConditionalRule(restricted, "prctl") {
 		t.Fatal("expected restricted profile to deny PR_SET_SECCOMP")
@@ -106,12 +104,12 @@ func TestDefaultSeccompHelpers(t *testing.T) {
 	}
 }
 
-func TestEffectiveSeccompOptionsPreservesDefaultProfileForDockerBuild(t *testing.T) {
+func TestEffectiveSeccompOptionsDisablesSeccompByDefaultForDockerBuild(t *testing.T) {
 	got := effectiveSeccompOptions(SandboxOptions{
 		DockerBuild: DockerBuildOptions{Enabled: true},
 	})
 
-	want := SeccompOptions{}
+	want := SeccompOptions{Disabled: true}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("effectiveSeccompOptions() = %#v, want %#v", got, want)
 	}

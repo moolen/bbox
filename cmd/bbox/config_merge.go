@@ -75,9 +75,9 @@ func mergeCLIConfigLayer(base cliFileConfig, overlay cliFileConfig) cliFileConfi
 		base.Env = cloneStringSlice(overlay.Env)
 		base.hasEnv = true
 	}
-	if overlay.hasClearEnv {
-		base.ClearEnv = overlay.ClearEnv
-		base.hasClearEnv = true
+	if overlay.hasCopyEnv {
+		base.CopyEnv = cloneStringSlice(overlay.CopyEnv)
+		base.hasCopyEnv = true
 	}
 	if overlay.hasTrafficMode {
 		base.TrafficMode = overlay.TrafficMode

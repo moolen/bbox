@@ -30,7 +30,7 @@ On Linux, the transparent seccomp launcher is embedded into `bbox` and executed 
 
 On macOS, `bbox` supports the same `bbox.yaml` shape, but the first backend is intentionally narrower:
 
-- supported: `traffic_mode: proxy`, `policy.rules`, `workdir`, `env`, `clear_env`, access logging, `policy_mode`
+- supported: `traffic_mode: proxy`, `policy.rules`, `workdir`, `env`, `copy_env`, access logging, `policy_mode`
 - rejected explicitly on Darwin: `traffic_mode: transparent`, `mounts`, seccomp options
 
 `bin` remains part of the config on macOS, but it is interpreted as an executable allowlist for the Seatbelt profile instead of Linux staging metadata.
@@ -49,9 +49,11 @@ If `bbox.yaml` is found in a parent directory, relative paths in `workdir` and `
 
 `docker_socket.target_socket_path` is a host path and must be absolute. `docker_socket.mount_path` is the in-sandbox socket location and must also be absolute.
 
-The CLI resolves the payload command and any explicit `bin` entries against the effective sandbox `PATH`. By default that comes from the inherited host environment. You can override it with `env: ["PATH=..."]` in `bbox.yaml` or `--env PATH=...` on the CLI. If you also set `clear_env: true`, set `PATH` explicitly if you still want command-name lookup inside the sandbox.
+The sandbox starts with an empty environment by default. Use `copy_env: ["KEY"]` in `bbox.yaml` or repeated `--copy-env KEY` flags to copy selected host variables in, and use `env: ["KEY=VALUE"]` or repeated `--env KEY=VALUE` to set explicit values. Explicit `env` entries override copied values with the same key. `copy_env` fails fast if a requested host variable is missing.
 
-On Linux, bbox also adds read-only mounts for the effective `PATH` roots so those command lookups can keep working at runtime. For entries under `/usr`, this collapses to a single `/usr` mount. For non-root `.../bin` and `.../sbin` entries, bbox mounts the parent directory instead.
+The CLI resolves the payload command and any explicit `bin` entries against the effective sandbox `PATH`. If you want command-name lookup through the host `PATH`, copy it explicitly with `copy_env: ["PATH"]` or `--copy-env PATH`. You can also set `PATH` directly with `env: ["PATH=..."]` or `--env PATH=...`.
+
+On Linux, bbox adds a read-only `/usr` mount when the effective `PATH` references system locations under `/usr` (including `/bin` and `/sbin` when they resolve there). Arbitrary host PATH directories are not auto-mounted.
 
 On macOS, bbox does not mirror the Linux PATH mount behavior. Instead, the resolved payload command plus any explicit `bin` entries are used to build the generated Seatbelt executable allowlist.
 
@@ -87,7 +89,8 @@ mounts:
     mode: 0755
 env:
   - API_TOKEN=redacted
-clear_env: false
+copy_env:
+  - PATH
 traffic_mode: proxy # or transparent
 max_request_body_bytes: 65536
 access_log: json # json or off
@@ -217,7 +220,7 @@ If you know every networked Dockerfile step is proxy-aware, you can switch the e
 Merge precedence is:
 1. CLI defaults
 2. `bbox.yaml` (if present, including `policy_mode`)
-3. supported runtime flags that are explicitly set on the CLI override file values (for example `--name`, `--workdir`, `--bin`, `--mount`, `--env`, `--clear-env`, `--max-request-body-bytes`, `--traffic-mode`, `--policy-mode`, reporting flags, and `--access-log`)
+3. supported runtime flags that are explicitly set on the CLI override file values (for example `--name`, `--workdir`, `--bin`, `--mount`, `--env`, `--copy-env`, `--max-request-body-bytes`, `--traffic-mode`, `--policy-mode`, reporting flags, and `--access-log`)
 
 If no `bbox.yaml` is present, bbox defaults to enforce behavior:
 - policy mode is `enforce`

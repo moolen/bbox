@@ -14,8 +14,8 @@ type cliOptions struct {
 	binaries            []string
 	mounts              []string
 	env                 []string
-	clearEnv            bool
-	clearEnvSet         bool
+	copyEnv             []string
+	copyEnvSet          bool
 	trafficMode         string
 	policyMode          string
 	maxRequestBodyBytes int64
@@ -73,7 +73,7 @@ func newRootCommand(deps commandDeps) *cobra.Command {
 	flags.StringArrayVar(&opts.binaries, "bin", nil, "extra binary to stage into the sandbox")
 	flags.StringArrayVar(&opts.mounts, "mount", nil, "mount spec in key=value form")
 	flags.StringArrayVar(&opts.env, "env", nil, "environment entry in KEY=VALUE form")
-	flags.BoolVar(&opts.clearEnv, "clear-env", false, "do not inherit the host environment")
+	flags.StringArrayVar(&opts.copyEnv, "copy-env", nil, "host environment variable to copy into the sandbox")
 	flags.StringVar(&opts.trafficMode, "traffic-mode", "proxy", "traffic mode: proxy or transparent")
 	flags.StringVar(&opts.policyMode, "policy-mode", "enforce", "policy mode: enforce or audit")
 	flags.Int64Var(&opts.maxRequestBodyBytes, "max-request-body-bytes", 64<<10, "maximum request body inspection size for MITM")
