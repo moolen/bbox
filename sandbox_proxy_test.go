@@ -42,6 +42,7 @@ func TestProxySandboxCanRunDateWithDefaultSeccomp(t *testing.T) {
 		WorkDir:  "/tmp",
 	})
 	if err != nil {
+		skipIfLoopbackSetupUnsupported(t, err)
 		t.Fatalf("create sandbox: %v", err)
 	}
 	defer func() {
@@ -95,6 +96,7 @@ func TestProxySandboxCanCreateThreadsWithDefaultSeccomp(t *testing.T) {
 		WorkDir: "/tmp",
 	})
 	if err != nil {
+		skipIfLoopbackSetupUnsupported(t, err)
 		t.Fatalf("create sandbox: %v", err)
 	}
 	defer func() {
