@@ -8,7 +8,10 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/moolen/bbox/internal/helperproto"
@@ -123,7 +126,13 @@ func (m *execManager) handleExec(ctx context.Context, id uint64, req helperproto
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, req.Argv[0], req.Argv[1:]...)
+	commandPath, err := resolveExecCommandPath(req.Argv[0], req.Env, req.WorkDir)
+	if err != nil {
+		m.sendExecError(id, err)
+		return
+	}
+
+	cmd := exec.CommandContext(runCtx, commandPath, req.Argv[1:]...)
 	cmd.Env = append([]string(nil), req.Env...)
 	cmd.Dir = req.WorkDir
 
@@ -131,7 +140,6 @@ func (m *execManager) handleExec(ctx context.Context, id uint64, req helperproto
 		session    *hrexec.Session
 		streams    []hrexec.OutputStream
 		supervisor *seccompnotify.Supervisor
-		err        error
 	)
 	if m.currentTrafficMode() == TrafficModeTransparent {
 		session, streams, supervisor, err = runSupervisedExec(runCtx, cmd, req, m.runtimeTargets())
@@ -189,6 +197,64 @@ func (m *execManager) handleExec(ctx context.Context, id uint64, req helperproto
 	}); err != nil {
 		m.logger.Printf("send exec result: %v", err)
 	}
+}
+
+func resolveExecCommandPath(name string, env []string, workDir string) (string, error) {
+	if strings.TrimSpace(name) == "" {
+		return "", fmt.Errorf("argv[0] is required")
+	}
+	if strings.Contains(name, string(filepath.Separator)) {
+		return name, nil
+	}
+
+	pathValue, ok := envValue(env, "PATH")
+	if !ok {
+		return name, nil
+	}
+
+	cwd := workDir
+	if strings.TrimSpace(cwd) == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve working directory for %q: %w", name, err)
+		}
+	}
+
+	for _, dir := range strings.Split(pathValue, string(os.PathListSeparator)) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := dir
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(cwd, candidate)
+		}
+		candidate = filepath.Join(candidate, name)
+
+		info, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+
+	return "", fmt.Errorf("exec: %q: executable file not found in $PATH", name)
+}
+
+func envValue(env []string, key string) (string, bool) {
+	for i := len(env) - 1; i >= 0; i-- {
+		entryKey, value, ok := strings.Cut(env[i], "=")
+		if !ok {
+			continue
+		}
+		if entryKey == key {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func (m *execManager) sendExecError(id uint64, err error) {

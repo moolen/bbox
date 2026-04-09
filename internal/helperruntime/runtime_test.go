@@ -20,7 +20,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -256,6 +258,50 @@ func TestHandleExecInputCancelTargetsCurrentRequestID(t *testing.T) {
 	bridge.handleExecInput(41, helperproto.ExecInput{Cancel: true})
 	if !cancelled {
 		t.Fatal("expected cancel for matching request id")
+	}
+}
+
+func TestHandleExecResolvesBareCommandFromRequestEnvPATH(t *testing.T) {
+	t.Parallel()
+
+	toolDir := t.TempDir()
+	toolName := "bbox-helperruntime-path-tool"
+	toolPath := filepath.Join(toolDir, toolName)
+	if err := os.WriteFile(toolPath, []byte("#!/bin/sh\necho helper-path-ok\n"), 0o755); err != nil {
+		t.Fatalf("write tool: %v", err)
+	}
+
+	var envelopes []helperproto.Envelope
+	manager := newExecManager(log.New(io.Discard, "", 0), nil, nil, func(env helperproto.Envelope) error {
+		envelopes = append(envelopes, env)
+		return nil
+	})
+
+	manager.handleExec(context.Background(), 7, helperproto.ExecRequest{
+		Argv: []string{toolName},
+		Env:  []string{"PATH=" + toolDir},
+	})
+
+	var (
+		stdout bytes.Buffer
+		result *helperproto.ExecResult
+	)
+	for _, env := range envelopes {
+		if env.StreamFrame != nil && env.StreamFrame.Stream == helperproto.StreamStdout {
+			stdout.Write(env.StreamFrame.Data)
+		}
+		if env.ExecResult != nil {
+			result = env.ExecResult
+		}
+	}
+	if result == nil {
+		t.Fatal("expected exec result")
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit=%d stderr=%q error=%q", result.ExitCode, string(result.Stderr), result.Error)
+	}
+	if got := stdout.String(); got != "helper-path-ok\n" {
+		t.Fatalf("stdout=%q want %q", got, "helper-path-ok\n")
 	}
 }
 
