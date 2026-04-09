@@ -25,6 +25,7 @@ func runProxyMode(ctx context.Context, cfg Config) error {
 	bridge.trafficMode = TrafficModeProxy
 	bridge.mitmEnabled = cfg.MITMEnabled
 	bridge.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
+	bridge.payloadSeccompBPFPath = cfg.PayloadSeccompBPFPath
 
 	server := &http.Server{
 		Handler: bridge.proxyHandler(),

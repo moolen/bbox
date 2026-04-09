@@ -88,15 +88,21 @@ static int starts_with_env(const char *entry) {
     return strncmp(entry, LAUNCHER_SOCK_FD_ENV "=", name_len + 1) == 0;
 }
 
-static int parse_sock_fd(void) {
+static int parse_sock_fd(int *present) {
     char *value = getenv(LAUNCHER_SOCK_FD_ENV);
     char *end = NULL;
     long fd = 0;
 
-    if (value == NULL || *value == '\0') {
-        fprintf(stderr, "%s is required\n", LAUNCHER_SOCK_FD_ENV);
+    if (present == NULL) {
+        errno = EINVAL;
         return -1;
     }
+
+    if (value == NULL || *value == '\0') {
+        *present = 0;
+        return -1;
+    }
+    *present = 1;
 
     errno = 0;
     fd = strtol(value, &end, 10);
@@ -444,7 +450,8 @@ static int install_payload_seccomp_filter(const char *path) {
 }
 
 int main(int argc, char *argv[]) {
-    int inherited_sock_fd = parse_sock_fd();
+    int inherited_sock_fd = -1;
+    int has_launcher_sock = 0;
     int sock_fd = -1;
     int target_index = -1;
     int separator = -1;
@@ -453,54 +460,63 @@ int main(int argc, char *argv[]) {
     char **envp = NULL;
     (void)managed_syscalls;
 
-    if (inherited_sock_fd < 0) {
-        return 1;
-    }
-    sock_fd = fcntl(inherited_sock_fd, F_DUPFD_CLOEXEC, MIN_LAUNCHER_CONTROL_FD);
-    if (sock_fd < 0) {
-        fprintf(stderr, "duplicate launcher socket: %s\n", strerror(errno));
-        return 1;
-    }
-    close(inherited_sock_fd);
     if (argc < 4) {
-        (void)send_launcher_status(sock_fd, 0, -1, "launcher target argv is required");
         fprintf(stderr, "launcher target argv is required\n");
         return 1;
     }
 
     if (parse_launcher_args(argc, argv, &target_index, &separator, &payload_seccomp_bpf) != 0) {
-        (void)send_launcher_status(sock_fd, 0, -1, "launcher target argv is required");
         fprintf(stderr, "launcher target argv is required\n");
         return 1;
+    }
+    inherited_sock_fd = parse_sock_fd(&has_launcher_sock);
+    if (!has_launcher_sock && payload_seccomp_bpf == NULL) {
+        fprintf(stderr, "%s is required\n", LAUNCHER_SOCK_FD_ENV);
+        return 1;
+    }
+    if (has_launcher_sock && inherited_sock_fd < 0) {
+        return 1;
+    }
+    if (has_launcher_sock) {
+        sock_fd = fcntl(inherited_sock_fd, F_DUPFD_CLOEXEC, MIN_LAUNCHER_CONTROL_FD);
+        if (sock_fd < 0) {
+            fprintf(stderr, "duplicate launcher socket: %s\n", strerror(errno));
+            return 1;
+        }
+        close(inherited_sock_fd);
     }
 
     envp = filtered_envp();
     if (envp == NULL) {
-        (void)send_launcher_status(sock_fd, 0, -1, "allocate launcher environment");
+        if (has_launcher_sock) {
+            (void)send_launcher_status(sock_fd, 0, -1, "allocate launcher environment");
+        }
         fprintf(stderr, "allocate launcher environment: %s\n", strerror(errno));
         return 1;
     }
 
-    notify_fd = install_notify_filter(sock_fd);
-    if (notify_fd < 0) {
-        (void)send_launcher_status(sock_fd, 0, -1, "install seccomp notify filter");
-        fprintf(stderr, "install seccomp notify filter: %s\n", strerror(errno));
-        free(envp);
-        return 1;
-    }
+    if (has_launcher_sock) {
+        notify_fd = install_notify_filter(sock_fd);
+        if (notify_fd < 0) {
+            (void)send_launcher_status(sock_fd, 0, -1, "install seccomp notify filter");
+            fprintf(stderr, "install seccomp notify filter: %s\n", strerror(errno));
+            free(envp);
+            return 1;
+        }
 
-    if (send_launcher_status(sock_fd, 1, notify_fd, NULL) != 0) {
-        fprintf(stderr, "send launcher status: %s\n", strerror(errno));
-        free(envp);
-        return 1;
-    }
-    if (syscall(SYS_close_range, (unsigned int)notify_fd, (unsigned int)notify_fd, CLOSE_RANGE_CLOEXEC) != 0) {
-        fprintf(stderr, "mark seccomp notify fd cloexec: %s\n", strerror(errno));
-        free(envp);
-        return 1;
-    }
+        if (send_launcher_status(sock_fd, 1, notify_fd, NULL) != 0) {
+            fprintf(stderr, "send launcher status: %s\n", strerror(errno));
+            free(envp);
+            return 1;
+        }
+        if (syscall(SYS_close_range, (unsigned int)notify_fd, (unsigned int)notify_fd, CLOSE_RANGE_CLOEXEC) != 0) {
+            fprintf(stderr, "mark seccomp notify fd cloexec: %s\n", strerror(errno));
+            free(envp);
+            return 1;
+        }
 
-    close(sock_fd);
+        close(sock_fd);
+    }
 
     if (payload_seccomp_bpf != NULL && install_payload_seccomp_filter(payload_seccomp_bpf) != 0) {
         fprintf(stderr, "install payload seccomp filter: %s\n", strerror(errno));

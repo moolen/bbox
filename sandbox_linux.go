@@ -55,19 +55,8 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 		return nil, fmt.Errorf("create helper log file: %w", err)
 	}
 
-	var (
-		payloadSeccompBPFPath string
-		seccompProgram        *preparedSeccompProgram
-	)
-	if mode == TrafficModeTransparent {
-		payloadSeccompBPFPath, err = stageTransparentPayloadSeccompProgram(root, effectiveSeccompOptions(opts))
-	} else {
-		seccompProgram, err = prepareSeccompProgram(effectiveSeccompOptions(opts))
-	}
+	payloadSeccompBPFPath, err := stagePayloadSeccompProgram(root, effectiveSeccompOptions(opts))
 	if err != nil {
-		if seccompProgram != nil {
-			_ = seccompProgram.Close()
-		}
 		_ = helperLog.Close()
 		_ = os.Remove(helperLog.Name())
 		_ = childBridge.Close()
@@ -77,12 +66,7 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 	}
 
 	bridgeFD := 3
-	seccompFD := -1
 	extraFiles := []*os.File{childBridge}
-	if seccompProgram != nil {
-		seccompFD = bridgeFD + len(extraFiles)
-		extraFiles = append(extraFiles, seccompProgram.file)
-	}
 
 	cmd, err := buildLinuxSandboxCommand(bwrapCommandConfig{
 		runtimeBinary:      runtimeBinary,
@@ -94,15 +78,12 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 		mode:               mode,
 		payloadSeccompPath: payloadSeccompBPFPath,
 		bridgeFD:           bridgeFD,
-		seccompFD:          seccompFD,
+		seccompFD:          -1,
 		extraFiles:         extraFiles,
 		dockerSocketMount:  dockerMount,
 		maxRequestBody:     m.requestBodyLimitBytes,
 	})
 	if err != nil {
-		if seccompProgram != nil {
-			_ = seccompProgram.Close()
-		}
 		_ = helperLog.Close()
 		_ = os.Remove(helperLog.Name())
 		_ = childBridge.Close()
@@ -114,18 +95,12 @@ func (m *ProxyManager) newLinuxSandboxRuntime(ctx context.Context, sandboxID str
 	cmd.Stdout = helperLog
 
 	if err := cmd.Start(); err != nil {
-		if seccompProgram != nil {
-			_ = seccompProgram.Close()
-		}
 		_ = helperLog.Close()
 		_ = os.Remove(helperLog.Name())
 		_ = childBridge.Close()
 		_ = parentBridge.Close()
 		_ = os.RemoveAll(root)
 		return nil, fmt.Errorf("start bwrap helper: %w", err)
-	}
-	if seccompProgram != nil {
-		_ = seccompProgram.Close()
 	}
 	_ = childBridge.Close()
 

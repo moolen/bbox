@@ -56,6 +56,8 @@ func newBridge(conn io.ReadWriteCloser, logger *log.Logger, proxyAddr string) *b
 	}
 	b.exec = newExecManager(logger, func() TrafficMode {
 		return b.trafficMode
+	}, func() string {
+		return b.payloadSeccompBPFPath
 	}, func() seccompnotify.RuntimeTargets {
 		return b.transparentRuntime()
 	}, b.send)
@@ -84,6 +86,7 @@ type execState struct {
 type execManager struct {
 	logger         *log.Logger
 	trafficMode    func() TrafficMode
+	payloadSeccomp func() string
 	runtimeTargets func() seccompnotify.RuntimeTargets
 	send           func(helperproto.Envelope) error
 	execMu         sync.Mutex
@@ -91,10 +94,11 @@ type execManager struct {
 	currentExec    *execState
 }
 
-func newExecManager(logger *log.Logger, trafficMode func() TrafficMode, runtimeTargets func() seccompnotify.RuntimeTargets, send func(helperproto.Envelope) error) *execManager {
+func newExecManager(logger *log.Logger, trafficMode func() TrafficMode, payloadSeccomp func() string, runtimeTargets func() seccompnotify.RuntimeTargets, send func(helperproto.Envelope) error) *execManager {
 	return &execManager{
 		logger:         logger,
 		trafficMode:    trafficMode,
+		payloadSeccomp: payloadSeccomp,
 		runtimeTargets: runtimeTargets,
 		send:           send,
 	}
@@ -105,6 +109,13 @@ func (m *execManager) currentTrafficMode() TrafficMode {
 		return ""
 	}
 	return m.trafficMode()
+}
+
+func (m *execManager) currentPayloadSeccompPath() string {
+	if m == nil || m.payloadSeccomp == nil {
+		return ""
+	}
+	return m.payloadSeccomp()
 }
 
 func (m *execManager) handleExec(ctx context.Context, id uint64, req helperproto.ExecRequest) {
@@ -144,6 +155,18 @@ func (m *execManager) handleExec(ctx context.Context, id uint64, req helperproto
 	if m.currentTrafficMode() == TrafficModeTransparent {
 		session, streams, supervisor, err = runSupervisedExec(runCtx, cmd, req, m.runtimeTargets())
 	} else {
+		cleanup, prepErr := preparePayloadSeccompExec(cmd, m.currentPayloadSeccompPath())
+		if prepErr != nil {
+			m.sendExecError(id, prepErr)
+			return
+		}
+		if cleanup != nil {
+			defer func() {
+				if err := cleanup(); err != nil {
+					m.logger.Printf("close payload seccomp launcher target: %v", err)
+				}
+			}()
+		}
 		session, streams, err = hrexec.StartSession(cmd, req)
 	}
 	if err != nil {

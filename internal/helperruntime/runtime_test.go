@@ -272,7 +272,7 @@ func TestHandleExecResolvesBareCommandFromRequestEnvPATH(t *testing.T) {
 	}
 
 	var envelopes []helperproto.Envelope
-	manager := newExecManager(log.New(io.Discard, "", 0), nil, nil, func(env helperproto.Envelope) error {
+	manager := newExecManager(log.New(io.Discard, "", 0), nil, nil, nil, func(env helperproto.Envelope) error {
 		envelopes = append(envelopes, env)
 		return nil
 	})

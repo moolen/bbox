@@ -17,7 +17,7 @@ func toSandboxrootStageOptions(opts SandboxOptions) sandboxroot.StageOptions {
 	}
 }
 
-func stageTransparentPayloadSeccompProgram(root string, opts SeccompOptions) (string, error) {
+func stagePayloadSeccompProgram(root string, opts SeccompOptions) (string, error) {
 	program, err := compileSeccompProgram(opts)
 	if err != nil {
 		return "", err

@@ -11,13 +11,9 @@
 name: spectre-builder
 workdir: .
 
-env:
-  - PATH=/usr/local/bin:/usr/bin:/bin
-
 clear_env: false
-traffic_mode: transparent
-policy_mode: enforce
-# traffic_mode: proxy
+traffic_mode: proxy
+policy_mode: audit
 access_log: json
 report_policy_violations: true
 report_access_summary: true
