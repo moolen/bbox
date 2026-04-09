@@ -8,11 +8,13 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/moolen/bbox/internal/dockerbuildpaths"
 )
 
 const (
 	buildkitSocketPath = "/tmp/bbox-buildkitd.sock"
-	buildkitRootPath   = "/tmp/bbox-buildkitd-root"
+	buildkitRootPath   = dockerbuildpaths.DefaultBuildkitRootPath
 	buildkitLogPath    = "/tmp/bbox-buildkitd.log"
 )
 

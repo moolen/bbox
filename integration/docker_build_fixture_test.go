@@ -26,6 +26,7 @@ var (
 type dockerBuildFixture struct {
 	repoDir        string
 	sandboxRepoDir string
+	outputDir      string
 	outputPath     string
 }
 
@@ -74,6 +75,9 @@ func writeDockerBuildMatrixFixture(t *testing.T) dockerBuildFixture {
 	repoDir := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatalf("create fixture repo: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, "bbox-buildkitd-out"), 0o755); err != nil {
+		t.Fatalf("create fixture output dir: %v", err)
 	}
 	stageAlpineMinirootfs(t, filepath.Join(repoDir, "alpine-minirootfs.tar.gz"))
 
@@ -204,7 +208,8 @@ func writeDockerBuildMatrixFixture(t *testing.T) dockerBuildFixture {
 	return dockerBuildFixture{
 		repoDir:        repoDir,
 		sandboxRepoDir: "/workspace/docker-build-fixture",
-		outputPath:     filepath.Join(repoDir, ".bbox-docker-build.oci.tar"),
+		outputDir:      filepath.Join(repoDir, "bbox-buildkitd-out"),
+		outputPath:     filepath.Join(repoDir, "bbox-buildkitd-out", "bbox-docker-build.oci.tar"),
 	}
 }
 
@@ -291,6 +296,9 @@ func writeDockerBuildProxyFailClosedFixture(t *testing.T) dockerBuildFixture {
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatalf("create negative fixture repo: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(repoDir, "bbox-buildkitd-out"), 0o755); err != nil {
+		t.Fatalf("create negative fixture output dir: %v", err)
+	}
 
 	sourcePath := filepath.Join(repoDir, "main.go")
 	source := strings.Join([]string{
@@ -343,7 +351,8 @@ func writeDockerBuildProxyFailClosedFixture(t *testing.T) dockerBuildFixture {
 	return dockerBuildFixture{
 		repoDir:        repoDir,
 		sandboxRepoDir: "/workspace/docker-build-fixture-fail-closed",
-		outputPath:     filepath.Join(repoDir, ".bbox-docker-build.oci.tar"),
+		outputDir:      filepath.Join(repoDir, "bbox-buildkitd-out"),
+		outputPath:     filepath.Join(repoDir, "bbox-buildkitd-out", "bbox-docker-build.oci.tar"),
 	}
 }
 

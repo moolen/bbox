@@ -296,7 +296,7 @@ func (s *Sandbox) Close() error {
 			s.registered = false
 		}
 		if s.root != "" {
-			if err := os.RemoveAll(s.root); err != nil {
+			if err := removeAllForceWritable(s.root); err != nil {
 				closeErr = errors.Join(closeErr, fmt.Errorf("remove staged root %q: %w", s.root, err))
 			}
 		}
@@ -305,6 +305,27 @@ func (s *Sandbox) Close() error {
 	})
 
 	return s.closeErr
+}
+
+func removeAllForceWritable(root string) error {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+
+		perm := info.Mode().Perm()
+		if info.IsDir() {
+			perm |= 0o700
+		} else {
+			perm |= 0o600
+		}
+		_ = os.Chmod(path, perm)
+		return nil
+	})
+	return os.RemoveAll(root)
 }
 
 func validateSandboxOptions(opts SandboxOptions, mitmEnabled bool) error {

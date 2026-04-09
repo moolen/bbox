@@ -148,6 +148,10 @@ func runDockerBuildFixture(t *testing.T, ctx context.Context, newManager proxyMa
 			Source:   spec.fixture.repoDir,
 			Target:   spec.fixture.sandboxRepoDir,
 			ReadOnly: false,
+		}, {
+			Type:   bbox.MountTypeBind,
+			Source: spec.fixture.outputDir,
+			Target: "/var/lib/buildkitd-out",
 		}},
 		DockerBuild: bbox.DockerBuildOptions{
 			Enabled: true,

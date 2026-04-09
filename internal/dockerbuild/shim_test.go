@@ -23,6 +23,9 @@ func TestPlanForArgsTranslatesBasicBuild(t *testing.T) {
 	if plan.OutputPath == "" {
 		t.Fatal("expected output path to be set")
 	}
+	if plan.OutputPath != "/var/lib/buildkitd-out/bbox-docker-build.oci.tar" {
+		t.Fatalf("unexpected output path: got %q", plan.OutputPath)
+	}
 	wantContext := filepath.Clean(cwd)
 	if !containsArgSequence(plan.BuildctlArgs, []string{"--local", "context=" + wantContext}) {
 		t.Fatalf("expected context path in %v", plan.BuildctlArgs)
@@ -35,6 +38,16 @@ func TestPlanForArgsTranslatesBasicBuild(t *testing.T) {
 	}
 	if !containsArgSequence(plan.BuildctlArgs, []string{"--opt", "build-arg:HTTP_PROXY=http://127.0.0.1:31111"}) {
 		t.Fatalf("expected HTTP_PROXY build arg in %v", plan.BuildctlArgs)
+	}
+	foundOutput := false
+	for i := 0; i < len(plan.BuildctlArgs)-1; i++ {
+		if plan.BuildctlArgs[i] == "--output" && strings.Contains(plan.BuildctlArgs[i+1], "dest=/var/lib/buildkitd-out/bbox-docker-build.oci.tar") {
+			foundOutput = true
+			break
+		}
+	}
+	if !foundOutput {
+		t.Fatalf("expected buildctl output path in %v", plan.BuildctlArgs)
 	}
 }
 

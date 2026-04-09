@@ -444,6 +444,27 @@ func TestBuildBwrapArgsIncludesDockerSocketMount(t *testing.T) {
 	}
 }
 
+func TestBuildBwrapArgsIncludesAdditionalTmpfsTargets(t *testing.T) {
+	args := buildBwrapArgs(bwrapArgsConfig{
+		root:            "/tmp/root",
+		helperPath:      "/app/bbox",
+		proxyListenAddr: "127.0.0.1:31111",
+		unshareUser:     true,
+		bridgeFD:        3,
+		trafficMode:     TrafficModeProxy,
+		tmpfsTargets: []string{
+			"/var/lib/buildkitd",
+			"/var/lib/buildkitd-out",
+		},
+	})
+	if !containsArgSequence(args, []string{"--tmpfs", "/var/lib/buildkitd"}) {
+		t.Fatalf("expected args to include buildkit tmpfs mount, got %v", args)
+	}
+	if !containsArgSequence(args, []string{"--tmpfs", "/var/lib/buildkitd-out"}) {
+		t.Fatalf("expected args to include build output tmpfs mount, got %v", args)
+	}
+}
+
 func TestBuildBwrapArgsMountsStagedBinDirectories(t *testing.T) {
 	root := t.TempDir()
 	for _, dir := range []string{"bin", "sbin"} {

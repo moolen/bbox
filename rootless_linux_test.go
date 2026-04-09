@@ -107,6 +107,103 @@ func TestBuildLinuxSandboxCommandMountsCgroupForDockerBuild(t *testing.T) {
 	}
 }
 
+func TestBuildLinuxSandboxCommandMountsBuilderStateDirsAsTmpfs(t *testing.T) {
+	dir := t.TempDir()
+	bboxPath := writeExecutableFixture(t, dir, "bbox")
+	buildkitdPath := writeExecutableFixture(t, dir, "buildkitd")
+	buildctlPath := writeExecutableFixture(t, dir, "buildctl")
+	runcPath := writeExecutableFixture(t, dir, "runc")
+	podmanPath := writeExecutableFixture(t, dir, "podman")
+	newuidmapPath := writeExecutableFixture(t, dir, "newuidmap")
+	newgidmapPath := writeExecutableFixture(t, dir, "newgidmap")
+	bridgeFile, err := os.CreateTemp(t.TempDir(), "bridge-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bridgeFile.Close() })
+
+	cmd, err := buildLinuxSandboxCommand(bwrapCommandConfig{
+		runtimeBinary:   bboxPath,
+		root:            t.TempDir(),
+		proxyListenAddr: "127.0.0.1:31111",
+		opts: SandboxOptions{
+			DockerBuild: DockerBuildOptions{
+				Enabled:       true,
+				BuildkitdPath: buildkitdPath,
+				BuildctlPath:  buildctlPath,
+				RuncPath:      runcPath,
+				PodmanPath:    podmanPath,
+				NewuidmapPath: newuidmapPath,
+				NewgidmapPath: newgidmapPath,
+			},
+		},
+		mode:       TrafficModeProxy,
+		bridgeFD:   3,
+		seccompFD:  -1,
+		extraFiles: []*os.File{bridgeFile},
+	})
+	if err != nil {
+		t.Fatalf("buildLinuxSandboxCommand failed: %v", err)
+	}
+
+	if !containsRootlessArgSequence(cmd.Args, []string{"--tmpfs", "/var/lib/buildkitd"}) {
+		t.Fatalf("expected tmpfs buildkit root mount in %v", cmd.Args)
+	}
+	if !containsRootlessArgSequence(cmd.Args, []string{"--tmpfs", "/var/lib/buildkitd-out"}) {
+		t.Fatalf("expected tmpfs build output mount in %v", cmd.Args)
+	}
+}
+
+func TestBuildLinuxSandboxCommandSkipsBuilderTmpfsWhenUserMountExists(t *testing.T) {
+	dir := t.TempDir()
+	bboxPath := writeExecutableFixture(t, dir, "bbox")
+	buildkitdPath := writeExecutableFixture(t, dir, "buildkitd")
+	buildctlPath := writeExecutableFixture(t, dir, "buildctl")
+	runcPath := writeExecutableFixture(t, dir, "runc")
+	podmanPath := writeExecutableFixture(t, dir, "podman")
+	newuidmapPath := writeExecutableFixture(t, dir, "newuidmap")
+	newgidmapPath := writeExecutableFixture(t, dir, "newgidmap")
+	bridgeFile, err := os.CreateTemp(t.TempDir(), "bridge-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bridgeFile.Close() })
+
+	outputDir := t.TempDir()
+	cmd, err := buildLinuxSandboxCommand(bwrapCommandConfig{
+		runtimeBinary:   bboxPath,
+		root:            t.TempDir(),
+		proxyListenAddr: "127.0.0.1:31111",
+		opts: SandboxOptions{
+			Mounts: []Mount{{
+				Type:   MountTypeBind,
+				Source: outputDir,
+				Target: "/var/lib/buildkitd-out",
+			}},
+			DockerBuild: DockerBuildOptions{
+				Enabled:       true,
+				BuildkitdPath: buildkitdPath,
+				BuildctlPath:  buildctlPath,
+				RuncPath:      runcPath,
+				PodmanPath:    podmanPath,
+				NewuidmapPath: newuidmapPath,
+				NewgidmapPath: newgidmapPath,
+			},
+		},
+		mode:       TrafficModeProxy,
+		bridgeFD:   3,
+		seccompFD:  -1,
+		extraFiles: []*os.File{bridgeFile},
+	})
+	if err != nil {
+		t.Fatalf("buildLinuxSandboxCommand failed: %v", err)
+	}
+
+	if containsRootlessArgSequence(cmd.Args, []string{"--tmpfs", "/var/lib/buildkitd-out"}) {
+		t.Fatalf("did not expect tmpfs build output mount when user provided a mount: %v", cmd.Args)
+	}
+}
+
 func TestBuildLinuxSandboxCommandUsesPlainBwrapWithoutDockerBuild(t *testing.T) {
 	bridgeFile, err := os.CreateTemp(t.TempDir(), "bridge-*")
 	if err != nil {

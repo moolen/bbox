@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/moolen/bbox/internal/dockerbuildpaths"
 )
 
 type Plan struct {
@@ -87,7 +89,7 @@ func PlanForArgs(args []string, env []string, cwd string) (Plan, error) {
 	if len(tags) > 0 {
 		outputName = tags[0]
 	}
-	outputPath := filepath.Join(cwd, ".bbox-docker-build.oci.tar")
+	outputPath := dockerbuildpaths.DefaultBuildOutputPath
 	inputs, err := prepareBuildInputs(contextAbs, dockerfileAbs, env)
 	if err != nil {
 		return Plan{}, err

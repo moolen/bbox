@@ -180,7 +180,7 @@ Current scope and trade-offs:
 - proxy handling: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase variants are forwarded into the builder runtime and into the build as build args when present
 - fail-closed behavior: in `traffic_mode: proxy`, clients that bypass proxy env and open direct sockets do not get transparent fallback; the build step fails
 - TLS trust handling: bbox rewrites Dockerfiles on the fly for `RUN` stages so common Linux and Node/npm trust paths point at the sandbox MITM CA without editing the upstream Dockerfile
-- output: OCI archive written to `.bbox-docker-build.oci.tar` in the sandbox working directory
+- output: OCI archive written to `/var/lib/buildkitd-out/bbox-docker-build.oci.tar`
 
 Required host prerequisites:
 
@@ -209,7 +209,7 @@ Run it like this:
 bbox -- docker build .
 ```
 
-The build runs through the staged rootless BuildKit toolchain inside `bbox`, and the OCI archive is written to `.bbox-docker-build.oci.tar` in the spectre checkout.
+The build runs through the staged rootless BuildKit toolchain inside `bbox`. By default, BuildKit state lives under `/var/lib/buildkitd` and the OCI archive is written to `/var/lib/buildkitd-out/bbox-docker-build.oci.tar`.
 
 If the required builder tools are not on `PATH`, set `docker_build.buildkitd_path`, `docker_build.buildctl_path`, `docker_build.runc_path`, `docker_build.podman_path`, `docker_build.newuidmap_path`, and `docker_build.newgidmap_path` in `bbox.yaml`.
 

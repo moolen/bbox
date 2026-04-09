@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/moolen/bbox/internal/dockerbuildpaths"
 	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
@@ -39,7 +40,9 @@ func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
 	}
 
 	mounts := append([]Mount(nil), cfg.opts.Mounts...)
+	var tmpfsTargets []string
 	if tooling != nil {
+		tmpfsTargets = defaultBuilderTmpfsTargets(mounts)
 		mounts = appendBuilderMounts(mounts)
 	}
 	runtimeMounts, err := prepareRuntimeMounts(cfg.root, mounts)
@@ -56,6 +59,7 @@ func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
 		capSysAdmin:           tooling != nil,
 		maxRequestBodyBytes:   cfg.maxRequestBody,
 		mounts:                runtimeMounts,
+		tmpfsTargets:          tmpfsTargets,
 		dockerSocketMount:     cfg.dockerSocketMount,
 		trafficMode:           cfg.mode,
 		payloadSeccompBPFPath: cfg.payloadSeccompPath,
@@ -79,15 +83,42 @@ func appendBuilderMounts(mounts []Mount) []Mount {
 	if err != nil || !info.IsDir() {
 		return mounts
 	}
-	for _, mount := range mounts {
-		if targetsOverlap(mount.Target, defaultBuilderCgroupPath) {
-			return mounts
-		}
-	}
-	return append(mounts, Mount{
+	return appendBuilderMountIfAbsent(mounts, Mount{
 		Type:     MountTypeBind,
 		Source:   defaultBuilderCgroupPath,
 		Target:   defaultBuilderCgroupPath,
 		ReadOnly: true,
 	})
+}
+
+func appendBuilderMountIfAbsent(mounts []Mount, want Mount) []Mount {
+	for _, mount := range mounts {
+		if targetsOverlap(mount.Target, want.Target) {
+			return mounts
+		}
+	}
+	return append(mounts, want)
+}
+
+func defaultBuilderTmpfsTargets(mounts []Mount) []string {
+	targets := make([]string, 0, 2)
+	for _, target := range []string{
+		dockerbuildpaths.DefaultBuildkitRootPath,
+		dockerbuildpaths.DefaultBuildOutputDir,
+	} {
+		if builderTargetMounted(mounts, target) {
+			continue
+		}
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func builderTargetMounted(mounts []Mount, target string) bool {
+	for _, mount := range mounts {
+		if targetsOverlap(mount.Target, target) {
+			return true
+		}
+	}
+	return false
 }

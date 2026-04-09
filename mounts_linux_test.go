@@ -125,10 +125,35 @@ func TestStagedRootCleanupRemovesMaterializedEmptyDirs(t *testing.T) {
 		t.Fatalf("expected materialized empty dir to exist before cleanup: %v", err)
 	}
 
-	if err := os.RemoveAll(root); err != nil {
+	if err := removeAllForceWritable(root); err != nil {
 		t.Fatalf("remove staged root: %v", err)
 	}
 	if _, err := os.Stat(materialized); !os.IsNotExist(err) {
 		t.Fatalf("expected materialized empty dir to be removed with staged root cleanup, got err=%v", err)
+	}
+}
+
+func TestRemoveAllForceWritableRemovesReadOnlyTree(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "readonly", "deep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(nested, "file.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(nested, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(nested), 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeAllForceWritable(root); err != nil {
+		t.Fatalf("removeAllForceWritable() error = %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("expected %q to be removed, got err=%v", root, err)
 	}
 }

@@ -96,6 +96,7 @@ type bwrapArgsConfig struct {
 	capSysAdmin           bool
 	maxRequestBodyBytes   int64
 	mounts                []Mount
+	tmpfsTargets          []string
 	dockerSocketMount     *dockerSocketMount
 	trafficMode           TrafficMode
 	payloadSeccompBPFPath string
@@ -147,6 +148,9 @@ func buildBwrapArgs(cfg bwrapArgsConfig) []string {
 	}
 	if cfg.dockerSocketMount != nil {
 		args = append(args, "--bind", cfg.dockerSocketMount.HostPath, filepath.Clean(cfg.dockerSocketMount.SandboxPath))
+	}
+	for _, target := range cfg.tmpfsTargets {
+		args = append(args, "--tmpfs", filepath.Clean(target))
 	}
 
 	args = append(args,
