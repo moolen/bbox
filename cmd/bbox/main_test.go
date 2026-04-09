@@ -844,8 +844,12 @@ clear_env: true
 	if len(cfg.sandbox.Binaries) != 0 {
 		t.Fatalf("expected host docker binary to be skipped, got %v", cfg.sandbox.Binaries)
 	}
+	gotPath := envValue(cfg.sandbox.Env, "PATH")
+	if !strings.HasPrefix(gotPath, "/app/bin:") {
+		t.Fatalf("expected docker build PATH %q to be prefixed with /app/bin", gotPath)
+	}
 	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: "/usr", Target: "/usr", ReadOnly: true}) {
-		t.Fatalf("did not expect /usr PATH mount to hide staged docker shim, got %v", cfg.sandbox.Mounts)
+		t.Fatalf("did not expect /usr PATH mount when the effective PATH omits /usr, got %v", cfg.sandbox.Mounts)
 	}
 }
 
@@ -1039,6 +1043,31 @@ func TestBuildConfigCollapsesUsrPathEntriesIntoSingleUsrMount(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected exactly one /usr PATH mount, got %d in %v", count, cfg.sandbox.Mounts)
+	}
+}
+
+func TestBuildConfigDockerBuildPrependsBuilderShimDirAndKeepsUsrMount(t *testing.T) {
+	cwd := t.TempDir()
+	cfg, err := buildRunConfig(effectiveCLIConfig{
+		ClearEnv: true,
+		Env:      []string{"PATH=/usr/local/bin:/usr/bin"},
+		DockerBuild: cliDockerBuildConfig{
+			Enabled: true,
+		},
+	}, []string{"bash"}, cwd, []string{"PATH=/does/not/matter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotPath := envValue(cfg.sandbox.Env, "PATH")
+	wantPrefix := "/app/bin" + string(os.PathListSeparator)
+	if !strings.HasPrefix(gotPath, wantPrefix) {
+		t.Fatalf("expected sandbox PATH %q to start with %q", gotPath, wantPrefix)
+	}
+
+	wantUsrMount := bbox.Mount{Type: bbox.MountTypeBind, Source: "/usr", Target: "/usr", ReadOnly: true}
+	if !containsMount(cfg.sandbox.Mounts, wantUsrMount) {
+		t.Fatalf("expected /usr PATH mount in %v", cfg.sandbox.Mounts)
 	}
 }
 

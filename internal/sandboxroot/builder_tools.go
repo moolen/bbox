@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	DefaultSandboxDockerShimPath = "/usr/bin/docker"
-	DefaultSandboxBuildkitdPath  = "/usr/bin/buildkitd"
-	DefaultSandboxBuildctlPath   = "/usr/bin/buildctl"
-	DefaultSandboxRuncPath       = "/usr/bin/runc"
+	DefaultSandboxBinDir         = "/app/bin"
+	DefaultSandboxDockerShimPath = DefaultSandboxBinDir + "/docker"
+	DefaultSandboxBuildkitdPath  = DefaultSandboxBinDir + "/buildkitd"
+	DefaultSandboxBuildctlPath   = DefaultSandboxBinDir + "/buildctl"
+	DefaultSandboxRuncPath       = DefaultSandboxBinDir + "/runc"
 )
 
 type DockerBuildOptions struct {
@@ -92,6 +93,24 @@ func ResolveDockerBuildSupport(opts DockerBuildOptions) (*BuilderTooling, error)
 		NewuidmapPath: newuidmapPath,
 		NewgidmapPath: newgidmapPath,
 	}, nil
+}
+
+func PrependPATHDir(pathValue string, dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return pathValue
+	}
+
+	parts := strings.Split(pathValue, string(os.PathListSeparator))
+	filtered := make([]string, 0, len(parts)+1)
+	filtered = append(filtered, dir)
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" || part == dir {
+			continue
+		}
+		filtered = append(filtered, part)
+	}
+	return strings.Join(filtered, string(os.PathListSeparator))
 }
 
 func ValidateSubordinateIDMappings() error {

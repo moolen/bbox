@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
 // Sandbox is a long-lived bubblewrap helper plus its staged filesystem root and
@@ -111,7 +113,11 @@ func (m *ProxyManager) NewSandbox(ctx context.Context, opts SandboxOptions) (_ *
 		proxyAddr = setup.runtime.ProxyAddr()
 		sandbox.proxyAddr = proxyAddr
 	}
-	sandbox.baseEnv = runEnvForTrafficMode(mode, proxyAddr, opts.Env)
+	baseEnv := append([]string(nil), opts.Env...)
+	if opts.DockerBuild.Enabled {
+		baseEnv = withDockerBuildPATHEnvEntries(baseEnv)
+	}
+	sandbox.baseEnv = runEnvForTrafficMode(mode, proxyAddr, baseEnv)
 
 	if dockerSocketOpts.Enabled {
 		sandbox.dockerSocketProxy = proxy
@@ -448,6 +454,15 @@ func splitEnv(entry string) (key string, value string, ok bool) {
 }
 
 const defaultRunEnvPath = "/usr/bin"
+
+func withDockerBuildPATHEnvEntries(env []string) []string {
+	pathValue := defaultRunEnvPath
+	if value, ok := lastEnvValue(env, "PATH"); ok {
+		pathValue = value
+	}
+	pathValue = sandboxroot.PrependPATHDir(pathValue, sandboxroot.DefaultSandboxBinDir)
+	return append(env, "PATH="+pathValue)
+}
 
 func lastEnvValue(env []string, key string) (string, bool) {
 	for i := len(env) - 1; i >= 0; i-- {

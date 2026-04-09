@@ -275,8 +275,16 @@ func TestStageRootCopiesResolvedFilesAndBuilderShim(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(result.Root) })
 
-	if _, err := os.Stat(filepath.Join(result.Root, "usr/bin/docker")); err != nil {
-		t.Fatalf("missing docker shim: %v", err)
+	for _, sandboxPath := range []string{
+		"/app/bin/docker",
+		"/app/bin/buildkitd",
+		"/app/bin/buildctl",
+		"/app/bin/runc",
+	} {
+		staged := filepath.Join(result.Root, strings.TrimPrefix(sandboxPath, string(filepath.Separator)))
+		if _, err := os.Stat(staged); err != nil {
+			t.Fatalf("missing staged docker build tool %q: %v", sandboxPath, err)
+		}
 	}
 }
 
@@ -392,19 +400,22 @@ func TestBuildBwrapArgsPassesTransparentTrafficModeFlags(t *testing.T) {
 	}
 }
 
-func TestBuildBwrapArgsPassesBridgeAndSeccompFDs(t *testing.T) {
+func TestBuildBwrapArgsPassesBridgeAndPayloadSeccompFlagsInProxyMode(t *testing.T) {
 	args := buildBwrapArgs(bwrapArgsConfig{
-		root:            "/tmp/root",
-		helperPath:      "/app/bbox",
-		proxyListenAddr: "127.0.0.1:31111",
-		unshareUser:     true,
-		bridgeFD:        3,
-		seccompFD:       4,
-		trafficMode:     TrafficModeProxy,
+		root:                  "/tmp/root",
+		helperPath:            "/app/bbox",
+		proxyListenAddr:       "127.0.0.1:31111",
+		unshareUser:           true,
+		bridgeFD:              3,
+		trafficMode:           TrafficModeProxy,
+		payloadSeccompBPFPath: "/app/bbox-payload-seccomp.bpf",
 	})
 
-	if !containsArgSequence(args, []string{"--seccomp", "4"}) {
-		t.Fatalf("expected args to include --seccomp 4, got %v", args)
+	if containsArgSequence(args, []string{"--seccomp", "4"}) {
+		t.Fatalf("expected proxy helper launch to avoid bwrap-level seccomp, got %v", args)
+	}
+	if !containsArgSequence(args, []string{"--payload-seccomp-bpf", "/app/bbox-payload-seccomp.bpf"}) {
+		t.Fatalf("expected args to include payload seccomp bpf path, got %v", args)
 	}
 	if !containsArgSequence(args, []string{"--bridge-fd", "3"}) {
 		t.Fatalf("expected args to include --bridge-fd 3, got %v", args)

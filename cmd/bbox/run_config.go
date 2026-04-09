@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/moolen/bbox"
+	"github.com/moolen/bbox/internal/sandboxroot"
 )
 
 type runConfig struct {
@@ -67,6 +68,7 @@ func buildRunConfig(effective effectiveCLIConfig, payload []string, cwd string, 
 	if err != nil {
 		return runConfig{}, err
 	}
+	envEntries = withDockerBuildPATHEnv(envEntries, effective.DockerBuild.Enabled)
 	if cliPlatform != "darwin" {
 		pathMounts, err := pathAvailabilityMounts(envEntries, absCWD, mounts, effective.DockerBuild.Enabled)
 		if err != nil {
@@ -148,6 +150,19 @@ func buildSandboxEnv(effective effectiveCLIConfig, environ []string) ([]string, 
 		envEntries = append(envEntries, entry)
 	}
 	return envEntries, nil
+}
+
+func withDockerBuildPATHEnv(envEntries []string, dockerBuildEnabled bool) []string {
+	if !dockerBuildEnabled {
+		return envEntries
+	}
+
+	pathValue := "/usr/bin"
+	if value, ok := lastEnvValue(envEntries, "PATH"); ok {
+		pathValue = value
+	}
+	pathValue = sandboxroot.PrependPATHDir(pathValue, sandboxroot.DefaultSandboxBinDir)
+	return append(envEntries, "PATH="+pathValue)
 }
 
 func resolveRequestedBinaries(requested []string, envEntries []string, cwd string, dockerBuild bbox.DockerBuildOptions) ([]string, error) {
@@ -263,9 +278,6 @@ func pathAvailabilityMounts(envEntries []string, cwd string, existing []bbox.Mou
 		mount, ok, err := pathMountForDir(dir)
 		if err != nil {
 			return nil, err
-		}
-		if dockerBuildEnabled && mount.Target == "/usr" {
-			continue
 		}
 		if !ok || mountOverlapsAny(mount, append(existing, mounts...)) {
 			continue
