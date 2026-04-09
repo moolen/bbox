@@ -468,7 +468,9 @@ var baselineSeccompRuleSpecs = func() []seccompRuleSpec {
 		denyOptionalSyscall("process_vm_writev"),
 		denyOptionalSyscall("kcmp"),
 		denyOptionalSyscall("pidfd_getfd"),
-		denyOptionalSyscall("clone3"),
+		// Return ENOSYS so libc and other runtimes can fall back to clone(2),
+		// where we can still block namespace creation by flag.
+		denyOptionalSyscallErrno("clone3", int(unix.ENOSYS)),
 	}
 
 	namespaceCloneFlags := []uint64{
@@ -521,4 +523,15 @@ func denyRequiredSyscall(name string) seccompRuleSpec {
 
 func denyOptionalSyscall(name string) seccompRuleSpec {
 	return seccompRuleSpec{rule: DenySyscall(name), optional: true}
+}
+
+func denyOptionalSyscallErrno(name string, errno int) seccompRuleSpec {
+	return seccompRuleSpec{
+		rule: SeccompRule{
+			Syscall: name,
+			Action:  SeccompActionErrno,
+			Errno:   errno,
+		},
+		optional: true,
+	}
 }

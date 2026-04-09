@@ -38,8 +38,12 @@ func TestSeccompProfileRulesIncludeExpectedBuiltins(t *testing.T) {
 	if !containsSeccompConditionalRule(baseline, "clone") {
 		t.Fatal("expected baseline profile to guard namespace clone flags")
 	}
-	if !containsSeccompRule(baseline, "clone3") {
+	clone3Rule, ok := findSeccompRule(baseline, "clone3")
+	if !ok {
 		t.Fatal("expected baseline profile to deny clone3")
+	}
+	if clone3Rule.rule.Errno != int(unix.ENOSYS) {
+		t.Fatalf("expected baseline clone3 rule to return ENOSYS for fallback, got %d", clone3Rule.rule.Errno)
 	}
 	if containsSeccompRule(baseline, "seccomp") {
 		t.Fatal("expected baseline profile to keep runtime seccomp available")
@@ -147,4 +151,13 @@ func containsSeccompConditionalRule(rules []seccompRuleSpec, syscall string) boo
 		}
 	}
 	return false
+}
+
+func findSeccompRule(rules []seccompRuleSpec, syscall string) (seccompRuleSpec, bool) {
+	for _, rule := range rules {
+		if rule.rule.Syscall == syscall {
+			return rule, true
+		}
+	}
+	return seccompRuleSpec{}, false
 }
