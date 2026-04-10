@@ -60,8 +60,28 @@ jobs:
       - name: Install opencode
         run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
 
+      - name: Resolve native opencode binary
+        run: |
+          global_node_root="$(npm root -g)"
+          for candidate in \
+            "$global_node_root/opencode-linux-x64/bin/opencode" \
+            "$global_node_root/opencode-linux-x64-baseline/bin/opencode" \
+            "$global_node_root/opencode-linux-x64-musl/bin/opencode" \
+            "$global_node_root/opencode-linux-x64-baseline-musl/bin/opencode" \
+            "$global_node_root/opencode-ai/node_modules/opencode-linux-x64/bin/opencode" \
+            "$global_node_root/opencode-ai/node_modules/opencode-linux-x64-baseline/bin/opencode" \
+            "$global_node_root/opencode-ai/node_modules/opencode-linux-x64-musl/bin/opencode" \
+            "$global_node_root/opencode-ai/node_modules/opencode-linux-x64-baseline-musl/bin/opencode"; do
+            if [ -x "$candidate" ]; then
+              echo "OPENCODE_BIN=$candidate" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo "failed to resolve native opencode binary under $global_node_root" >&2
+          exit 1
+
       - name: Run opencode smoke suite
-        run: sudo -n env PATH="$PATH" ./scripts/opencode-smoke.sh
+        run: sudo -n env PATH="$PATH" OPENCODE_BIN="$OPENCODE_BIN" ./scripts/opencode-smoke.sh
 
       - name: Run local release smoke build
         run: make release-snapshot
