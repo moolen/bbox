@@ -13,6 +13,7 @@ RUN_TIMEOUT=${OPENCODE_SMOKE_TIMEOUT:-90s}
 MODEL_ID=${OPENCODE_SMOKE_MODEL:-openai/gpt-4.1-mini}
 SANDBOX_ROOT=${OPENCODE_SMOKE_SANDBOX_ROOT:-/workspace}
 SANDBOX_PATH_VALUE=${OPENCODE_SMOKE_PATH_VALUE:-${PATH:-/usr/bin:/bin}}
+COPY_ENV_MARKER_KEY=${OPENCODE_SMOKE_COPY_ENV_MARKER_KEY:-OPENCODE_SMOKE_MARKER}
 
 case_filter=${OPENCODE_SMOKE_CASES:-}
 total_cases=0
@@ -168,11 +169,10 @@ newgidmap=$builder_tools_dir/newgidmap
     echo "    read_only: false"
     echo "env:"
     echo "  - HOME=$sandbox_home"
+    echo "  - PATH=$SANDBOX_PATH_VALUE"
     if [ "$env_mode" = "copy" ]; then
       echo "copy_env:"
-      echo "  - PATH"
-    else
-      echo "  - PATH=$SANDBOX_PATH_VALUE"
+      echo "  - $COPY_ENV_MARKER_KEY"
     fi
     if [ "$docker_build_enabled" = "true" ]; then
       echo "docker_build:"
@@ -188,7 +188,7 @@ newgidmap=$builder_tools_dir/newgidmap
   status=0
   (
     cd "$repo_root"
-    PATH="$SANDBOX_PATH_VALUE" "$timeout_bin" "$RUN_TIMEOUT" "$bbox_bin" --config "$bbox_config" -- "$OPENCODE_BIN" run --pure --print-logs --model "$MODEL_ID" "$PROMPT"
+    "$timeout_bin" "$RUN_TIMEOUT" env "$COPY_ENV_MARKER_KEY=$case_name" "$bbox_bin" --config "$bbox_config" -- "$OPENCODE_BIN" run --pure --print-logs --model "$MODEL_ID" "$PROMPT"
   ) >"$output_file" 2>&1 || status=$?
 
   output=$(cat "$output_file")

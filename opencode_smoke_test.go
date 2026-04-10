@@ -86,13 +86,44 @@ func TestOpenCodeSmokeUsesSandboxPathOverride(t *testing.T) {
 
 	output, err := runOpenCodeSmokeScriptWithEnv(t, "auth-failure", map[string]string{
 		"OPENCODE_SMOKE_PATH_VALUE": sandboxPathDir,
-		"EXPECT_BBOX_PATH":          sandboxPathDir,
+		"EXPECT_CONFIG_PATH":        sandboxPathDir,
 	})
 	if err != nil {
 		t.Fatalf("run opencode smoke script with sandbox path override: %v\n%s", err, output)
 	}
 	if !strings.Contains(output, "PASS expected auth failure: transparent-enforce-explicit-env") {
 		t.Fatalf("expected explicit PATH case to succeed, got:\n%s", output)
+	}
+}
+
+func TestOpenCodeSmokeCopyEnvCasesUseRepoOwnedSandboxPath(t *testing.T) {
+	t.Parallel()
+
+	sandboxPathDir := filepath.Join(t.TempDir(), "sandbox-path")
+	if err := os.MkdirAll(sandboxPathDir, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox path dir: %v", err)
+	}
+	for _, tool := range []string{"env", "sh"} {
+		target, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", tool, err)
+		}
+		if err := os.Symlink(target, filepath.Join(sandboxPathDir, tool)); err != nil {
+			t.Fatalf("symlink %s: %v", tool, err)
+		}
+	}
+
+	output, err := runOpenCodeSmokeScriptWithEnv(t, "auth-failure", map[string]string{
+		"OPENCODE_SMOKE_PATH_VALUE":      sandboxPathDir,
+		"EXPECT_BBOX_PATH_MODE":          "host-not-sandbox",
+		"EXPECT_COPY_ENV_MARKER":         "OPENCODE_SMOKE_MARKER",
+		"EXPECT_COPY_ENV_CASES_EXPLICIT": "proxy-enforce-copy-env,proxy-audit-copy-env,proxy-enforce-docker-build",
+	})
+	if err != nil {
+		t.Fatalf("run opencode smoke script with copy_env repo-owned sandbox path expectations: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "PASS expected auth failure: proxy-enforce-copy-env") {
+		t.Fatalf("expected copy_env PATH override case to succeed, got:\n%s", output)
 	}
 }
 
@@ -223,6 +254,10 @@ if [ -n "${EXPECT_BBOX_PATH:-}" ] && [ "${PATH:-}" != "$EXPECT_BBOX_PATH" ]; the
   echo "unexpected bbox PATH: ${PATH:-}" >&2
   exit 118
 fi
+if [ "${EXPECT_BBOX_PATH_MODE:-}" = "host-not-sandbox" ] && [ "${PATH:-}" = "${OPENCODE_SMOKE_PATH_VALUE:-}" ]; then
+  echo "unexpected bbox PATH matches sandbox PATH override: ${PATH:-}" >&2
+  exit 119
+fi
 
 printf 'FAKE_BBOX %s\n' "$case_name"
 
@@ -231,17 +266,31 @@ case "$case_name" in
     grep -q 'traffic_mode: proxy' "$config_path" || { echo "missing proxy mode" >&2; exit 93; }
     grep -q 'policy_mode: enforce' "$config_path" || { echo "missing enforce mode" >&2; exit 100; }
     grep -q 'copy_env:' "$config_path" || { echo "missing copy_env block" >&2; exit 101; }
+    if [ -n "${EXPECT_COPY_ENV_MARKER:-}" ]; then
+      grep -q "  - $EXPECT_COPY_ENV_MARKER" "$config_path" || { echo "missing expected copy_env marker" >&2; exit 120; }
+      ! grep -q '  - PATH$' "$config_path" || { echo "unexpected PATH copy_env entry" >&2; exit 121; }
+    fi
+    if [ -n "${EXPECT_COPY_ENV_CASES_EXPLICIT:-}" ]; then
+      grep -q "PATH=$OPENCODE_SMOKE_PATH_VALUE" "$config_path" || { echo "missing explicit PATH override for copy_env case" >&2; exit 122; }
+    fi
     ;;
   transparent-enforce-explicit-env)
     grep -q 'traffic_mode: transparent' "$config_path" || { echo "missing transparent mode" >&2; exit 102; }
     grep -q 'env:' "$config_path" || { echo "missing env block" >&2; exit 103; }
     grep -q 'HOME=' "$config_path" || { echo "missing HOME env" >&2; exit 104; }
-    if [ -n "${EXPECT_BBOX_PATH:-}" ]; then
-      grep -q "PATH=$EXPECT_BBOX_PATH" "$config_path" || { echo "missing expected explicit PATH override" >&2; exit 117; }
+    if [ -n "${EXPECT_CONFIG_PATH:-}" ]; then
+      grep -q "PATH=$EXPECT_CONFIG_PATH" "$config_path" || { echo "missing expected explicit PATH override" >&2; exit 117; }
     fi
     ;;
   proxy-audit-copy-env)
     grep -q 'policy_mode: audit' "$config_path" || { echo "missing audit mode" >&2; exit 105; }
+    if [ -n "${EXPECT_COPY_ENV_MARKER:-}" ]; then
+      grep -q "  - $EXPECT_COPY_ENV_MARKER" "$config_path" || { echo "missing expected copy_env marker" >&2; exit 123; }
+      ! grep -q '  - PATH$' "$config_path" || { echo "unexpected PATH copy_env entry" >&2; exit 124; }
+    fi
+    if [ -n "${EXPECT_COPY_ENV_CASES_EXPLICIT:-}" ]; then
+      grep -q "PATH=$OPENCODE_SMOKE_PATH_VALUE" "$config_path" || { echo "missing explicit PATH override for copy_env case" >&2; exit 125; }
+    fi
     ;;
   proxy-enforce-docker-build|transparent-audit-docker-build)
     grep -q 'docker_build:' "$config_path" || { echo "missing docker_build block" >&2; exit 106; }
@@ -251,6 +300,13 @@ case "$case_name" in
     grep -q 'podman_path:' "$config_path" || { echo "missing podman_path" >&2; exit 110; }
     grep -q 'newuidmap_path:' "$config_path" || { echo "missing newuidmap_path" >&2; exit 111; }
     grep -q 'newgidmap_path:' "$config_path" || { echo "missing newgidmap_path" >&2; exit 112; }
+    if [ "$case_name" = "proxy-enforce-docker-build" ] && [ -n "${EXPECT_COPY_ENV_MARKER:-}" ]; then
+      grep -q "  - $EXPECT_COPY_ENV_MARKER" "$config_path" || { echo "missing expected copy_env marker" >&2; exit 126; }
+      ! grep -q '  - PATH$' "$config_path" || { echo "unexpected PATH copy_env entry" >&2; exit 127; }
+      if [ -n "${EXPECT_COPY_ENV_CASES_EXPLICIT:-}" ]; then
+        grep -q "PATH=$OPENCODE_SMOKE_PATH_VALUE" "$config_path" || { echo "missing explicit PATH override for docker copy_env case" >&2; exit 128; }
+      fi
+    fi
     ;;
 esac
 
