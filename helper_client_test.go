@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -259,6 +260,71 @@ func TestHelperClientInteractiveRunStreamsOutput(t *testing.T) {
 	}
 	if got := stderr.String(); got != "hello stderr\n" {
 		t.Fatalf("unexpected streamed stderr: got %q", got)
+	}
+
+	if err := <-serverErrCh; err != nil {
+		t.Fatalf("server side failed: %v", err)
+	}
+}
+
+func TestHelperClientRunDoesNotForceInteractiveForBufferedStdin(t *testing.T) {
+	stdin, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer stdin.Close()
+
+	clientSide, serverSide := net.Pipe()
+	client := newHelperClient(nil, "sandbox-a", clientSide)
+	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = serverSide.Close() })
+
+	go func() {
+		client.loopDone <- client.readLoop()
+	}()
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		dec := gob.NewDecoder(serverSide)
+		enc := gob.NewEncoder(serverSide)
+
+		var req helperproto.Envelope
+		if err := dec.Decode(&req); err != nil {
+			serverErrCh <- err
+			return
+		}
+		if req.ExecRequest == nil {
+			serverErrCh <- errors.New("expected exec request")
+			return
+		}
+		var serverErr error
+		if req.ExecRequest.Interactive {
+			serverErr = errors.New("expected buffered stdin request to stay non-interactive")
+		}
+
+		if err := enc.Encode(&helperproto.Envelope{
+			ID: req.ID,
+			ExecResult: &helperproto.ExecResult{
+				ExitCode: 0,
+			},
+		}); err != nil {
+			serverErrCh <- err
+			return
+		}
+		serverErrCh <- serverErr
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := client.Run(ctx, []string{"/bin/echo", "hello"}, RunOptions{
+		Stdin: stdin,
+	})
+	if err != nil {
+		t.Fatalf("expected buffered stdin run to succeed, got %v", err)
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("unexpected run result: %#v", result)
 	}
 
 	if err := <-serverErrCh; err != nil {

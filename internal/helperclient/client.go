@@ -146,7 +146,7 @@ func (c *Client) Run(ctx context.Context, argv []string, opts RunOptions) (*RunR
 		return nil, err
 	}
 
-	interactive := opts.Interactive || opts.Stdin != nil || opts.Stdout != nil || opts.Stderr != nil || opts.Terminal || opts.Resize != nil
+	interactive := opts.Interactive || opts.Terminal || opts.Resize != nil
 
 	var initialSize *helperproto.TerminalSize
 	if opts.TerminalSize.Rows > 0 || opts.TerminalSize.Cols > 0 {
