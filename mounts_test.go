@@ -135,6 +135,24 @@ func TestValidateMountsRejectsReservedTargetsForEmptyDir(t *testing.T) {
 	}
 }
 
+func TestValidateMountsAcceptsReadOnlySelfBindForEtcAlternatives(t *testing.T) {
+	if _, err := os.Stat("/etc/alternatives"); err != nil {
+		t.Skip("/etc/alternatives not available")
+	}
+
+	err := validateMounts([]Mount{
+		{
+			Type:     MountTypeBind,
+			Source:   "/etc/alternatives",
+			Target:   "/etc/alternatives",
+			ReadOnly: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected /etc/alternatives read-only self-bind to be valid: %v", err)
+	}
+}
+
 func TestBuildBwrapArgsUsesBindFlagsForTypedBindMounts(t *testing.T) {
 	readOnlySource := filepath.Join(t.TempDir(), "ro")
 	mustMkdirAll(t, readOnlySource)

@@ -55,7 +55,7 @@ func validateMounts(mounts []Mount) error {
 
 		target := filepath.Clean(m.Target)
 		for _, reservedTarget := range reservedSandboxTargets {
-			if reservedTarget == "/usr" && m.Type == MountTypeBind && m.ReadOnly && filepath.Clean(m.Source) == target && target == "/usr" {
+			if isAllowedReservedBindTarget(m, target, reservedTarget) {
 				continue
 			}
 			if targetsOverlap(target, reservedTarget) {
@@ -73,6 +73,20 @@ func validateMounts(mounts []Mount) error {
 		seen[target] = m
 	}
 	return nil
+}
+
+func isAllowedReservedBindTarget(m Mount, cleanTarget string, reservedTarget string) bool {
+	if m.Type != MountTypeBind || !m.ReadOnly || filepath.Clean(m.Source) != cleanTarget {
+		return false
+	}
+	switch reservedTarget {
+	case "/usr":
+		return cleanTarget == "/usr"
+	case "/etc":
+		return cleanTarget == "/etc/alternatives"
+	default:
+		return false
+	}
 }
 
 func targetsOverlap(a, b string) bool {

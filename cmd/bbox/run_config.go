@@ -302,66 +302,133 @@ func pathAvailabilityMounts(envEntries []string, cwd string, existing []bbox.Mou
 	}
 	mounts := make([]bbox.Mount, 0)
 	for _, dir := range splitPATH(pathValue, cwd) {
-		mount, ok, err := pathMountForDir(dir)
+		dirMounts, err := pathMountsForDir(dir)
 		if err != nil {
 			return nil, err
 		}
-		if !ok || mountOverlapsAny(mount, append(existing, mounts...)) {
-			continue
-		}
-		if !containsMountSpec(mounts, mount) {
-			mounts = append(mounts, mount)
+		for _, mount := range dirMounts {
+			if mountOverlapsAny(mount, append(existing, mounts...)) {
+				continue
+			}
+			if !containsMountSpec(mounts, mount) {
+				mounts = append(mounts, mount)
+			}
 		}
 	}
 	return mounts, nil
 }
 
-func pathMountForDir(dir string) (bbox.Mount, bool, error) {
+func pathMountsForDir(dir string) ([]bbox.Mount, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return bbox.Mount{}, false, nil
+			return nil, nil
 		}
-		return bbox.Mount{}, false, fmt.Errorf("stat PATH dir %q: %w", dir, err)
+		return nil, fmt.Errorf("stat PATH dir %q: %w", dir, err)
 	}
 	if !info.IsDir() {
-		return bbox.Mount{}, false, nil
+		return nil, nil
 	}
 
-	target := dir
 	resolved := dir
 	if eval, err := filepath.EvalSymlinks(dir); err == nil && strings.TrimSpace(eval) != "" {
 		resolved = filepath.Clean(eval)
 	}
-	target, ok := pathMountTarget(resolved)
-	if !ok {
-		return bbox.Mount{}, false, nil
-	}
+	targets := []string{pathMountTarget(dir, resolved)}
 
-	info, err = os.Stat(target)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return bbox.Mount{}, false, fmt.Errorf("stat PATH mount root %q: %w", target, err)
+		return nil, fmt.Errorf("read PATH dir %q: %w", dir, err)
 	}
-	if !info.IsDir() {
-		return bbox.Mount{}, false, nil
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		chainDirs, err := symlinkChainParentDirs(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, chainDir := range chainDirs {
+			resolvedChainDir := chainDir
+			if eval, err := filepath.EvalSymlinks(chainDir); err == nil && strings.TrimSpace(eval) != "" {
+				resolvedChainDir = filepath.Clean(eval)
+			}
+			targets = append(targets, pathMountTarget(chainDir, resolvedChainDir))
+		}
 	}
 
-	return bbox.Mount{
-		Type:     bbox.MountTypeBind,
-		Source:   target,
-		Target:   target,
-		ReadOnly: true,
-	}, true, nil
+	slices.Sort(targets)
+
+	mounts := make([]bbox.Mount, 0, len(targets))
+	for _, target := range slices.Compact(targets) {
+		info, err := os.Stat(target)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("stat PATH mount root %q: %w", target, err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		mounts = append(mounts, bbox.Mount{
+			Type:     bbox.MountTypeBind,
+			Source:   target,
+			Target:   target,
+			ReadOnly: true,
+		})
+	}
+	return mounts, nil
 }
 
-func pathMountTarget(resolved string) (string, bool) {
-	if resolved == "/usr" || strings.HasPrefix(resolved, "/usr/") {
-		return "/usr", true
+func pathMountTarget(dir string, resolved string) string {
+	switch {
+	case resolved == "/usr" || strings.HasPrefix(resolved, "/usr/"):
+		return "/usr"
+	case filepath.Base(resolved) == "bin" || filepath.Base(resolved) == "sbin":
+		parent := filepath.Dir(resolved)
+		if parent != string(filepath.Separator) && parent != "." {
+			return parent
+		}
 	}
-	if slices.Contains([]string{"/bin", "/sbin", "/usr/bin", "/usr/sbin"}, resolved) {
-		return "/usr", true
+	if strings.TrimSpace(resolved) != "" {
+		return resolved
 	}
-	return "", false
+	return dir
+}
+
+func symlinkChainParentDirs(path string) ([]string, error) {
+	seen := map[string]struct{}{}
+	dirs := make([]string, 0, 4)
+	current := filepath.Clean(path)
+	for {
+		if _, ok := seen[current]; ok {
+			return nil, fmt.Errorf("resolve symlink chain %q: cycle detected", path)
+		}
+		seen[current] = struct{}{}
+
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return dirs, nil
+			}
+			return nil, fmt.Errorf("lstat PATH entry %q: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			dirs = append(dirs, filepath.Dir(current))
+			return dirs, nil
+		}
+
+		target, err := os.Readlink(current)
+		if err != nil {
+			return nil, fmt.Errorf("readlink PATH entry %q: %w", current, err)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(current), target)
+		}
+		current = filepath.Clean(target)
+		dirs = append(dirs, filepath.Dir(current))
+	}
 }
 
 func mountOverlapsAny(want bbox.Mount, existing []bbox.Mount) bool {

@@ -987,7 +987,7 @@ func TestBuildConfigCopyEnvFailsWhenKeyIsMissing(t *testing.T) {
 	}
 }
 
-func TestBuildConfigDoesNotMountNonSystemPATHRoots(t *testing.T) {
+func TestBuildConfigMountsNonSystemPATHRootsReadOnly(t *testing.T) {
 	cwd := t.TempDir()
 	pathRoot := filepath.Join(t.TempDir(), "toolchain")
 	pathDir := filepath.Join(pathRoot, "bin")
@@ -1014,14 +1014,15 @@ func TestBuildConfigDoesNotMountNonSystemPATHRoots(t *testing.T) {
 	if got := envValue(cfg.sandbox.Env, "PATH"); got != pathDir {
 		t.Fatalf("expected sandbox PATH %q, got %q", pathDir, got)
 	}
-	if containsMount(cfg.sandbox.Mounts, bbox.Mount{
+	wantMount := bbox.Mount{
 		Type:     bbox.MountTypeBind,
 		Source:   pathRoot,
 		Target:   pathRoot,
 		ReadOnly: true,
 		Mode:     0,
-	}) {
-		t.Fatalf("did not expect non-system PATH root mount for %q in %v", pathRoot, cfg.sandbox.Mounts)
+	}
+	if !containsMount(cfg.sandbox.Mounts, wantMount) {
+		t.Fatalf("expected non-system PATH root mount %v in %v", wantMount, cfg.sandbox.Mounts)
 	}
 }
 
@@ -1059,11 +1060,97 @@ func TestBuildConfigEnvPATHOverrideWinsOverCopiedPATHForBinaryResolution(t *test
 	if got := envValue(cfg.sandbox.Env, "PATH"); got != overrideDir {
 		t.Fatalf("expected sandbox PATH %q, got %q", overrideDir, got)
 	}
-	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: overrideRoot, Target: overrideRoot, ReadOnly: true}) {
-		t.Fatalf("did not expect non-system PATH root mount in %v", cfg.sandbox.Mounts)
+	if !containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: overrideRoot, Target: overrideRoot, ReadOnly: true}) {
+		t.Fatalf("expected override PATH root mount in %v", cfg.sandbox.Mounts)
 	}
 	if containsMount(cfg.sandbox.Mounts, bbox.Mount{Type: bbox.MountTypeBind, Source: inheritedRoot, Target: inheritedRoot, ReadOnly: true}) {
 		t.Fatalf("did not expect copied PATH root mount in %v", cfg.sandbox.Mounts)
+	}
+}
+
+func TestBuildConfigMountsResolvedPATHRootForSymlinkedEntry(t *testing.T) {
+	cwd := t.TempDir()
+	pathRoot := filepath.Join(t.TempDir(), "toolchain")
+	pathDir := filepath.Join(pathRoot, "bin")
+	if err := os.MkdirAll(pathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	linkRoot := t.TempDir()
+	linkDir := filepath.Join(linkRoot, "linked-bin")
+	if err := os.Symlink(pathDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := buildConfig(cliOptions{
+		env: []string{"PATH=" + linkDir},
+	}, []string{"/bin/true"}, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantMount := bbox.Mount{
+		Type:     bbox.MountTypeBind,
+		Source:   pathRoot,
+		Target:   pathRoot,
+		ReadOnly: true,
+	}
+	if !containsMount(cfg.sandbox.Mounts, wantMount) {
+		t.Fatalf("expected symlink-resolved PATH root mount %v in %v", wantMount, cfg.sandbox.Mounts)
+	}
+	if containsMount(cfg.sandbox.Mounts, bbox.Mount{
+		Type:     bbox.MountTypeBind,
+		Source:   linkRoot,
+		Target:   linkRoot,
+		ReadOnly: true,
+	}) {
+		t.Fatalf("did not expect unresolved symlink PATH root mount in %v", cfg.sandbox.Mounts)
+	}
+}
+
+func TestBuildConfigMountsEtcAlternativesWhenPATHEntrySymlinkTargetsIt(t *testing.T) {
+	entries, err := os.ReadDir("/etc/alternatives")
+	if err != nil {
+		t.Skip("/etc/alternatives not available")
+	}
+
+	var alternativeTarget string
+	for _, entry := range entries {
+		targetPath := filepath.Join("/etc/alternatives", entry.Name())
+		info, err := os.Lstat(targetPath)
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		alternativeTarget = targetPath
+		break
+	}
+	if alternativeTarget == "" {
+		t.Skip("no symlink entries in /etc/alternatives")
+	}
+
+	cwd := t.TempDir()
+	pathRoot := filepath.Join(t.TempDir(), "toolchain")
+	pathDir := filepath.Join(pathRoot, "bin")
+	if err := os.MkdirAll(pathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(alternativeTarget, filepath.Join(pathDir, "tool-a")); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := buildConfig(cliOptions{
+		env: []string{"PATH=" + pathDir},
+	}, []string{"/bin/true"}, cwd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := bbox.Mount{Type: bbox.MountTypeBind, Source: "/etc/alternatives", Target: "/etc/alternatives", ReadOnly: true}
+	if !containsMount(cfg.sandbox.Mounts, want) {
+		t.Fatalf("expected /etc/alternatives PATH-derived mount in %v", cfg.sandbox.Mounts)
 	}
 }
 

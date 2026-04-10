@@ -53,7 +53,7 @@ The sandbox starts with an empty environment by default. Use `copy_env: ["KEY"]`
 
 The CLI resolves the payload command and any explicit `bin` entries against the effective sandbox `PATH`. If you want command-name lookup through the host `PATH`, copy it explicitly with `copy_env: ["PATH"]` or `--copy-env PATH`. You can also set `PATH` directly with `env: ["PATH=..."]` or `--env PATH=...`.
 
-On Linux, bbox adds a read-only `/usr` mount when the effective `PATH` references system locations under `/usr` (including `/bin` and `/sbin` when they resolve there). Arbitrary host PATH directories are not auto-mounted.
+On Linux, bbox follows the effective `PATH`, resolves symlinked PATH entries, and adds read-only bind mounts for the directories needed to make those PATH locations available inside the sandbox. `.../bin` and `.../sbin` entries mount their parent directories read-only, `/usr`-resolved entries collapse into a single read-only `/usr` mount, and symlink chains can add extra directories such as `/etc/alternatives` on Debian/Ubuntu.
 
 On macOS, bbox does not mirror the Linux PATH mount behavior. Instead, the resolved payload command plus any explicit `bin` entries are used to build the generated Seatbelt executable allowlist.
 
