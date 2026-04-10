@@ -90,7 +90,7 @@ jobs:
           exit 1
 
       - name: Run opencode smoke suite
-        run: env PATH="$PATH" OPENCODE_BIN="$OPENCODE_BIN" ./scripts/opencode-smoke.sh
+        run: env PATH="/usr/bin:/bin" OPENCODE_BIN="$OPENCODE_BIN" ./scripts/opencode-smoke.sh
 
       - name: Run local release smoke build
         run: make release-snapshot
