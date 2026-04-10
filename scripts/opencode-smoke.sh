@@ -14,6 +14,9 @@ MODEL_ID=${OPENCODE_SMOKE_MODEL:-openai/gpt-4.1-mini}
 SANDBOX_ROOT=${OPENCODE_SMOKE_SANDBOX_ROOT:-/workspace}
 
 case_filter=${OPENCODE_SMOKE_CASES:-}
+total_cases=0
+passed_cases=0
+skipped_cases=0
 
 resolve_repo_path() {
   path="$1"
@@ -88,6 +91,7 @@ run_case() {
       * ) return 0 ;;
     esac
   fi
+  total_cases=$((total_cases + 1))
 
   echo "RUN $case_name"
 
@@ -192,6 +196,7 @@ newgidmap=$builder_tools_dir/newgidmap
   case "$output_lc" in
     *"loopback: failed rtm_newaddr: operation not permitted"*)
       echo "SKIP loopback setup unsupported: $case_name"
+      skipped_cases=$((skipped_cases + 1))
       rm -rf "$case_dir"
       return 0
       ;;
@@ -207,6 +212,7 @@ newgidmap=$builder_tools_dir/newgidmap
   case "$output_lc" in
     *auth*|*credential*|*"api key"*|*login*|*provider*|*missing*)
       echo "PASS expected auth failure: $case_name"
+      passed_cases=$((passed_cases + 1))
       ;;
     *)
       if [ "$status" -eq 0 ]; then
@@ -228,3 +234,13 @@ run_case "transparent-enforce-explicit-env" "transparent" "enforce" "explicit" "
 run_case "proxy-audit-copy-env" "proxy" "audit" "copy" "false"
 run_case "proxy-enforce-docker-build" "proxy" "enforce" "copy" "true"
 run_case "transparent-audit-docker-build" "transparent" "audit" "explicit" "true"
+
+if [ "$total_cases" -eq 0 ]; then
+  echo "FAIL no opencode smoke cases selected" >&2
+  exit 1
+fi
+
+if [ "$passed_cases" -eq 0 ]; then
+  echo "FAIL all selected opencode smoke cases skipped" >&2
+  exit 1
+fi

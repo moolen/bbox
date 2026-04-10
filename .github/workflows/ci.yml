@@ -39,12 +39,13 @@ jobs:
 
       - name: Configure subordinate ID mappings
         run: |
-          username="$(id -un)"
-          for path in /etc/subuid /etc/subgid; do
-            sudo touch "$path"
-            if ! grep -q "^${username}:" "$path"; then
-              echo "${username}:100000:65536" | sudo tee -a "$path"
-            fi
+          for username in "$(id -un)" root; do
+            for path in /etc/subuid /etc/subgid; do
+              sudo touch "$path"
+              if ! grep -q "^${username}:" "$path"; then
+                echo "${username}:100000:65536" | sudo tee -a "$path"
+              fi
+            done
           done
 
       - name: Run Go tests
@@ -60,7 +61,7 @@ jobs:
         run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
 
       - name: Run opencode smoke suite
-        run: ./scripts/opencode-smoke.sh
+        run: sudo -n env PATH="$PATH" ./scripts/opencode-smoke.sh
 
       - name: Run local release smoke build
         run: make release-snapshot

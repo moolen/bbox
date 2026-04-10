@@ -46,9 +46,24 @@ func TestOpenCodeSmokeBuilderCaseWritesDockerBuildConfig(t *testing.T) {
 func TestOpenCodeSmokeSkipsLoopbackSetupUnsupported(t *testing.T) {
 	t.Parallel()
 
-	output := runOpenCodeSmokeScript(t, "loopback-unsupported")
+	output := runOpenCodeSmokeScript(t, "mixed-loopback-unsupported")
 	if !strings.Contains(output, "SKIP loopback setup unsupported: proxy-enforce-copy-env") {
 		t.Fatalf("expected loopback setup skip in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "PASS expected auth failure: transparent-enforce-explicit-env") {
+		t.Fatalf("expected non-skipped cases to continue after loopback skip, got:\n%s", output)
+	}
+}
+
+func TestOpenCodeSmokeFailsWhenAllCasesSkip(t *testing.T) {
+	t.Parallel()
+
+	output, err := runOpenCodeSmokeScriptExpectError(t, "loopback-unsupported")
+	if err == nil {
+		t.Fatalf("expected all-skipped smoke run to fail, output:\n%s", output)
+	}
+	if !strings.Contains(output, "FAIL all selected opencode smoke cases skipped") {
+		t.Fatalf("expected all-skipped failure in output, got:\n%s", output)
 	}
 }
 
@@ -216,6 +231,14 @@ case "$mode" in
   loopback-unsupported)
     echo "start sandbox helper: read bbox-bridge-parent: connection reset by peer: bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" >&2
     exit 1
+    ;;
+  mixed-loopback-unsupported)
+    if [ "$case_name" = "proxy-enforce-copy-env" ]; then
+      echo "start sandbox helper: read bbox-bridge-parent: connection reset by peer: bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" >&2
+      exit 1
+    fi
+    echo "OpenAI API key is missing. Pass it using the 'apiKey' parameter or the OPENAI_API_KEY environment variable." >&2
+    exit 0
     ;;
   *)
     echo "unexpected fake bbox mode: $mode" >&2
