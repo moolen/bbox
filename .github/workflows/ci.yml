@@ -91,7 +91,9 @@ jobs:
 
       - name: Prepare opencode smoke PATH
         run: |
-          smoke_path_dir="$(mktemp -d)"
+          smoke_path_dir="$GITHUB_WORKSPACE/.opencode-smoke-path"
+          rm -rf "$smoke_path_dir"
+          mkdir -p "$smoke_path_dir"
           ln -sf /usr/bin/env "$smoke_path_dir/env"
           ln -sf /usr/bin/sh "$smoke_path_dir/sh"
           echo "OPENCODE_SMOKE_PATH_VALUE=$smoke_path_dir" >> "$GITHUB_ENV"
