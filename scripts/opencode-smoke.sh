@@ -140,6 +140,20 @@ exit 0
 '
     write_executable "$builder_tools_dir/podman" '#!/bin/sh
 set -eu
+while [ "$#" -ge 1 ]; do
+  case "$1" in
+    --*)
+      shift
+      ;;
+    unshare)
+      break
+      ;;
+    *)
+      echo "unexpected podman invocation: $*" >&2
+      exit 64
+      ;;
+  esac
+done
 [ "$#" -ge 1 ] && [ "$1" = "unshare" ] || {
   echo "unexpected podman invocation: $*" >&2
   exit 64
