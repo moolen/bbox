@@ -73,7 +73,8 @@ jobs:
             "$global_node_root/opencode-ai/node_modules/opencode-linux-x64-musl/bin/opencode" \
             "$global_node_root/opencode-ai/node_modules/opencode-linux-x64-baseline-musl/bin/opencode"; do
             if [ -x "$candidate" ]; then
-              sudo ln -sf "$candidate" /usr/local/bin/opencode-bbox
+              resolved_candidate="$(readlink -f "$candidate")"
+              sudo install -m 0755 "$resolved_candidate" /usr/local/bin/opencode-bbox
               echo "OPENCODE_BIN=/usr/local/bin/opencode-bbox" >> "$GITHUB_ENV"
               exit 0
             fi
