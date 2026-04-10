@@ -67,10 +67,39 @@ func TestOpenCodeSmokeFailsWhenAllCasesSkip(t *testing.T) {
 	}
 }
 
+func TestOpenCodeSmokeUsesSandboxPathOverride(t *testing.T) {
+	t.Parallel()
+
+	sandboxPathDir := filepath.Join(t.TempDir(), "sandbox-path")
+	if err := os.MkdirAll(sandboxPathDir, 0o755); err != nil {
+		t.Fatalf("mkdir sandbox path dir: %v", err)
+	}
+	for _, tool := range []string{"awk", "grep"} {
+		target, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatalf("resolve %s: %v", tool, err)
+		}
+		if err := os.Symlink(target, filepath.Join(sandboxPathDir, tool)); err != nil {
+			t.Fatalf("symlink %s: %v", tool, err)
+		}
+	}
+
+	output, err := runOpenCodeSmokeScriptWithEnv(t, "auth-failure", map[string]string{
+		"OPENCODE_SMOKE_PATH_VALUE": sandboxPathDir,
+		"EXPECT_BBOX_PATH":          sandboxPathDir,
+	})
+	if err != nil {
+		t.Fatalf("run opencode smoke script with sandbox path override: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "PASS expected auth failure: transparent-enforce-explicit-env") {
+		t.Fatalf("expected explicit PATH case to succeed, got:\n%s", output)
+	}
+}
+
 func runOpenCodeSmokeScript(t *testing.T, fakeBBoxMode string) string {
 	t.Helper()
 
-	output, err := runOpenCodeSmokeScriptExpectError(t, fakeBBoxMode)
+	output, err := runOpenCodeSmokeScriptWithEnv(t, fakeBBoxMode, nil)
 	if err != nil {
 		t.Fatalf("run opencode smoke script: %v\n%s", err, output)
 	}
@@ -78,6 +107,11 @@ func runOpenCodeSmokeScript(t *testing.T, fakeBBoxMode string) string {
 }
 
 func runOpenCodeSmokeScriptExpectError(t *testing.T, fakeBBoxMode string) (string, error) {
+	t.Helper()
+	return runOpenCodeSmokeScriptWithEnv(t, fakeBBoxMode, nil)
+}
+
+func runOpenCodeSmokeScriptWithEnv(t *testing.T, fakeBBoxMode string, extraEnv map[string]string) (string, error) {
 	t.Helper()
 
 	root := moduleRoot(t)
@@ -106,6 +140,9 @@ func runOpenCodeSmokeScriptExpectError(t *testing.T, fakeBBoxMode string) (strin
 		"OPENCODE_SMOKE_SKIP_SUBID_CHECK=1",
 		"PATH="+fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
+	for key, value := range extraEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
@@ -182,6 +219,11 @@ grep -q '"env": \["OPENAI_API_KEY"\]' "$opencode_config" || { echo "missing open
 grep -q '"model": "openai/gpt-4.1-mini"' "$opencode_config" || { echo "missing smoke model config" >&2; exit 98; }
 ! grep -q 'OPENAI_API_KEY=' "$config_path" || { echo "unexpected explicit OPENAI_API_KEY env" >&2; exit 99; }
 
+if [ -n "${EXPECT_BBOX_PATH:-}" ] && [ "${PATH:-}" != "$EXPECT_BBOX_PATH" ]; then
+  echo "unexpected bbox PATH: ${PATH:-}" >&2
+  exit 118
+fi
+
 printf 'FAKE_BBOX %s\n' "$case_name"
 
 case "$case_name" in
@@ -194,6 +236,9 @@ case "$case_name" in
     grep -q 'traffic_mode: transparent' "$config_path" || { echo "missing transparent mode" >&2; exit 102; }
     grep -q 'env:' "$config_path" || { echo "missing env block" >&2; exit 103; }
     grep -q 'HOME=' "$config_path" || { echo "missing HOME env" >&2; exit 104; }
+    if [ -n "${EXPECT_BBOX_PATH:-}" ]; then
+      grep -q "PATH=$EXPECT_BBOX_PATH" "$config_path" || { echo "missing expected explicit PATH override" >&2; exit 117; }
+    fi
     ;;
   proxy-audit-copy-env)
     grep -q 'policy_mode: audit' "$config_path" || { echo "missing audit mode" >&2; exit 105; }

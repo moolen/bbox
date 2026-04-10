@@ -89,8 +89,15 @@ jobs:
           echo "failed to resolve native opencode binary under $global_node_root" >&2
           exit 1
 
+      - name: Prepare opencode smoke PATH
+        run: |
+          smoke_path_dir="$(mktemp -d)"
+          ln -sf /usr/bin/env "$smoke_path_dir/env"
+          ln -sf /usr/bin/sh "$smoke_path_dir/sh"
+          echo "OPENCODE_SMOKE_PATH_VALUE=$smoke_path_dir" >> "$GITHUB_ENV"
+
       - name: Run opencode smoke suite
-        run: env PATH="/usr/bin:/bin" OPENCODE_BIN="$OPENCODE_BIN" ./scripts/opencode-smoke.sh
+        run: env OPENCODE_BIN="$OPENCODE_BIN" OPENCODE_SMOKE_PATH_VALUE="$OPENCODE_SMOKE_PATH_VALUE" ./scripts/opencode-smoke.sh
 
       - name: Run local release smoke build
         run: make release-snapshot
