@@ -43,6 +43,15 @@ func TestOpenCodeSmokeBuilderCaseWritesDockerBuildConfig(t *testing.T) {
 	}
 }
 
+func TestOpenCodeSmokeSkipsLoopbackSetupUnsupported(t *testing.T) {
+	t.Parallel()
+
+	output := runOpenCodeSmokeScript(t, "loopback-unsupported")
+	if !strings.Contains(output, "SKIP loopback setup unsupported: proxy-enforce-copy-env") {
+		t.Fatalf("expected loopback setup skip in output, got:\n%s", output)
+	}
+}
+
 func runOpenCodeSmokeScript(t *testing.T, fakeBBoxMode string) string {
 	t.Helper()
 
@@ -203,6 +212,10 @@ case "$mode" in
   success)
     echo "OK"
     exit 0
+    ;;
+  loopback-unsupported)
+    echo "start sandbox helper: read bbox-bridge-parent: connection reset by peer: bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" >&2
+    exit 1
     ;;
   *)
     echo "unexpected fake bbox mode: $mode" >&2

@@ -189,6 +189,14 @@ newgidmap=$builder_tools_dir/newgidmap
   output=$(cat "$output_file")
   output_lc=$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')
 
+  case "$output_lc" in
+    *"loopback: failed rtm_newaddr: operation not permitted"*)
+      echo "SKIP loopback setup unsupported: $case_name"
+      rm -rf "$case_dir"
+      return 0
+      ;;
+  esac
+
   if [ "$status" -eq 124 ]; then
     echo "FAIL timeout: $case_name" >&2
     printf '%s\n' "$output" >&2
