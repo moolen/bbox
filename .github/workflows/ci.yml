@@ -13,6 +13,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      OPENCODE_VERSION: 1.4.3
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -25,16 +27,40 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Set up Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.4
+        with:
+          node-version: 22
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap build-essential gperf pkg-config libseccomp-dev gcc-aarch64-linux-gnu
+
+      - name: Configure subordinate ID mappings
+        run: |
+          username="$(id -un)"
+          for path in /etc/subuid /etc/subgid; do
+            sudo touch "$path"
+            if ! grep -q "^${username}:" "$path"; then
+              echo "${username}:100000:65536" | sudo tee -a "$path"
+            fi
+          done
 
       - name: Run Go tests
         run: |
           go list ./... \
             | grep -v '^github.com/moolen/bbox/integration$' \
             | xargs go test -count=1 -timeout=20m
+
+      - name: Build bbox
+        run: go build -o ./bin/bbox ./cmd/bbox
+
+      - name: Install opencode
+        run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
+
+      - name: Run opencode smoke suite
+        run: ./scripts/opencode-smoke.sh
 
       - name: Run local release smoke build
         run: make release-snapshot

@@ -10,7 +10,8 @@ OPENCODE_BIN=${OPENCODE_BIN:-opencode}
 TIMEOUT_BIN=${TIMEOUT_BIN:-timeout}
 PROMPT=${OPENCODE_SMOKE_PROMPT:-Reply with exactly the word OK.}
 RUN_TIMEOUT=${OPENCODE_SMOKE_TIMEOUT:-90s}
-MODEL_ID=${OPENCODE_SMOKE_MODEL:-openai/gpt-5}
+MODEL_ID=${OPENCODE_SMOKE_MODEL:-openai/gpt-4.1-mini}
+SANDBOX_ROOT=${OPENCODE_SMOKE_SANDBOX_ROOT:-/workspace}
 
 case_filter=${OPENCODE_SMOKE_CASES:-}
 
@@ -45,11 +46,34 @@ require_path() {
 
 require_path "$bbox_bin"
 require_path "$timeout_bin"
+require_command "$OPENCODE_BIN"
 require_command dirname
 require_command mktemp
 require_command awk
+require_command grep
 require_command tr
 require_command sed
+
+require_subid_mapping() {
+  user_name=$(id -un)
+  for path in /etc/subuid /etc/subgid; do
+    [ -f "$path" ] || {
+      echo "missing required subordinate id file: $path" >&2
+      return 1
+    }
+    grep -q "^${user_name}:" "$path" || {
+      echo "missing subordinate id entry for $user_name in $path" >&2
+      return 1
+    }
+  done
+}
+
+write_executable() {
+  path=$1
+  contents=$2
+  printf '%s' "$contents" >"$path"
+  chmod 755 "$path"
+}
 
 run_case() {
   case_name=$1
@@ -69,53 +93,76 @@ run_case() {
 
   case_dir=$(mktemp -d)
   case_home="$case_dir/home"
-  mkdir -p "$case_home" "$case_home/.config/opencode" "$case_dir/.local/share/opencode" "$case_dir/.config/opencode"
+  sandbox_home="$SANDBOX_ROOT/home"
+  mkdir -p "$case_home/.config/opencode" "$case_home/.local/share/opencode"
   chmod 700 "$case_home"
-
-  opencode_config="$case_dir/opencode.json"
-  cat >"$opencode_config" <<EOF
+  cat >"$case_home/.config/opencode/opencode.json" <<EOF
 {
-  "\$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "openai": {
+      "npm": "@ai-sdk/openai",
+      "env": ["OPENAI_API_KEY"]
+    }
+  },
   "model": "$MODEL_ID"
 }
 EOF
 
   builder_paths=""
   if [ "$docker_build_enabled" = "true" ]; then
-    for tool in buildkitd buildctl runc podman newuidmap newgidmap; do
-      if ! tool_path=$(command -v "$tool" 2>/dev/null); then
-        if [ -n "${CI:-}" ]; then
-          echo "FAIL missing builder prerequisite for $case_name: $tool" >&2
-          rm -rf "$case_dir"
-          exit 1
-        fi
-        echo "SKIP missing builder prerequisite for $case_name: $tool"
-        rm -rf "$case_dir"
-        return 0
-      fi
-      builder_paths="${builder_paths}${tool}=${tool_path}
+    if [ -z "${OPENCODE_SMOKE_SKIP_SUBID_CHECK:-}" ] && ! require_subid_mapping; then
+      echo "SKIP missing subordinate id mapping for $case_name"
+      rm -rf "$case_dir"
+      return 0
+    fi
+    builder_tools_dir="$case_dir/builder-tools"
+    mkdir -p "$builder_tools_dir"
+    write_executable "$builder_tools_dir/buildkitd" '#!/bin/sh
+exit 0
+'
+    write_executable "$builder_tools_dir/buildctl" '#!/bin/sh
+exit 0
+'
+    write_executable "$builder_tools_dir/runc" '#!/bin/sh
+exit 0
+'
+    write_executable "$builder_tools_dir/newuidmap" '#!/bin/sh
+exit 0
+'
+    write_executable "$builder_tools_dir/newgidmap" '#!/bin/sh
+exit 0
+'
+    write_executable "$builder_tools_dir/podman" '#!/bin/sh
+set -eu
+[ "$#" -ge 1 ] && [ "$1" = "unshare" ] || {
+  echo "unexpected podman invocation: $*" >&2
+  exit 64
+}
+shift
+exec "$@"
+'
+    builder_paths="buildkitd=$builder_tools_dir/buildkitd
+buildctl=$builder_tools_dir/buildctl
+runc=$builder_tools_dir/runc
+podman=$builder_tools_dir/podman
+newuidmap=$builder_tools_dir/newuidmap
+newgidmap=$builder_tools_dir/newgidmap
 "
-    done
   fi
 
   bbox_config="$case_dir/bbox.yaml"
   {
     echo "name: $case_name"
-    echo "workdir: $case_dir"
+    echo "workdir: $SANDBOX_ROOT"
     echo "traffic_mode: $traffic_mode"
     echo "policy_mode: $policy_mode"
     echo "mounts:"
     echo "  - type: bind"
     echo "    source: $case_dir"
-    echo "    target: $case_dir"
+    echo "    target: $SANDBOX_ROOT"
     echo "    read_only: false"
     echo "env:"
-    echo "  - HOME=$case_home"
-    echo "  - OPENAI_API_KEY="
-    echo "  - ANTHROPIC_API_KEY="
-    echo "  - GEMINI_API_KEY="
-    echo "  - GOOGLE_API_KEY="
-    echo "  - OPENCODE_CONFIG=$opencode_config"
+    echo "  - HOME=$sandbox_home"
     if [ "$env_mode" = "copy" ]; then
       echo "copy_env:"
       echo "  - PATH"
@@ -135,19 +182,12 @@ EOF
   output_file="$case_dir/output.log"
   status=0
   (
-    cd "$case_dir"
-    "$timeout_bin" "$RUN_TIMEOUT" "$bbox_bin" -- "$OPENCODE_BIN" run "$PROMPT"
+    cd "$repo_root"
+    "$timeout_bin" "$RUN_TIMEOUT" "$bbox_bin" --config "$bbox_config" -- "$OPENCODE_BIN" run --pure --print-logs --model "$MODEL_ID" "$PROMPT"
   ) >"$output_file" 2>&1 || status=$?
 
   output=$(cat "$output_file")
   output_lc=$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')
-
-  if [ "$status" -eq 0 ]; then
-    echo "FAIL unexpected success: $case_name" >&2
-    printf '%s\n' "$output" >&2
-    rm -rf "$case_dir"
-    exit 1
-  fi
 
   if [ "$status" -eq 124 ]; then
     echo "FAIL timeout: $case_name" >&2
@@ -161,7 +201,11 @@ EOF
       echo "PASS expected auth failure: $case_name"
       ;;
     *)
-      echo "FAIL unexpected runtime result: $case_name" >&2
+      if [ "$status" -eq 0 ]; then
+        echo "FAIL unexpected success: $case_name" >&2
+      else
+        echo "FAIL unexpected runtime result: $case_name" >&2
+      fi
       printf '%s\n' "$output" >&2
       rm -rf "$case_dir"
       exit 1

@@ -64,6 +64,7 @@ func runOpenCodeSmokeScriptExpectError(t *testing.T, fakeBBoxMode string) (strin
 
 	writeExecutableScript(t, filepath.Join(fakeBinDir, "bbox"), fakeBBoxScript)
 	writeExecutableScript(t, filepath.Join(fakeBinDir, "timeout"), fakeTimeoutScript)
+	writeExecutableScript(t, filepath.Join(fakeBinDir, "opencode"), noopToolScript("opencode"))
 	writeExecutableScript(t, filepath.Join(fakeBinDir, "buildkitd"), noopToolScript("buildkitd"))
 	writeExecutableScript(t, filepath.Join(fakeBinDir, "buildctl"), noopToolScript("buildctl"))
 	writeExecutableScript(t, filepath.Join(fakeBinDir, "runc"), noopToolScript("runc"))
@@ -78,6 +79,7 @@ func runOpenCodeSmokeScriptExpectError(t *testing.T, fakeBBoxMode string) (strin
 		"FAKE_BBOX_MODE="+fakeBBoxMode,
 		"BBOX_BIN="+filepath.Join(fakeBinDir, "bbox"),
 		"TIMEOUT_BIN="+filepath.Join(fakeBinDir, "timeout"),
+		"OPENCODE_SMOKE_SKIP_SUBID_CHECK=1",
 		"PATH="+fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	output, err := cmd.CombinedOutput()
@@ -118,9 +120,18 @@ exec "$@"
 const fakeBBoxScript = `#!/bin/sh
 set -eu
 mode="${FAKE_BBOX_MODE:-auth-failure}"
-config_path="$PWD/bbox.yaml"
+config_path=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--config" ]; then
+    config_path="$arg"
+    break
+  fi
+  prev="$arg"
+done
+[ -n "$config_path" ] || config_path="$PWD/bbox.yaml"
 [ -f "$config_path" ] || {
-  echo "missing bbox.yaml in $PWD" >&2
+  echo "missing bbox config at $config_path" >&2
   exit 91
 }
 
@@ -130,43 +141,64 @@ case_name="$(awk -F': ' '/^name:/ {print $2; exit}' "$config_path")"
   exit 92
 }
 
+case_root="$(awk -F': ' '/^[[:space:]]+source:/ {print $2; exit}' "$config_path")"
+[ -n "$case_root" ] || {
+  echo "missing case root source in $config_path" >&2
+  exit 93
+}
+
+opencode_config="$case_root/home/.config/opencode/opencode.json"
+[ -f "$opencode_config" ] || {
+  echo "missing opencode config at $opencode_config" >&2
+  exit 94
+}
+grep -q '"openai"' "$opencode_config" || { echo "missing openai provider config" >&2; exit 95; }
+grep -q '"npm": "@ai-sdk/openai"' "$opencode_config" || { echo "missing bundled openai provider package" >&2; exit 96; }
+grep -q '"env": \["OPENAI_API_KEY"\]' "$opencode_config" || { echo "missing openai env config" >&2; exit 97; }
+grep -q '"model": "openai/gpt-4.1-mini"' "$opencode_config" || { echo "missing smoke model config" >&2; exit 98; }
+! grep -q 'OPENAI_API_KEY=' "$config_path" || { echo "unexpected explicit OPENAI_API_KEY env" >&2; exit 99; }
+
 printf 'FAKE_BBOX %s\n' "$case_name"
 
 case "$case_name" in
   proxy-enforce-copy-env)
     grep -q 'traffic_mode: proxy' "$config_path" || { echo "missing proxy mode" >&2; exit 93; }
-    grep -q 'policy_mode: enforce' "$config_path" || { echo "missing enforce mode" >&2; exit 94; }
-    grep -q 'copy_env:' "$config_path" || { echo "missing copy_env block" >&2; exit 95; }
+    grep -q 'policy_mode: enforce' "$config_path" || { echo "missing enforce mode" >&2; exit 100; }
+    grep -q 'copy_env:' "$config_path" || { echo "missing copy_env block" >&2; exit 101; }
     ;;
   transparent-enforce-explicit-env)
-    grep -q 'traffic_mode: transparent' "$config_path" || { echo "missing transparent mode" >&2; exit 96; }
-    grep -q 'env:' "$config_path" || { echo "missing env block" >&2; exit 97; }
-    grep -q 'HOME=' "$config_path" || { echo "missing HOME env" >&2; exit 98; }
+    grep -q 'traffic_mode: transparent' "$config_path" || { echo "missing transparent mode" >&2; exit 102; }
+    grep -q 'env:' "$config_path" || { echo "missing env block" >&2; exit 103; }
+    grep -q 'HOME=' "$config_path" || { echo "missing HOME env" >&2; exit 104; }
     ;;
   proxy-audit-copy-env)
-    grep -q 'policy_mode: audit' "$config_path" || { echo "missing audit mode" >&2; exit 99; }
+    grep -q 'policy_mode: audit' "$config_path" || { echo "missing audit mode" >&2; exit 105; }
     ;;
   proxy-enforce-docker-build|transparent-audit-docker-build)
-    grep -q 'docker_build:' "$config_path" || { echo "missing docker_build block" >&2; exit 100; }
-    grep -q 'buildkitd_path:' "$config_path" || { echo "missing buildkitd_path" >&2; exit 101; }
-    grep -q 'buildctl_path:' "$config_path" || { echo "missing buildctl_path" >&2; exit 102; }
-    grep -q 'runc_path:' "$config_path" || { echo "missing runc_path" >&2; exit 103; }
-    grep -q 'podman_path:' "$config_path" || { echo "missing podman_path" >&2; exit 104; }
-    grep -q 'newuidmap_path:' "$config_path" || { echo "missing newuidmap_path" >&2; exit 105; }
-    grep -q 'newgidmap_path:' "$config_path" || { echo "missing newgidmap_path" >&2; exit 106; }
+    grep -q 'docker_build:' "$config_path" || { echo "missing docker_build block" >&2; exit 106; }
+    grep -q 'buildkitd_path:' "$config_path" || { echo "missing buildkitd_path" >&2; exit 107; }
+    grep -q 'buildctl_path:' "$config_path" || { echo "missing buildctl_path" >&2; exit 108; }
+    grep -q 'runc_path:' "$config_path" || { echo "missing runc_path" >&2; exit 109; }
+    grep -q 'podman_path:' "$config_path" || { echo "missing podman_path" >&2; exit 110; }
+    grep -q 'newuidmap_path:' "$config_path" || { echo "missing newuidmap_path" >&2; exit 111; }
+    grep -q 'newgidmap_path:' "$config_path" || { echo "missing newgidmap_path" >&2; exit 112; }
     ;;
 esac
 
 joined_args="$*"
+printf '%s' "$joined_args" | grep -q -- '--config ' || {
+  echo "expected bbox to receive --config, got: $joined_args" >&2
+  exit 107
+}
 printf '%s' "$joined_args" | grep -q -- '-- opencode run ' || {
   echo "expected bbox to receive opencode run argv, got: $joined_args" >&2
-  exit 107
+  exit 109
 }
 
 case "$mode" in
   auth-failure)
-    echo "missing credentials for provider openai" >&2
-    exit 1
+    echo "OpenAI API key is missing. Pass it using the 'apiKey' parameter or the OPENAI_API_KEY environment variable." >&2
+    exit 0
     ;;
   success)
     echo "OK"
@@ -174,7 +206,7 @@ case "$mode" in
     ;;
   *)
     echo "unexpected fake bbox mode: $mode" >&2
-    exit 108
+    exit 110
     ;;
 esac
 `
