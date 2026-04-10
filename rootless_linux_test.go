@@ -52,7 +52,10 @@ func TestBuildLinuxSandboxCommandUsesPodmanUnshareForDockerBuild(t *testing.T) {
 	if got := filepath.Clean(cmd.Path); got != filepath.Clean(podmanPath) {
 		t.Fatalf("unexpected command path: got %q want %q", got, podmanPath)
 	}
-	if len(cmd.Args) < 3 || cmd.Args[1] != "unshare" || cmd.Args[2] != "bwrap" {
+	if !containsRootlessArgSequence(cmd.Args, []string{"--cgroup-manager=cgroupfs"}) {
+		t.Fatalf("expected podman cgroupfs flag in %v", cmd.Args)
+	}
+	if len(cmd.Args) < 4 || cmd.Args[2] != "unshare" || cmd.Args[3] != "bwrap" {
 		t.Fatalf("expected podman unshare bwrap argv, got %v", cmd.Args)
 	}
 	if containsString(cmd.Args, "--unshare-user") {

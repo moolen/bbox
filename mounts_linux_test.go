@@ -108,6 +108,34 @@ func TestPrepareRuntimeMountsLeavesBindMountsUnchanged(t *testing.T) {
 	}
 }
 
+func TestPrepareRuntimeMountsCreatesReservedTargetMountpointUnderRoot(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(t.TempDir(), "source")
+	mustMkdirAll(t, source)
+
+	runtimeMounts, err := prepareRuntimeMounts(root, []Mount{{
+		Type:     MountTypeBind,
+		Source:   source,
+		Target:   "/etc/alternatives",
+		ReadOnly: true,
+	}})
+	if err != nil {
+		t.Fatalf("prepareRuntimeMounts returned error: %v", err)
+	}
+	if len(runtimeMounts) != 1 {
+		t.Fatalf("expected 1 runtime mount, got %d", len(runtimeMounts))
+	}
+
+	mountpoint := filepath.Join(root, "etc", "alternatives")
+	info, err := os.Stat(mountpoint)
+	if err != nil {
+		t.Fatalf("expected reserved target mountpoint at %q: %v", mountpoint, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected reserved target mountpoint %q to be a directory", mountpoint)
+	}
+}
+
 func TestStagedRootCleanupRemovesMaterializedEmptyDirs(t *testing.T) {
 	root := t.TempDir()
 

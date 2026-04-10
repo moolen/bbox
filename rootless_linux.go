@@ -69,7 +69,7 @@ func buildLinuxSandboxCommand(cfg bwrapCommandConfig) (*exec.Cmd, error) {
 
 	var cmd *exec.Cmd
 	if tooling != nil {
-		args := append([]string{"unshare", "bwrap"}, bwrapArgs...)
+		args := append([]string{"--cgroup-manager=cgroupfs", "unshare", "bwrap"}, bwrapArgs...)
 		cmd = exec.Command(tooling.PodmanPath, args...)
 	} else {
 		cmd = exec.Command("bwrap", bwrapArgs...)
