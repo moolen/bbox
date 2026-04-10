@@ -39,13 +39,21 @@ jobs:
 
       - name: Configure subordinate ID mappings
         run: |
-          username="$(id -un)"
-          for path in /etc/subuid /etc/subgid; do
-            sudo touch "$path"
-            if ! grep -q "^${username}:" "$path"; then
-              echo "${username}:100000:65536" | sudo tee -a "$path"
-            fi
+          for username in "$(id -un)" root; do
+            for path in /etc/subuid /etc/subgid; do
+              sudo touch "$path"
+              if ! grep -q "^${username}:" "$path"; then
+                echo "${username}:100000:65536" | sudo tee -a "$path"
+              fi
+            done
           done
+
+      - name: Allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Run Go tests
         run: |
@@ -59,8 +67,39 @@ jobs:
       - name: Install opencode
         run: npm install -g "opencode-ai@${OPENCODE_VERSION}"
 
+      - name: Resolve native opencode binary
+        run: |
+          global_node_root="$(npm root -g)"
+          for candidate in \
+            "$global_node_root/opencode-linux-x64/bin/opencode" \
+            "$global_node_root/opencode-linux-x64-baseline/bin/opencode" \
+            "$global_node_root/opencode-linux-x64-musl/bin/opencode" \
+            "$global_node_root/opencode-linux-x64-baseline-musl/bin/opencode" \
+            "$global_node_root/opencode-ai/node_modules/opencode-linux-x64/bin/opencode" \
+            "$global_node_root/opencode-ai/node_modules/opencode-linux-x64-baseline/bin/opencode" \
+            "$global_node_root/opencode-ai/node_modules/opencode-linux-x64-musl/bin/opencode" \
+            "$global_node_root/opencode-ai/node_modules/opencode-linux-x64-baseline-musl/bin/opencode"; do
+            if [ -x "$candidate" ]; then
+              resolved_candidate="$(readlink -f "$candidate")"
+              sudo install -m 0755 "$resolved_candidate" /usr/local/bin/opencode-bbox
+              echo "OPENCODE_BIN=/usr/local/bin/opencode-bbox" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+          echo "failed to resolve native opencode binary under $global_node_root" >&2
+          exit 1
+
+      - name: Prepare opencode smoke PATH
+        run: |
+          smoke_path_dir="$GITHUB_WORKSPACE/.opencode-smoke-path"
+          rm -rf "$smoke_path_dir"
+          mkdir -p "$smoke_path_dir"
+          ln -sf /usr/bin/env "$smoke_path_dir/env"
+          ln -sf /usr/bin/sh "$smoke_path_dir/sh"
+          echo "OPENCODE_SMOKE_PATH_VALUE=$smoke_path_dir" >> "$GITHUB_ENV"
+
       - name: Run opencode smoke suite
-        run: ./scripts/opencode-smoke.sh
+        run: env OPENCODE_BIN="$OPENCODE_BIN" OPENCODE_SMOKE_PATH_VALUE="$OPENCODE_SMOKE_PATH_VALUE" ./scripts/opencode-smoke.sh
 
       - name: Run local release smoke build
         run: make release-snapshot
